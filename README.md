@@ -2,9 +2,9 @@
 
 # 🧅 Onion · Standalone
 
-### Seu **time de produto, engenharia, testes e docs** — onde o método vive em specs versionadas, não na sua memória.
+### O que você decidiu ontem, a IA ainda sabe hoje.
 
-<sub>Porta pública do Onion para a sua base atual, **Claude Code**.</sub>
+<sub>Seu **time de produto, engenharia, testes e docs** — o método vive em specs versionadas, não na sua memória. Porta pública do Onion para a sua base atual, **Claude Code**.</sub>
 
 ![Método](https://img.shields.io/badge/Onion-Spec--as--Code_%2B_SDD-8A2BE2)
 ![Tipo](https://img.shields.io/badge/tipo-Porta_de_Framework-blue)
@@ -33,6 +33,11 @@ adota e instala — o recorte operacional pronto pra rodar, **sem** a meta-fábr
 > porta, não o core. Doutrina em [`public-door-vs-private-core`](docs/knowledge-base/concepts/public-door-vs-private-core.md).
 
 ## ⚡ Por que importa
+
+Devs delegam ~60% do trabalho à IA, mas confiam o bastante para soltar de verdade só em **0–20%** dos casos —
+o gargalo não é escrever código, é **contexto que se perde entre sessões** ([Anthropic, 2026](https://agentmarketcap.ai/blog/2026/04/05/anthropic-agentic-coding-trends-report-claude-code-eight-shifts)).
+Contexto bem mantido: **40% menos erro, 55% mais rápido**. O Onion é o mecanismo que ataca isso — versionando o
+contexto em specs no Git, em vez de deixá-lo evaporar no scroll do chat.
 
 > **A ferramenta é o veículo, não a metodologia.** Quando o método vive em specs versionadas e em
 > disciplina de processo, a IDE vira intercambiável — trocar de ferramenta muda _como você invoca_,
