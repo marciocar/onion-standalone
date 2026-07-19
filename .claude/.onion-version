@@ -1,0 +1,8 @@
+framework: onion-evolve
+source_commit: 514dda85833a
+source_commit_date: 2026-07-19
+role: adopted
+adopted_from: https://github.com/marciocar/onion-evolve.git
+adopted_at: 2026-07-19
+updated_at: 2026-07-19
+mode: greenfield
