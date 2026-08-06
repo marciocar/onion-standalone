@@ -87,7 +87,7 @@ Verifique se a documentação reflete as mudanças:
 - Comentários de código em pt-BR para lógica complexa
 - Atualizações da pasta `docs/`
 - `CHANGELOG` ou notas de release
-- Conformidade com `.claude/rules/language-and-documentation.mdc`
+- Conformidade com a skill `language-standards` (autoridade canônica, ver `CLAUDE.md`)
 
 ### 4. Análise de Cobertura de Testes
 Avalie os testes:
@@ -155,10 +155,10 @@ Forneça uma revisão estruturada com:
 - Priorize problemas por impacto
 - Considere o contexto e padrões do projeto
 - Foque nas mudanças, não em todo o codebase
-- Valide conformidade com `.claude/rules/language-and-documentation.mdc`:
+- Valide conformidade com a skill `language-standards` (autoridade canônica, ver `CLAUDE.md`):
   - ✅ Código em inglês (variáveis, funções, classes, nomes de arquivos)
   - ✅ Comentários em pt-BR
-  - ✅ Commits em inglês seguindo Conventional Commits
+  - ✅ Commits: **prefixo** Conventional em inglês (`feat:`, `docs(kg):`), **assunto e corpo em pt-BR**
   - ✅ Documentação em pt-BR
 
 ## 🚦 Critérios do Semáforo
@@ -191,7 +191,7 @@ Antes de aprovar, verificar:
 
 - [ ] Todo código (variáveis, funções, classes) está em inglês
 - [ ] Todos os comentários estão em português (pt-BR)
-- [ ] Commits seguem padrão Conventional Commits em inglês
+- [ ] Commits seguem Conventional Commits — prefixo em inglês, assunto em pt-BR
 - [ ] Documentação atualizada quando necessário
 - [ ] Sintaxe oficial das bibliotecas foi respeitada
 - [ ] Nomes de arquivos e branches em inglês

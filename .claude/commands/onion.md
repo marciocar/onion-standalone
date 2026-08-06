@@ -84,8 +84,8 @@ Delegar para o agente com contexto coletado.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 📊 Estrutura:
-∟ 75 comandos em 7 categorias
-∟ 37 agentes especializados
+∟ 102 comandos em 10 categorias
+∟ 51 agentes especializados
 ∟ Task Manager Abstraction (Jira/ClickUp/Asana/Linear)
 
 🚀 Comandos Principais:

@@ -38,9 +38,11 @@ faça `cat` de pastas inteiras (anti-pattern Context Dump).
 ### 0. KG-first — o `.kg.yaml` é o SSOT de "onde estamos" (acima do git)
 **Antes** de reconstruir de git/memória, **se existir um `.kg.yaml` no repo, abra-o PRIMEIRO** — ele é a
 fonte da verdade de estado, acima do git. É o **primeiro ato**, não um passo opcional no fim.
-- Localizar: `ls docs/onion/graph/*.kg.yaml docs/*/graph/*.kg.yaml *.kg.yaml 2>/dev/null`.
-- Rodar o veredito: `bash .claude/validation/kg-radar.sh <arquivo>` (atenção · reconciliação · integridade ·
-  frescor). Cite os **ids de nó** de maior atenção no briefing, em vez de re-derivar da prosa.
+- Localizar: `git ls-files '*.kg.yaml' | grep -v '/fixtures/'`.
+- Rodar o veredito: `bash .claude/validation/kg-radar.sh <arquivo>` (atenção · **estado** · reconciliação ·
+  integridade · frescor). Cite os **ids de nó** de maior atenção no briefing, em vez de re-derivar
+  da prosa — e a seção **ESTADO** é a fila de abertos que o radar afunda: é ali que costuma estar
+  o "onde paramos" que este comando existe para reconstruir.
 - **Drive-to-verify:** claim `plane: PROD` de alto impacto → cruze contra o vivo (código `arquivo:linha`/dump)
   **antes** de confiar; um nó stale mente (o `--freshness` avisa STALE).
 - Sem `.kg.yaml` no repo → siga para o passo 1 (git).

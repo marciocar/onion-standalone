@@ -11,8 +11,8 @@ model: sonnet
 allowed-tools: Read Write Edit Glob Grep Bash(git *) Bash(bash *) Bash(ls *) Bash(cat *) Bash(mkdir *) Bash(touch *) Bash(date *) Bash(find *) Bash(awk *) Bash(grep *) Bash(sort *)
 argument-hint: "create | list [--classification <c>] [--type <t>] [--sharable] | export-sharable [--dry-run] | index | review"
 category: meta
-version: "1.2.0"
-updated: "2026-07-02"
+version: "1.4.0"
+updated: "2026-07-23"
 ---
 
 # 🧅 /meta:diary — Diário de Aprendizado Onion
@@ -78,6 +78,14 @@ INSTANCE_ID="$(awk '/^instance:/{print $2}' "$REPO/.claude/.onion-version" 2>/de
      barato). Exige `valid_when`.
 7. **valid_when** *(obrigatório se `conditional`; opcional nas demais)* — a condição de
    aplicabilidade em 1 linha testável (ex: `"o adotante segue sem node_modules na worktree"`).
+8. **Nasceu no grafo?** *(pergunta guiada só para `type` em `decision`/`error`/`learning`/`reflection`
+   — os tipos epistêmicos)* — esta migalha veio de uma investigação/audit/verify-multi-round (algo que
+   valeu a pena modelar como claims/evidência/decisões)?
+   - **Sim** → informe `kg: <path/para/o.kg.yaml>` (born-in-graph — o grafo é o destino, a migalha é
+     projeção dele; ver `write(KG)` canônico em `onion-orchestration`).
+   - **Não, foi prosa-só** → não preencha `kg:` (o campo é **opcional** — ausência não é violação,
+     não retro-reprova migalhas antigas), mas diga numa linha **por que** não valeu grafo (ex.: "insight
+     pontual de 1 fonte, sem cadeia de evidência a modelar").
 
 **Gerar arquivo:**
 
@@ -103,6 +111,8 @@ next_recommended: ""
 review_after: ${REVIEW_DATE}
 conflict_class: <dynamic|static|conditional>
 valid_when: "<condição testável — obrigatória se conditional; REMOVER a linha se não se aplica>"
+significance: "<frase orgulhosa e honesta, ≤1 linha — por que esta migalha vale e qual seu papel no continuum dogfoodado; OPCIONAL, REMOVER a linha se ainda não estiver clara>"
+kg: "<path/para/o.kg.yaml> — OPCIONAL: só se esta migalha nasceu de investigação/audit/verify-multi-round; REMOVER a linha se foi prosa-só (ausência não é violação — só kg: declarado-mas-inválido reprova no gate de integridade)"
 ---
 
 ## Signal
@@ -118,7 +128,27 @@ EOF
 echo "Criado: $FILEPATH"
 ```
 
-Abrir o arquivo para o maestro completar Signal, Evidence e Next crumb.
+Abrir o arquivo para o maestro completar, guiado por **4 perguntas** (Signal/Evidence/Next crumb já
+eram; `significance` é a 4ª, nova em 1.3.0):
+
+1. **Signal** — o que o Transformer DEVE absorver desta entrada (≤3 linhas)?
+2. **Evidence** — o que aconteceu de concreto (bullets, não prosa)?
+3. **Next crumb** — o que fazer/investigar depois de absorver esta entrada?
+4. **Significance** *(campo `significance:` no frontmatter — opcional)* — "em uma frase orgulhosa e
+   honesta, por que esta migalha vale e qual seu papel no continuum da evolução dogfoodada?"
+
+**Guarda orgulho ≠ hype** (a `significance` não é decoração):
+- **Precisa de lastro em Evidence/Signal** — uma `significance` sem lastro no que a entrada de fato
+  mostra é migalha **desonesta** (mesma classe de `type`/`conflict_class` fora do vocabulário — ver
+  Regras do diário). Orgulho é ganho pela evidência, não declarado por conta própria.
+- **Cai junto quando a migalha é superseded** — no `review`, se o veredito for "inválida"
+  (`superseded: true`), a `significance` cai com o resto: não se vende com orgulho uma migalha morta.
+  É re-testada junto (mesma disciplina do `⏰`/`conflict_class`).
+- **Uma frase, não um parágrafo** — a força é a destilação. Se o encaixe-no-todo não cabe numa linha
+  orgulhosa e honesta, ele ainda não está claro — e isso, por si, já é um sinal (não force a frase).
+- **Opcional e retrocompatível** — entradas antigas (pré-1.3.0) não têm o campo e continuam válidas;
+  o `diary-index.sh` degrada gracioso (mostra "—") quando ausente. Não é obrigatório preencher em
+  entradas onde o papel-no-continuum ainda não se provou.
 
 **Após preenchimento:** rodar `diary index` para atualizar o index.md.
 
@@ -141,7 +171,14 @@ find "$DIARY_DIR" -name "*.md" ! -name "index.md" | sort -r | while read f; do
   CLASS=$(awk '/^classification:/{print $2}' "$f")
   SLUG=$(basename "$f" .md | cut -d- -f4-)
   REVIEW=$(awk '/^review_after:/{print $2}' "$f")
+  # significance é FRASE (espaços) → extrair com sub(), nunca $2; aspas de borda removidas.
+  SIG=$(awk '/^significance:/{sub(/^significance:[[:space:]]*/,""); gsub(/^"|"$/,""); print; exit}' "$f")
   printf "%-12s  %-12s  %-12s  %-30s  review: %s\n" "$DATE" "$TYPE" "$CLASS" "$SLUG" "$REVIEW"
+  # NUNCA id nu: quando a migalha diz por que vale, isso aparece junto — é o canal avaliativo
+  # de ① Absorção (breadcrumb-patterns §Faceta de ①), não decoração. Ausente → linha some.
+  # `if` e não `[ ... ] && printf`: como É O ÚLTIMO comando do corpo do loop, a forma curta
+  # devolveria exit 1 na última entrada SEM significance (falha espúria sob set -e / no `||`).
+  if [ -n "$SIG" ]; then printf "              ↳ %s\n" "$SIG"; fi
 done
 ```
 
@@ -191,7 +228,9 @@ bash "$(git rev-parse --show-toplevel)/.claude/validation/diary-index.sh"
 ```
 
 O index.md é o Tier-0 pointer do diário (~1KB). O Transformer lê o índice, não o diário inteiro.
-Formato do índice: tabela com date, type, classification, slug, review_after — ordenada por data desc.
+Formato do índice: tabela com date, type, classification, slug, **significance** (quando presente —
+degrada para "—" quando ausente), review_after, conflict_class — ordenada por data desc. A coluna
+`significance` é o que faz o índice dizer **por que ler** cada entrada, não só o quê/quando.
 
 ---
 
@@ -236,6 +275,20 @@ auto-reforçante — [ADR work-models §4](../../../docs/analysis/onion-adr-work
 5. **Classification antes de share_with** — a classificação é a política; share_with é exceção explícita.
 6. **Private é o default para erros com contexto de negócio** — não expor dados do adotante.
 7. **Innovations são public por padrão** — se descobrimos algo útil, a rede deve poder absorver.
+8. **Significance é opcional, mas se presente exige lastro** — uma frase (≤1 linha, frontmatter) que
+   destila por que a migalha vale e qual seu papel no continuum dogfoodado. Orgulho é ganho por
+   Evidence/Signal, não declarado por conta própria — `significance` sem lastro é migalha desonesta
+   (mesma classe de `type`/`conflict_class` fora do vocabulário). Cai junto quando a entrada é
+   `superseded` no `review` (não se vende com orgulho uma migalha morta). Campo **opcional e
+   retrocompatível** — entradas pré-1.3.0 sem ele continuam válidas; o `diary-index.sh` degrada
+   gracioso ("—") quando ausente.
+9. **`kg:` é opcional, mas se declarado exige integridade** — para tipos epistêmicos
+   (`decision`/`error`/`learning`/`reflection`), a pergunta guiada oferece registrar o path do
+   `.kg.yaml` quando a migalha **nasceu de investigação/audit/verify-multi-round** (born-in-graph — ver
+   `write(KG)` canônico em `onion-orchestration`). **Ausência não é violação** — não retro-reprova as
+   migalhas existentes; só `kg:` **declarado** e apontando para um grafo pendurado/quebrado é. A
+   integridade de `kg:` (path existe + `kg-radar.sh --integrity --schema` sai 0) é validada no gate de
+   frontmatter (dono: `validation/`), não neste comando.
 
 ---
 

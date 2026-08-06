@@ -1,13 +1,27 @@
 #!/usr/bin/env bash
 # kg-radar.sh — radar determinístico do Knowledge Graph SDAAL (motor soberano do core).
 #
-# Uso: bash .claude/validation/kg-radar.sh <arquivo.kg.yaml> [--radar|--reconcile|--integrity|--domain|--provenance|--freshness|--schema|--triples]
-#      (sem flag = radar + reconcile + integrity + domain + provenance + freshness + schema)
+# Uso: bash .claude/validation/kg-radar.sh <arquivo.kg.yaml> [--radar|--state|--reconcile|--integrity|--domain|--provenance|--freshness|--freshness-tsv|--schema|--triples]
+#      (sem flag = radar + state + reconcile + integrity + domain + provenance + freshness + schema)
 #
 # Doutrina: docs/knowledge-base/concepts/knowledge-graph-sdaal.md
 #   RADAR           = atenção — peso do nó × centralidade (grau).
 #                     peso = impact(1-5) × confidence(0-1) × fator de status
 #                     fator: open=1.0 · confirmed=1.0 · refuted=0 · superseded=0.2 · done=0.1
+#   ESTADO          = a FILA DE ABERTOS — o que segue `open` neste grafo, por atenção.
+#                     É o irmão do RADAR, pedido em 2026-07-16 e construído em 2026-08-06.
+#                     POR QUE NÃO É REDUNDANTE COM O RADAR (medido antes de escrever): das 79
+#                     `question` abertas nos grafos ativos, só 21 (26%) aparecem no top-10 do
+#                     --radar; 58 (73%) são INVISÍVEIS hoje. Nos dois maiores grafos ativos,
+#                     1 de 16 e 1 de 13. A fórmula de atenção favorece nó `confirmed` bem
+#                     conectado, e afunda justamente o que ainda está aberto.
+#                     POR QUE MODO, E NÃO SCRIPT NOVO: um `kg-state.sh` seria o TERCEIRO parser
+#                     de YAML do repo, e kg-view.sh:17-31 já escreveu essa dívida em letra
+#                     grande ("DOIS PARSERS, DUAS VERDADES… mentira com cara de relatório").
+#                     POR QUE UM GRAFO POR VEZ: a fila cross-grafo nasce MURO — 319 dos 571
+#                     nós `open` do corpus vivem num único arquivo de reconciliação, que
+#                     sessão nenhuma abre. Por grafo: mediana 4, e o top-7 cobre 100% de 37
+#                     dos 43 grafos com aberto (86%).
 #   RECONCILIAÇÃO   = arestas REFUTES/SUPERSEDES (as auto-correções explícitas do grafo)
 #   INTEGRIDADE     = ids duplicados · aresta para nó inexistente · nó órfão (grau 0) ·
 #                     contradição (REFUTES entrando em nó que segue confirmed/open) ·
@@ -21,11 +35,21 @@
 #                     é história — não cobrada (mesmo racional do FRESCOR).
 #   FRESCOR         = frescor da SSOT (⚠ atenção, NÃO reprova — nó stale mente, não corrompe):
 #                     STALE-MISSING (nó plane:PROD sem verified_at:) · STALE-OLD (verified_at
-#                     anterior à meta.baseline). Determinístico: compara duas datas do arquivo,
-#                     sem "agora" (ADR onion-adr-kg-freshness-gate, proposta #2 (dogfood de campo)).
+#                     anterior à meta.baseline) · UNANCHORED (node_type: claim com verified_at:
+#                     mas SEM verified_against: — carimbo sem alvo declarado; os demais tipos
+#                     ancoram por trace:/TRACES_TO e não são cobrados) · MISPLANED (plane:PROD
+#                     com verified_against: branch|commit — o nó afirma sobre o VIVO e declara
+#                     ter olhado a FONTE; contradição interna, vale p/ TODOS os tipos).
+#                     Determinístico: compara duas datas / dois campos do arquivo, sem "agora"
+#                     (ADR onion-adr-kg-freshness-gate, proposta #2 (dogfood de campo)).
 #   SCHEMA          = versão de schema (✗ REPROVA na divergência — radar não sabe ler o arquivo):
 #                     meta.schema_version ≠ a versão que o radar entende → recusa; ausente → ⚠
 #                     retrocompat (ADR onion-adr-kg-freshness-gate, proposta #1).
+#   FRESCOR-TSV     = a FILA de re-verificação, legível por máquina (irmão do FRESCOR, como
+#                     TRIPLES é do grafo): 1 linha/nó vivo rastreado, ordenada por atenção.
+#                     Colunas: id·node_type·plane·status·impact·confidence·atenção·verified_at·
+#                     verified_against·trace·verdict. Escopo NÃO é "o flagado" — nó com verdict
+#                     OK entra igual (o caso que criou o fluxo mente COM carimbo do dia).
 #   TRIPLES         = grafo como triplas `from EDGE to [on evento]` p/ consumo por LLM
 #
 # Camadas (campo opcional `layer`, default audit — retrocompatível):
@@ -45,7 +69,7 @@ RADAR_SCHEMA="1"
 
 FILE="${1:-}"
 MODE="${2:---all}"
-[ -n "$FILE" ] && [ -f "$FILE" ] || { echo "uso: kg-radar.sh <arquivo.kg.yaml> [--radar|--reconcile|--integrity|--domain|--provenance|--freshness|--schema|--triples]" >&2; exit 2; }
+[ -n "$FILE" ] && [ -f "$FILE" ] || { echo "uso: kg-radar.sh <arquivo.kg.yaml> [--radar|--state|--reconcile|--integrity|--domain|--provenance|--freshness|--freshness-tsv|--schema|--triples]" >&2; exit 2; }
 
 awk -v mode="$MODE" -v radarSchema="$RADAR_SCHEMA" '
 function statusFactor(s) {
@@ -55,7 +79,7 @@ function statusFactor(s) {
   if (s == "done") return 0.1
   return -1  # inválido
 }
-function trim(s) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); gsub(/^"|"$/, "", s); return s }
+function trim(s) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); gsub(/^["'\'']|["'\'']$/, "", s); return s }
 
 BEGIN { section = ""; nid = ""; ne = 0 }
 
@@ -80,19 +104,34 @@ section == "nodes" && /^[[:space:]]+- id:/ {
 }
 section == "nodes" && nid != "" {
   line = $0; sub(/#.*$/, "", line)
-  if (line ~ /node_type:/)  { v = line; sub(/.*node_type:/, "", v);  ntype[nid] = trim(v) }
-  if (line ~ /plane:/)      { v = line; sub(/.*plane:/, "", v);      plane[nid] = trim(v) }
-  if (line ~ /layer:/)      { v = line; sub(/.*layer:/, "", v);      layer[nid] = trim(v) }
-  if (line ~ /impact:/)     { v = line; sub(/.*impact:/, "", v);     impact[nid] = trim(v) + 0 }
-  if (line ~ /confidence:/) { v = line; sub(/.*confidence:/, "", v); conf[nid] = trim(v) + 0 }
-  if (line ~ /status:/)     { v = line; sub(/.*status:/, "", v);     nstatus[nid] = trim(v) }
-  if (line ~ /verified_against:/) { v = line; sub(/.*verified_against:/, "", v); verifiedAgainst[nid] = trim(v) }
-  else if (line ~ /verified_at:/) { v = line; sub(/.*verified_at:/, "", v); verifiedAt[nid] = trim(v) }
+  # ── CAMPO SÓ EM POSIÇÃO DE CAMPO (âncora ^[[:space:]]*<campo>:) ──────────────────────────────
+  # O parser é line-based: um match SOLTO (`line ~ /layer:/` + `sub(/.*layer:/…)`) lê CONTEÚDO como
+  # CONFIGURAÇÃO — basta um label citar o token. Real, não hipotético:
+  #     label: "66 nos, TODOS layer:audit, ZERO domain"
+  # virava `✗ layer inválido: [audit, ZERO domain]` e REPROVAVA um grafo correto. A defesa já
+  # existia — mas só para `trace:` (comentário abaixo) — e ficou fechada em 1 de 7 campos. Agora
+  # a ancoragem cobre a classe inteira EM TODAS AS SEÇÕES: `nodes` (node_type/plane/layer/impact/
+  # confidence/status/verified_*/label), `edges` (to/edge_type/on) e `meta` (schema_version/baseline).
+  # Crédito: sinal de campo da estrela onion-pessoal-app (2026-07-19), que pushou um grafo quebrado
+  # exatamente por isto — um repo que FALA de layers/status escreve esses tokens em prosa o tempo todo.
+  # Âncora também no `sub`: casar ancorado e extrair solto (`.*campo:`) recortaria pela ÚLTIMA
+  # ocorrência da linha, devolvendo o rabo do label quando o valor cita o próprio token.
+  if (line ~ /^[[:space:]]*node_type:/)  { v = line; sub(/^[[:space:]]*node_type:/, "", v);  ntype[nid] = trim(v) }
+  if (line ~ /^[[:space:]]*plane:/)      { v = line; sub(/^[[:space:]]*plane:/, "", v);      plane[nid] = trim(v) }
+  if (line ~ /^[[:space:]]*layer:/)      { v = line; sub(/^[[:space:]]*layer:/, "", v);      layer[nid] = trim(v) }
+  if (line ~ /^[[:space:]]*impact:/)     { v = line; sub(/^[[:space:]]*impact:/, "", v);     impact[nid] = trim(v) + 0 }
+  if (line ~ /^[[:space:]]*confidence:/) { v = line; sub(/^[[:space:]]*confidence:/, "", v); conf[nid] = trim(v) + 0 }
+  if (line ~ /^[[:space:]]*status:/)     { v = line; sub(/^[[:space:]]*status:/, "", v);     nstatus[nid] = trim(v) }
+  if (line ~ /^[[:space:]]*verified_against:/) { v = line; sub(/^[[:space:]]*verified_against:/, "", v); verifiedAgainst[nid] = trim(v) }
+  else if (line ~ /^[[:space:]]*verified_at:/) { v = line; sub(/^[[:space:]]*verified_at:/, "", v); verifiedAt[nid] = trim(v) }
   # Proveniência inline: a MIGALHA `arquivo:linha` (suporte de campo 2026-07-17). Âncora
   # em ^…trace: — um match solto casaria com label que cita "trace:"/"TRACES_TO" (este repo fala
-  # de rastreabilidade sobre si mesmo), false-positivando a origem.
+  # de rastreabilidade sobre si mesmo), false-positivando a origem. Foi o PROTÓTIPO da defesa acima.
   if (line ~ /^[[:space:]]*trace:/) { v = line; sub(/^[[:space:]]*trace:/, "", v); traceInline[nid] = trim(v) }
-  if ($0 ~ /label:/)        { v = $0; sub(/^[[:space:]]*label:/, "", v); label[nid] = trim(v) }
+  # label: lê de $0 (não de `line`) de propósito — o texto do label pode conter `#` legítimo, e a
+  # poda de comentário o truncaria. Match agora ancorado como os demais (antes casava solto e só o
+  # sub era ancorado: numa linha de OUTRO campo que citasse "label:", o valor virava a linha inteira).
+  if ($0 ~ /^[[:space:]]*label:/) { v = $0; sub(/^[[:space:]]*label:/, "", v); label[nid] = trim(v) }
   next
 }
 
@@ -101,13 +140,22 @@ section == "edges" && /^[[:space:]]+- from:/ {
   v = trim($0); sub(/^- from:/, "", v); efrom[ne] = trim(v)
   next
 }
-section == "edges" && /to:/ && !/edge_type/ { v = $0; sub(/.*to:/, "", v); eto[ne] = trim(v); next }
-section == "edges" && /edge_type:/ { v = $0; sub(/.*edge_type:/, "", v); etype[ne] = trim(v); next }
-section == "edges" && /on:/ { v = $0; sub(/.*on:/, "", v); eon[ne] = trim(v); next }
+# ARESTAS/META — mesma ancoragem dos nós (2ª metade do fix; a 1ª cobriu só a seção `nodes`).
+# Dois vetores reais que o match solto abria aqui:
+#   (a) `to: D_migrate_to:v2` — `sub(/.*to:/)` recorta na ÚLTIMA ocorrência e devolve "v2":
+#       nó inexistente → falso "aresta para nó inexistente" reprovando um grafo correto;
+#   (b) `/on:/` casava QUALQUER linha contendo "on:" como substring — inclusive `reason:`
+#       (reas·on:), que é campo válido da migalha TRACES_TO. Bastava uma aresta com `reason:`
+#       para o atributo `on:` (evento gatilho de TRANSITIONS) ser lido do campo errado.
+# Ancorar em posição de campo mata os dois. (O antigo `!/edge_type/` virou redundante: uma linha
+# `edge_type:` não casa `^[[:space:]]*to:`.)
+section == "edges" && /^[[:space:]]*to:/ { v = $0; sub(/^[[:space:]]*to:/, "", v); eto[ne] = trim(v); next }
+section == "edges" && /^[[:space:]]*edge_type:/ { v = $0; sub(/^[[:space:]]*edge_type:/, "", v); etype[ne] = trim(v); next }
+section == "edges" && /^[[:space:]]*on:/ { v = $0; sub(/^[[:space:]]*on:/, "", v); eon[ne] = trim(v); next }
 
 # meta: campos de governança de frescor/schema (proposta #1/#2 — ADR kg-freshness-gate)
-section == "meta" && /schema_version:/ { v = $0; sub(/.*schema_version:/, "", v); metaSchema = trim(v); next }
-section == "meta" && /baseline:/        { v = $0; sub(/.*baseline:/, "", v);        metaBaseline = trim(v); next }
+section == "meta" && /^[[:space:]]*schema_version:/ { v = $0; sub(/^[[:space:]]*schema_version:/, "", v); metaSchema = trim(v); next }
+section == "meta" && /^[[:space:]]*baseline:/       { v = $0; sub(/^[[:space:]]*baseline:/, "", v);       metaBaseline = trim(v); next }
 
 END {
   VN = "entity claim decision question evidence artifact state event rule invariant policy"
@@ -158,6 +206,11 @@ END {
   for (i = 1; i <= ne; i++) {
     deg[efrom[i]]++; deg[eto[i]]++
     if (etype[i] == "REFUTES")     refutedBy[eto[i]]++
+    # SUPERSEDES só ACUSA se o superseder está VIVO (confirmed). Superseder `open` significa relação
+    # ainda não assentada — e o alvo legitimamente segue confirmado até que ela assente. Medido: dos 15
+    # alvos não-reconciliados do corpus, 1 (E_engine_measured) tem superseder `open`; acusá-lo seria
+    # cobrar reconciliação de uma superação que ninguém fechou.
+    if (etype[i] == "SUPERSEDES" && nstatus[efrom[i]] == "confirmed") supersededByLive[eto[i]]++
     if (etype[i] == "TRANSITIONS") { transOut[efrom[i]]++; transIn[eto[i]]++ }
     if (etype[i] == "HAS_STATE")   ownedState[eto[i]]++
     if (etype[i] == "TRACES_TO")   traceOut[efrom[i]]++
@@ -171,6 +224,52 @@ END {
       t = efrom[i] " " etype[i] " " eto[i]
       if (eon[i] != "") t = t " on " eon[i]
       print t
+    }
+    exit 0
+  }
+
+  # Irmão-MÁQUINA do --freshness (como --triples é do grafo): a fila de re-verificação, em TSV.
+  # Existe porque a saída humana do --freshness é prosa pt-BR com emoji — parseá-la para
+  # alimentar um fluxo seria frágil por construção. Uma linha por nó frescor-rastreado e VIVO.
+  #
+  # ORDEM: atenção desc — MESMA fórmula do --radar (impact × confidence × statusFactor × (1+grau)).
+  # A decisão que carrega peso aqui: o escopo NÃO é "o que o radar flagou". O caso que motivou o
+  # fluxo (C_ancestor_cap_zeroes_floors do grafo do M2) tem verdict OK — carimbo do dia, alvo
+  # declarado, os três vereditos passam — e MENTE assim mesmo. Filtrar por flagado nasceria cego
+  # ao caso fundador. O carimbo diz se a SSOT está bem-formada; a atenção diz o que custa caro
+  # estar errado. Re-verifica-se pelo CUSTO DO ERRO, não pela ausência do carimbo.
+  if (mode == "--freshness-tsv") {
+    # PRIMEIRA PASSADA — calcula atenção e ELEGE quem entra. A segunda passada emite ORDENADO.
+    # POR QUE EXISTE (achado de revisão adversarial, 2026-08-06): o cabeçalho deste bloco DECLARA
+    # "ORDEM: atenção desc — MESMA fórmula do --radar" desde que nasceu, e a implementação iterava
+    # `order[i]` — ORDEM DE ARQUIVO. O `asorti()` só existia no --radar. Ou seja: o instrumento que
+    # esta casa usa para medir declarado-vs-verificado tinha, ele mesmo, uma declaração não
+    # verificada. Medido no grafo da VPS: ENT_logto (14.25) saía ANTES de ENT_whatsapp (14.40).
+    # O dano não é cosmético: quem consome a fila corta em --top N, e um corte sobre ordem errada
+    # descarta o nó de MAIOR atenção. E numa corrida serial a ordem decide qual worker aprende
+    # primeiro — foi essa ambiguidade que quase inverteu a conclusão do M8.
+    for (i = 1; i <= nn; i++) {
+      id = order[i]
+      if (plane[id] != "PROD" && verifiedAgainst[id] == "") continue
+      if (nstatus[id] == "superseded" || nstatus[id] == "refuted") continue   # história, não SSOT viva
+      sf = statusFactor(nstatus[id]); if (sf < 0) sf = 0
+      att[id] = impact[id] * conf[id] * sf * (1 + deg[id])
+      elegivel[id] = 1
+    }
+    fn = asorti(att, fsorted, "@val_num_desc")
+    for (i = 1; i <= fn; i++) {
+      id = fsorted[i]
+      if (!(id in elegivel)) continue
+      if (verifiedAt[id] == "") verdict = "STALE-MISSING"
+      else if (verifiedAgainst[id] == "" && ntype[id] == "claim") verdict = "UNANCHORED"
+      else if (metaBaseline != "" && verifiedAt[id] "" < metaBaseline "") verdict = "STALE-OLD"
+      else verdict = "OK"
+      printf "%s\t%s\t%s\t%s\t%s\t%s\t%.2f\t%s\t%s\t%s\t%s\n",
+        id, ntype[id], plane[id], nstatus[id], impact[id], conf[id], att[id],
+        (verifiedAt[id] == "" ? "-" : verifiedAt[id]),
+        (verifiedAgainst[id] == "" ? "-" : verifiedAgainst[id]),
+        (traceInline[id] == "" ? "-" : traceInline[id]),
+        verdict
     }
     exit 0
   }
@@ -191,6 +290,52 @@ END {
     print ""
   }
 
+  # ESTADO — a fila de abertos. Irmão do RADAR: mesma fórmula de atenção, escopo invertido.
+  # O RADAR responde "o que pesa"; o ESTADO responde "o que falta". Um nó `confirmed` de impacto 5
+  # domina o primeiro e não tem nada a fazer no segundo.
+  #
+  # APOSTA DECLARADA (2026-08-06) — este modo não nasce de pull medido, e sim da convicção de que
+  # a sessão que abre um grafo quer ver o que segue aberto nele. O que o mataria está escrito:
+  # 5 aberturas de sessão com o --state na saída e ZERO id citado seguido de ação. Nesse caso o
+  # modo sai do caminho padrão (do --all) e o aprendizado e que `status: open` e RESIDUO, nao
+  # estado de trabalho — o que mataria a classe inteira "projetar estado a partir de status".
+  # A EXCLUSÃO DO TOP-10 NÃO É DETALHE — É O QUE FAZ O MODO EXISTIR. Medido na 1ª versão, que
+  # ordenava todos os `open` por atenção: 51% do que ela exibia JÁ estava no --radar, e num grafo
+  # (m3-federation-admin) a sobreposição era de 100%. Ordenar por atenção traz de volta os mesmos
+  # nós pesados que o radar mostra — o modo virava vista filtrada do que já se via. Excluindo o
+  # top-10 por construção, o ESTADO passa a ser 100% complementar: só o que o radar AFUNDA.
+  if (mode == "--all" || mode == "--state") {
+    print "══ ESTADO — a fila de abertos (o que o RADAR afunda) ══"
+    for (i = 1; i <= nn; i++) {                       # atenção de TODOS (o --radar pode não ter rodado)
+      id = order[i]; sf2 = statusFactor(nstatus[id]); if (sf2 < 0) sf2 = 0
+      ratt[id] = impact[id] * conf[id] * sf2 * (1 + deg[id])
+    }
+    rn = asorti(ratt, rord, "@val_num_desc")
+    rtop = (rn < 10) ? rn : 10
+    for (i = 1; i <= rtop; i++) if (ratt[rord[i]] > 0) noRadar[rord[i]] = 1
+    nopen = 0
+    for (i = 1; i <= nn; i++) {
+      id = order[i]
+      if (nstatus[id] != "open") continue
+      nopen++
+      if (id in noRadar) continue                    # já visível no RADAR — não repetir
+      satt[id] = ratt[id]
+    }
+    sn = asorti(satt, sord, "@val_num_desc")
+    if (nopen == 0)      print "  ✅ nada em aberto neste grafo"
+    else if (sn == 0)    printf "  ✅ os %d aberto(s) deste grafo já aparecem no RADAR acima\n", nopen
+    else {
+      stop = (sn < 7) ? sn : 7
+      for (i = 1; i <= stop; i++) {
+        id = sord[i]
+        printf "  %5.1f  %-24s %s  %s\n", satt[id], id, ntype[id], label[id]
+      }
+      if (sn > stop) printf "  … e mais %d fora do radar — %d aberto(s) no total\n", sn - stop, nopen
+    }
+    print ""
+    delete satt; delete sord; delete ratt; delete rord; delete noRadar
+  }
+
   if (mode == "--all" || mode == "--reconcile") {
     print "══ RECONCILIAÇÃO — REFUTES / SUPERSEDES ══"
     found = 0
@@ -201,6 +346,36 @@ END {
         printf "             ∟ alvo: %s\n", label[eto[i]]
       }
     if (!found) print "  (nenhuma — grafo sem auto-correções registradas)"
+
+    # ⚠ ALVO NÃO-RECONCILIADO — o buraco que a INTEGRIDADE não cobre.
+    #
+    # POR QUE EXISTE (medido 2026-08-05): a linha 438 cobra contradição SÓ para REFUTES. SUPERSEDES
+    # passa em silêncio — e de 137 arestas SUPERSEDES no corpus, 15 apontam para um alvo que segue
+    # `confirmed` ou `open`. Duas decisões de impacto 5 vivem hoje superadas e confirmadas ao mesmo
+    # tempo, sem um único aviso.
+    #
+    # POR QUE ⚠ E NÃO ✗ (a refutação que forjou esta forma): o remédio óbvio — virar o status —
+    # PRODUZ DADO ERRADO em boa parte dos casos. `statusFactor(superseded)` = 0.2 corta 80% da
+    # atenção e a linha 226 tira o nó do frescor; 6 dos 15 alvos estão no top-10 do próprio grafo e
+    # sairiam. Há casos em que o superseder apenas REFINA (o alvo segue vigente — é `CONSTRAINS`,
+    # já no enum da linha 148 e idioma dominante no grafo do M2: 43 CONSTRAINS contra 14 SUPERSEDES)
+    # e casos em que o alvo era PERGUNTA respondida (fecha como `done`, não como história superada).
+    # Um gate HARD que compra verde CORROMPENDO o grafo é o verde falso invertido. Por isso: nomeia,
+    # não reprova. `problems` fica intocado.
+    #
+    # PROMOÇÃO A ✗ HARD: gated. Gatilho escrito — um 16º caso aparecer DEPOIS da triagem dos 15.
+    swarn = 0
+    for (i = 1; i <= nn; i++) {
+      id = order[i]
+      if (supersededByLive[id] > 0 && (nstatus[id] == "confirmed" || nstatus[id] == "open")) {
+        if (ntype[id] == "question")
+          printf "  ⚠ %s: pergunta RESPONDIDA segue status=%s — fechar como `done` (respondida ≠ superada)\n", id, nstatus[id]
+        else
+          printf "  ⚠ %s: recebe SUPERSEDES e segue status=%s — reconciliar: `superseded` se deixou de valer · `CONSTRAINS` se o superseder apenas REFINA · ou justificar por escrito\n", id, nstatus[id]
+        swarn++
+      }
+    }
+    if (found && swarn == 0) print "  ✅ nenhum alvo de SUPERSEDES ficou por reconciliar"
     print ""
   }
 
@@ -284,7 +459,7 @@ END {
     # declare verified_against: (opt-in — nomeia o artefato MÓVEL que rastreia: branch/commit/
     # deploy/config). Um nó DEV que aponta p/ branch/commit também apodrece (sinal de campo
     # ssot-como-runtime, §2: C_CONSOLIDATION_MAP stale). Não inunda claims epistêmicos comuns.
-    fwarns = 0; ntracked = 0
+    fwarns = 0; ntracked = 0; fsuppressed = 0
     for (i = 1; i <= nn; i++) {
       id = order[i]
       if (plane[id] != "PROD" && verifiedAgainst[id] == "") continue
@@ -296,12 +471,59 @@ END {
       ntracked++
       if (verifiedAt[id] == "") {
         print "  ⚠ STALE-MISSING: " id " (frescor rastreado — plane:PROD ou verified_against: — sem verified_at:; re-verifique contra o vivo)"; fwarns++
-      } else if (metaBaseline != "" && verifiedAt[id] "" < metaBaseline "") {
-        print "  ⚠ STALE-OLD: " id " (verified_at " verifiedAt[id] " anterior à baseline " metaBaseline " — a verdade pode ter envelhecido)"; fwarns++
+      } else {
+        # UNANCHORED — o carimbo existe mas NÃO diz contra O QUÊ. "Verificado" sem alvo
+        # declarado é declaração, não verificação: o radar não consegue julgar a semântica,
+        # mas pode EXIGIR que o alvo seja escrito — e é escrevendo-o que o desalinhamento
+        # fica legível a quem lê. Sinal de campo 2026-07-25 (adotante): nós com plane:PROD e
+        # verified_at "porque um curl respondera" — mas o curl mediu o CORE e a claim era
+        # sobre o ADOTANTE. O carimbo estava no artefato errado, e nada no arquivo denunciava.
+        # UNANCHORED cobra quem AFIRMA — não quem ANCORA, nem quem PERGUNTA. Whitelist por
+        # `node_type: claim`, mesmo idioma do bloco PROVENIÊNCIA (que filtra por `decision`).
+        # MEDIDO nos 22 grafos do core (2026-07-26): sem o filtro são 275 avisos, 170 deles em
+        # tipos que JÁ carregam a âncora por outro campo — 114 `evidence` (a evidência É a
+        # âncora; 101 delas já trazem `trace:`), 17 `decision` (a proveniência já é cobrada no
+        # bloco acima: dois nomes para a mesma obrigação), 21 `entity` (domínio ancora por
+        # `trace:` + READS/WRITES, o contrato do modo `map`), 15 `artifact` (o nó NOMEIA o
+        # alvo — alvo do alvo é tautologia) e 3 `question` (pergunta não afirma).
+        # 275 avisos treinam o leitor a ignorar: é o mesmo racional que já pula superseded/refuted.
+        # A guarda vive AQUI, no ramo, e NÃO como `continue` no laço: STALE-MISSING e STALE-OLD
+        # continuam valendo para TODOS os tipos. (Um `continue` quebraria os casos (b)/(c)/(f)
+        # do selftest, cujos sujeitos são `state` e `decision` — a suíte é a guarda desta guarda.)
+        # Whitelist, não blacklist: ntype vazio/inválido já REPROVA na INTEGRIDADE (VN, exit 1).
+        if (verifiedAgainst[id] == "" && ntype[id] == "claim") {
+          print "  ⚠ UNANCHORED: " id " (verified_at " verifiedAt[id] " SEM verified_against:; declare o ALVO da claim — carimbo sem alvo não distingue verificado de declarado)"; fwarns++
+        } else if (verifiedAgainst[id] == "") {
+          fsuppressed++   # supressão CONTADA, nunca silenciosa — ver linha-resumo abaixo
+        }
+        if (metaBaseline != "" && verifiedAt[id] "" < metaBaseline "") {
+          print "  ⚠ STALE-OLD: " id " (verified_at " verifiedAt[id] " anterior à baseline " metaBaseline " — a verdade pode ter envelhecido)"; fwarns++
+        }
+      }
+      # MISPLANED — CONTRADIÇÃO INTERNA ao próprio nó, e vale para TODOS os tipos.
+      # `plane: PROD` afirma "cruzei com o ARTEFATO VIVO"; `verified_against: branch|commit`
+      # declara "olhei a FONTE". Os dois campos falam da mesma coisa (a natureza da evidência)
+      # e até aqui o radar nunca os confrontava.
+      # Crédito: sinal de campo de um adotante (2026-07-27), que MEDIU no próprio repo
+      # 21 nós afirmando sobre produção com evidência de leitura de código — com o radar VERDE
+      # o tempo todo. E o motivo de escapar era o filtro que eu mesmo shipei horas antes: o
+      # UNANCHORED isenta os tipos não-claim ("ancoram por trace:/TRACES_TO"), e quase todos os
+      # 21 eram `evidence`. Reduzir ruído cegou o gate para uma classe que ele nunca vira.
+      # Por isso esta checagem NÃO se restringe a claim: a contradição não depende do tipo.
+      # Determinística: dois campos do mesmo nó, sem rede, sem heurística, sem campo novo.
+      # TETO DECLARADO (pelo próprio autor do sinal): audita a procedência DECLARADA, não se a
+      # declaração é verdadeira — um nó que escreve `deploy` medindo bench local passa. Isso é
+      # limite honesto, não defeito: fecha a contradição legível, não a mentira deliberada.
+      # `pin` NÃO é cobrado de propósito: é ambíguo (ler o stamp do checkout vivo é PROD legítimo).
+      if (plane[id] == "PROD" && verifiedAgainst[id] ~ /(^|[^a-zA-Z])(branch|commit)([^a-zA-Z]|$)/) {
+        print "  ⚠ MISPLANED: " id " (plane:PROD mas verified_against: " verifiedAgainst[id] " — o nó afirma sobre o VIVO e declara ter olhado a FONTE; reclassifique para plane:DEV ou re-verifique contra o artefato vivo)"; fwarns++
       }
     }
     if (ntracked == 0) print "  (nenhum nó com frescor rastreado — nada a verificar)"
     else if (fwarns == 0) print "  ✅ " ntracked " nó(s) com frescor declarado" (metaBaseline != "" ? " (baseline " metaBaseline ")" : "")
+    # `if` próprio, FORA da cadeia else-if: a supressão tem de aparecer mesmo quando fwarns==0.
+    # Uma linha no lugar de N, e o filtro fica auditável em vez de mágico.
+    if (fsuppressed > 0) print "  ℹ " fsuppressed " nó(s) não-claim com carimbo sem verified_against: — não cobrados (evidência/decisão/domínio/artefato ancoram por trace:/TRACES_TO; pergunta não afirma)"
     print ""
   }
 
