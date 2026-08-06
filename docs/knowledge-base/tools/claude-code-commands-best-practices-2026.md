@@ -1,3 +1,8 @@
+---
+verified_at: 2026-07-23
+source: "https://docs.claude.com/en/release-notes/claude-code"
+---
+
 # Claude Code Commands Best Practices (atualizado em 2026-06-15)
 
 ---
@@ -26,7 +31,7 @@
 
 Este documento consolida as melhores práticas para criação e uso de comandos personalizados no Claude Code, focando em eficiência, manutenibilidade e integração com sistemas de IA.
 
-> **Refresh 2026-06-13 (v1.1.0)**: além das práticas de comandos individuais, esta KB agora cobre o substrato nativo de orquestração — a ferramenta **Workflow** (Dynamic Workflows, research preview de 28/mai/2026), a ferramenta **Agent** (subagente único, com nesting até 5 níveis desde 10/jun/2026) e o papel das **Skills** como ponto de orquestração no nível principal. O lineup de modelos vigente é **Fable 5, Opus 4.8, Sonnet 4.6 e Haiku 4.5**.
+> **Refresh 2026-06-13 (v1.1.0)**: além das práticas de comandos individuais, esta KB agora cobre o substrato nativo de orquestração — a ferramenta **Workflow** (Dynamic Workflows, research preview de 28/mai/2026), a ferramenta **Agent** (subagente único, com nesting até 5 níveis desde 10/jun/2026) e o papel das **Skills** como ponto de orquestração no nível principal. O lineup de modelos **à época desta KB** (jun/2026; drifta — fonte única do lineup: [`agent-orchestration.md` §Disponibilidade de modelos](../concepts/agent-orchestration.md)).8, Sonnet 4.6 e Haiku 4.5**.
 
 ---
 

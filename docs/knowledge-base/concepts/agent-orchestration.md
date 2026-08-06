@@ -1,3 +1,8 @@
+---
+verified_at: 2026-07-23
+source: "https://platform.claude.com/docs/en/about-claude/models/introducing-claude-fable-5-and-claude-mythos-5"
+---
+
 # Agent Orchestration
 
 ---
@@ -6,9 +11,9 @@
 
 | Campo | Valor |
 |-------|-------|
-| **Versão** | 1.3.0 |
+| **Versão** | 1.4.0 |
 | **Data de Criação** | 2026-06-13 |
-| **Última Atualização** | 2026-06-20 |
+| **Última Atualização** | 2026-07-20 |
 | **Categoria** | Concepts |
 | **Aplicação** | Sistema Onion - Camada de Orquestração de Agentes |
 
@@ -22,11 +27,15 @@
 - [Building Effective Agents — Anthropic](https://www.anthropic.com/engineering/building-effective-agents) — padrões canônicos de orquestração (2026)
 - [The State of Agentic Coding 2026 — Context Studios](https://contextstudios.ai/) — doutrina da "era da orquestração"
 - [Claude Code — Agent Teams](https://code.claude.com/docs/en/agent-teams) — substrato experimental de peers persistentes (`TeamCreate`/`SendMessage`/task list compartilhada), atrás de `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`
+- [Create custom subagents](https://code.claude.com/docs/en/sub-agents) — teto de 200 subagentes por sessão (`CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`), requer v2.1.212+ (verificado 2026-07-20)
+- [Tools reference — Claude Code](https://code.claude.com/docs/en/tools-reference) — teto de 200 `WebSearch` por sessão (`CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION`), somado entre conversa principal e subagentes (verificado 2026-07-20)
+- [Introducing Claude Fable 5 and Claude Mythos 5](https://platform.claude.com/docs/en/about-claude/models/introducing-claude-fable-5-and-claude-mythos-5) e [anúncio Anthropic](https://www.anthropic.com/news/claude-fable-5-mythos-5) — tier Mythos-class acima de Opus, GA 09/jun/2026 (Fable 5) vs gated (Mythos 5) (verificado 2026-07-20)
+- [Introducing Claude Sonnet 5](https://www.anthropic.com/news/claude-sonnet-5) — GA 30/jun/2026, novo default agentic (verificado 2026-07-20)
 
 **Relacionados no Onion:**
 
 - [`ai-agent-design-patterns.md`](ai-agent-design-patterns.md) — KB irmã (design de agentes)
-- [`docs/analysis/onion-agent-teams-evaluation-2026-06.md`](../../analysis/onion-agent-teams-evaluation-2026-06.md) — decisão de framework sobre Agent Teams (opt-in, não padrão)
+- `onion-agent-teams-evaluation-2026-06.md` (análise interna do core) — decisão de framework sobre Agent Teams. *Dimensão:* Agent Teams **não** vira padrão do Onion nem obriga rever os padrões vigentes (sessões faseadas, Workflow/onion-orchestration); seu lugar canônico é um **terceiro modo de orquestração opt-in**, atrás de detecção de capacidade com fallback gracioso (mesmo espírito SDAAL dos adapters). Ganho real só num nicho: **negociação viva peer-a-peer** (ex.: front e back acertando um contrato de API em runtime).
 
 ---
 
@@ -74,7 +83,7 @@ Orquestração **não é default**. Ela paga overhead de coordenação, multipli
 
 ## 🔀 Dois Substratos de Orquestração: Workflow vs Agent Teams
 
-> **Status (jun/2026):** Agent Teams é **experimental**, atrás da flag `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` (off por default). O substrato **default e portável** da orquestração Onion é a ferramenta **Workflow**. Esta seção fixa a fronteira; a decisão de framework está registrada em [`docs/analysis/onion-agent-teams-evaluation-2026-06.md`](../../analysis/onion-agent-teams-evaluation-2026-06.md).
+> **Status (jun/2026):** Agent Teams é **experimental**, atrás da flag `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` (off por default). O substrato **default e portável** da orquestração Onion é a ferramenta **Workflow**. Esta seção fixa a fronteira; a decisão de framework está registrada em `onion-agent-teams-evaluation-2026-06.md` (análise interna do core).
 
 Decididos a usar uma orquestração (acima), restam **dois substratos** com modelos de coordenação opostos. Não competem — cobrem **shapes de trabalho diferentes**:
 
@@ -113,7 +122,7 @@ Agent Teams entra como **terceiro modo opt-in**, nunca requisito duro — mesmo 
 - **Fallback gracioso:** flag off → degrade para Workflow (ou serial), avisando em pt-BR; **nunca** assumir a flag ligada.
 - **Portabilidade preservada:** o Onion é template instalável em **qualquer** projeto; não pode depender de feature experimental gated → o default permanece Workflow.
 - **Mesma invariante arquitetural:** orquestre no **nível principal** (skill/comando) — o "lead" do time é a própria sessão principal. **Nunca** dentro de um agente (§4.2; ver [Aplicação no Onion](#-aplicação-no-onion)).
-- **Escopo é DENTRO de um repo, nunca cross-repo.** Agent Teams coordena dentro de **uma sessão/worktree** — **não há suporte multi-repo nativo** (limitação oficial, jun/2026). Coordenação multi-repo na prática se faz por **git + file-lock** (o próprio caso do compilador C da Anthropic — *Building a C compiler with a team of parallel Claudes*), não por Agent Teams. Logo, **Agent Teams ≠ co-evolução entre repos** — esta vive na camada git-async (ledger + doc-bridge), com a linha vermelha do A2A-runtime cross-repo intacta. Ver [`onion-adr-comms-transport-vs-execution-2026-06.md`](../../analysis/onion-adr-comms-transport-vs-execution-2026-06.md).
+- **Escopo é DENTRO de um repo, nunca cross-repo.** Agent Teams coordena dentro de **uma sessão/worktree** — **não há suporte multi-repo nativo** (limitação oficial, jun/2026). Coordenação multi-repo na prática se faz por **git + file-lock** (o próprio caso do compilador C da Anthropic — *Building a C compiler with a team of parallel Claudes*), não por Agent Teams. Logo, **Agent Teams ≠ co-evolução entre repos** — esta vive na camada git-async (ledger + doc-bridge), com a linha vermelha do A2A-runtime cross-repo intacta. Ver `onion-adr-comms-transport-vs-execution-2026-06.md` (ADR interno do core) — **em síntese:** o eixo de risco da comunicação cross-repo não é "A2A sim/não" e sim **três atos** — transportar e notificar (determinísticos, automatizáveis) vs **ler+interpretar+executar** (gate humano obrigatório); a linha vermelha do A2A-runtime permanece pela razão certa (evitar auto-execução distribuída + a atomicidade multi-repo inexistente), não por "agentes não podem se falar".
 
 > **Postura da Anthropic (fonte oficial):** autonomia **com salvaguardas**, não launch-and-forget —
 > *stopping conditions*, sandbox + guardrails, e gates por **classificador de risco** (Claude Code
@@ -243,7 +252,20 @@ A ferramenta **Workflow** é o substrato de orquestração. A ferramenta **Agent
 
 **Barreira vs. sem barreira:** `parallel` é a escolha quando há um passo de fan-in que precisa de **todos** os resultados (síntese). `pipeline` é a escolha quando cada item pode percorrer os estágios no seu próprio ritmo, sem esperar os demais (maior throughput).
 
-**Limites operacionais (jun/2026):** até **16 subagentes concorrentes** e **1.000 agregados por run**.
+**Limites operacionais (jun/2026):** até **16 subagentes concorrentes** e **1.000 agregados por run** — teto do **Workflow** (o run).
+
+> ⚠️ **Teto POR SESSÃO do Claude Code (verificado na doc primária, 2026-07-20) — é OUTRO teto, e NÃO é o fan-out do Workflow.** O harness limita **200 subagentes por sessão** (`CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`, requer Claude Code ≥ v2.1.212; qualquer inteiro positivo, sem teto máximo, **não desligável**).
+>
+> **O que CONTA:** todo subagente disparado com a ferramenta `Agent` — aninhados, background, e **inclusive os que um agente de workflow dispara com `Agent`**; e o `/subtask` (fork in-session) gasta o mesmo orçamento.
+> **O que NÃO conta — o ponto que inverte a intuição:** *"Agents a workflow script spawns with `agent()` don't count; workflows have their own per-run limit."* Ou seja, **o fan-out de `agent()` de uma orquestração NÃO consome o orçamento da sessão** — o teto de run (16 concorrentes / 1.000 agregados) é que rege ali. `/fork` também não conta (vira sessão separada, com orçamento próprio).
+>
+> ⚠️ **Correção de um erro de leitura desta casa (2026-07-20):** a 1ª versão desta nota afirmava que "a sessão morde ANTES do run" e que o fan-out da orquestração contava contra os 200. **É falso**, e justamente no caso que esta KB cobre — foi inferido de "200 < 1.000" sem verificar a fonte, e propagado. Registrado como instância de `declarado≠verificado`, não apagado.
+>
+> **Modo de falha (também invertido na 1ª versão): é ERRO EXPLÍCITO, não silêncio.** *"When Claude reaches the limit, the Agent tool fails with `Subagent spawn limit reached`"* — e o erro instrui a concluir com as próprias ferramentas. O comportamento **silencioso** é o do teto de **WebSearch** (`CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION`, default 200, somado entre conversa principal e subagentes) — foi esse que já mordeu a casa (ver [verify-external-for-current](verify-external-for-current.md) e [search-is-sdaal-fallback-when-capped]). **Não generalize um teto pelo sintoma do outro:** diagnosticar com o instrumento errado é o oposto do que a doutrina de percepção prega.
+>
+> **`/clear` reseta a contagem — com ressalva:** *"If work that can still spawn subagents survives the clear, such as a running workflow, the count carries over instead."*
+>
+> Fontes: [sub-agents §Session subagent limit](https://code.claude.com/docs/en/sub-agents) · [tools-reference §Session search limit](https://code.claude.com/docs/en/tools-reference).
 
 **Coordenação = 0 tokens:** a lógica de fan-out/fan-in/filtro/loop roda em JavaScript no orquestrador. Não há custo de modelo na coordenação — só os subagentes pagam tokens. Isso muda o eixo econômico: vale a pena empurrar o máximo de lógica determinística para o JS.
 
@@ -290,14 +312,26 @@ A ferramenta Workflow permite fixar o `model` por chamada de `agent(...)`, entã
 
 > **Atualize o lineup SÓ aqui.** Os demais artefatos referenciam modelos por **tier** (evergreen), nunca por versão exata, e apontam para esta seção. Quando um modelo é adicionado, deprecado ou **bloqueado** (regional/política), basta atualizar esta nota — o resto continua válido.
 
-| Tier | Uso típico | Disponibilidade (jun/2026) |
-|---|---|---|
-| `opus` | orquestrador, juízes adversariais | geral |
-| `sonnet` | raciocínio de média complexidade | geral |
-| `haiku` | workers mecânicos, alto volume | geral |
-| `fable` | — | **restrita** — bloqueio do governo dos EUA (jun/2026); verificar antes de usar |
+> **Mudança estrutural (verificado 2026-07-20): existe um tier ACIMA de opus.** Desde jun/2026 há uma classe **Mythos-class** — mais capaz que qualquer Opus — publicada de duas formas: **Claude Fable 5** (`claude-fable-5`), **GA no mercado** desde 09/jun/2026, e **Claude Mythos 5** (`claude-mythos-5`), mesma capacidade sem os classificadores de segurança, **gated** (só via Project Glasswing). Isso substitui a nota antiga de "fable bloqueado pelo governo dos EUA" — mas com a linha do tempo **verificada na fonte primária (2026-07-20)**, não com um "foi revertido" vago: Fable 5 e Mythos 5 foram **suspensos em 12/jun** (controles de exportação dos EUA; sem verificação de nacionalidade em tempo real, a suspensão valeu para todos), os controles caíram em **30/jun** e o acesso foi **restaurado em 01/jul**. **Mythos 5 segue restrito** a um conjunto de organizações dos EUA (Glasswing).
+>
+> ⚠️ **Custo — é isto que mais pesa no tiering, mais que a disponibilidade:** em planos pagos o Fable 5 veio incluso até **07/jul**; a partir daí, **só via créditos de uso comprados** (Enterprise padrão não tem cota inclusa salvo créditos habilitados). Logo a régua tem **três** degraus, não dois: **GA de mercado ≠ liberado na sua conta ≠ sem custo marginal**. Confirme antes de tierar a faixa difícil para cá; **na dúvida, `opus`**. Fonte: [Redeploying Fable 5](https://www.anthropic.com/news/redeploying-fable-5).
+>
+> **Opus 5 (verificado por busca externa 2026-07-24): novo `opus`, sucessor drop-in do 4.8.** `claude-opus-5`, GA 24/jul/2026, **mesmo preço do Opus 4.8** ($5/$25 por MTok — o degrau de custo do tier `opus` NÃO mudou), SOTA em coding/knowledge (Frontier-Bench, GDPval-AA), 1M contexto / 128K output, Fast mode ~2.5×. Fica **abaixo** da Mythos-class — "metade do preço do Fable 5" e explicitamente **atrás do Mythos 5 em cyber** —, então o tier Mythos-class continua ACIMA. Ergo: o degrau `opus` ganha um modelo estritamente melhor pelo mesmo custo; **o resto da régua não muda** (referências são por-tier evergreen). ✅ **Acesso ao Opus 5 CONFIRMADO nesta conta (maestro, 2026-07-25)** — a *behavior-verification* que faltava (antes: "GA de mercado ≠ liberado nesta conta, não verificável daqui"; agora verificado). ⚠️ **PORÉM — gap de runtime (behavior-over-declaration AO VIVO):** a ferramenta `Workflow` (e `Agent`) só aceita os aliases de tier `sonnet | opus | haiku | fable` — **não existe alias `opus-5`**. O alias `opus` resolve pro **opus da SESSÃO** (hoje Opus 4.8), então a orquestração **executa 4.8 mesmo com acesso ao 5 confirmado**. Para a orquestração de fato usar Opus 5: **ou** o harness atualiza o mapeamento `opus`→`opus-5`, **ou** a sessão principal roda em Opus 5 (aí os agentes herdam por default). É a própria doutrina [behavior-over-declaration](../agentic-patterns/ai-strategies/behavior-over-declaration.md) ao vivo: **acesso declarado+confirmado ≠ execução observada** (4.8). Nomeie o gap, não o esconda — a régua por-tier segue evergreen (nada a "hardcodar"; o lever é o alias do harness / o modelo da sessão). Fonte: [Introducing Claude Opus 5](https://www.anthropic.com/news/claude-opus-5).
 
-Tiers de **worker** recomendados (uso geral): **opus / sonnet / haiku**. Snapshot de versões à época (jun/2026, apenas referência histórica, não normativa): Opus 4.8 / Sonnet 4.6 / Haiku 4.5 / Fable 5. Não existe "gpt-4" nem qualquer modelo de outro provider como opção de modelo de agente no Claude Code.
+| Tier | Uso típico | Disponibilidade (verificado 2026-07-20) |
+|---|---|---|
+| `opus` | orquestrador, juízes adversariais padrão | geral — **Claude Opus 5** (`claude-opus-5`, GA 24/jul/2026) é hoje o opus: SOTA em coding/agentic, **mesmo preço do 4.8** ($5/$25 por MTok), sucessor drop-in ao tier |
+| `sonnet` | raciocínio de média complexidade | geral — **Claude Sonnet 5** (GA 30/jun/2026) é hoje o worker sonnet: o mais agentic da linha Sonnet, qualidade próxima de Opus a custo menor, e novo default dos planos Free/Pro |
+| `haiku` | workers mecânicos, alto volume | geral — **Claude Haiku 5** é hoje o worker haiku (a linha inteira subiu para 5-family em 2026-07) |
+| **Mythos-class** (acima de opus) | reservado à faixa **difícil/alto risco** (verify adversarial, juiz/painel, síntese crítica) — **só se a conta tiver acesso confirmado** | `claude-fable-5` é **GA de mercado** (fato verificável); `claude-mythos-5` é **gated** (Project Glasswing). **GA de mercado ≠ liberado nesta conta/plano** — isso não é verificável daqui |
+
+Tiers de **worker** recomendados (uso geral): **opus / sonnet / haiku** — sempre disponíveis, sempre o piso seguro. Para a faixa **difícil/alto risco**: **se a conta tiver acesso confirmado ao tier Mythos-class**, o frontier atual dessa faixa é `claude-fable-5`; **sem confirmação de acesso, use `opus`** — não assuma o tier superior só porque ele é GA no mercado. Snapshot de versões (2026-07-25 — lineup **5-family**, confirmado pelo maestro; Opus 5 verificado por busca externa): **Opus 5** (`claude-opus-5`, tier `opus`) / **Sonnet 5** (`claude-sonnet-5`, tier `sonnet`) / **Haiku 5** (tier `haiku`) / **Fable 5** (Mythos-class GA) / **Mythos 5** (Mythos-class gated). Toda a linha subiu para 5 — atualizar SÓ este snapshot mantém o framework corrente (o resto referencia por tier evergreen). Não existe "gpt-4" nem qualquer modelo de outro provider como opção de modelo de agente no Claude Code.
+
+**Fontes (verificado por busca externa em 2026-07-20):**
+- [Introducing Claude Fable 5 and Claude Mythos 5](https://platform.claude.com/docs/en/about-claude/models/introducing-claude-fable-5-and-claude-mythos-5) — especificações, disponibilidade (GA vs gated), 1M contexto/128K output, $10/$50 por MTok
+- [Claude Fable 5 and Claude Mythos 5 — Anthropic](https://www.anthropic.com/news/claude-fable-5-mythos-5) — anúncio, "most capable widely released model"
+- [Redeploying Fable 5 — Anthropic](https://www.anthropic.com/news/redeploying-fable-5) — restauração de acesso após bloqueio anterior (nota histórica acima)
+- [Introducing Claude Sonnet 5 — Anthropic](https://www.anthropic.com/news/claude-sonnet-5) — GA 30/jun/2026, "most agentic Sonnet model yet", default Free/Pro
 
 ### Outras alavancas de eficiência
 
@@ -423,7 +457,7 @@ const branches = (await parallel([
 > irreversível. **Transportar** e **notificar** (mover resultado, avisar) são
 > determinísticos e automatizáveis; **executar** o passo crítico é gate humano. A2A é
 > ortogonal ao risco. Eixo completo (co-evolução e orquestração) em
-> [`onion-adr-comms-transport-vs-execution-2026-06.md`](../../analysis/onion-adr-comms-transport-vs-execution-2026-06.md).
+> `onion-adr-comms-transport-vs-execution-2026-06.md` (ADR interno do core).
 
 A orquestração **propõe**; o humano **confirma** o passo crítico. Exija **gate humano**
 quando:
@@ -477,7 +511,7 @@ Logo, a camada de orquestração mora em **skill + comando**, **nunca** num agen
 
 > **Nunca crie um agente `worker-orchestrator`.** Isso violaria §4.2 e esconderia a orquestração no lugar mais caro. A orquestração é responsabilidade do nível principal.
 
-> **Locus ≠ forma — hierarquia NÃO é proibida.** O que se proíbe é o **locus** (orquestração *dentro* de um agente). A **forma do grafo** é livre: plano (default) ou **árvore** (workers agrupados sob nós sumarizadores — *aggregator/sub-synthesizer*) é **legítima**, desde que **composta no nível principal** (`parallel`/`pipeline` aninhados), nunca por um agente que orquestra. Não infira "hierarquia = proibida" do silêncio: o proibido é a inversão de controle (worker dirigindo a orquestração), não a topologia. Quando usar árvore (síntese por LLM que estoura 1 agente) é caso-limite estreito — ver [ADR de topologia](../../analysis/onion-orchestration-topology-adr-2026-06-21.md). É a mesma lógica da [economia de motores](onion-engine-economy.md): o fan-in determinístico em JS vence por default; o motor LLM (nó sumarizador) entra só por necessidade.
+> **Locus ≠ forma — hierarquia NÃO é proibida.** O que se proíbe é o **locus** (orquestração *dentro* de um agente). A **forma do grafo** é livre: plano (default) ou **árvore** (workers agrupados sob nós sumarizadores — *aggregator/sub-synthesizer*) é **legítima**, desde que **composta no nível principal** (`parallel`/`pipeline` aninhados), nunca por um agente que orquestra. Não infira "hierarquia = proibida" do silêncio: o proibido é a inversão de controle (worker dirigindo a orquestração), não a topologia. Quando usar árvore (síntese por LLM que estoura 1 agente) é caso-limite estreito — ver `onion-orchestration-topology-adr-2026-06-21.md` (ADR interno do core) — **em síntese:** separa dois eixos que se confundem — o **locus** da orquestração (sempre no nível principal — invariante) e a **forma do grafo** (plano por padrão; árvore com nós sumarizadores só sob gatilho); a invariante restringe o locus, não a forma, então hierarquia composta no nível principal é legítima e o proibido é a orquestração migrar para dentro de um worker. É a mesma lógica da [economia de motores](onion-engine-economy.md): o fan-in determinístico em JS vence por default; o motor LLM (nó sumarizador) entra só por necessidade.
 
 ### Cross-links
 

@@ -8,21 +8,25 @@
 > `docs/<adopter>/graph/audit.kg.yaml`).
 >
 > **Gate (comando `/meta:kg`): ✅ CUMPRIDO em 2026-07-04** — o core dogfoodou o método na rodada
-> de `/meta:evolve` ([`onion-evolution-2026-07.kg.yaml`](../../onion/graph/onion-evolution-2026-07.kg.yaml),
-> 37 nós/33 arestas, 7 refutações como arestas REFUTES) e o comando **`/meta:kg`** nasceu dessa
+> de `/meta:evolve` (`onion-evolution-2026-07.kg.yaml` — grafo interno do core; a auditoria `/meta:evolve`
+> de 2026-07-04 modelada como KG, 37 nós/33 arestas, 7 refutações como arestas REFUTES) e o comando **`/meta:kg`** nasceu dessa
 > vivência, junto com o motor soberano `.claude/validation/kg-radar.sh`. A doutrina
 > gated-until-trigger foi respeitada: o comando veio DEPOIS do dogfood, não antes.
 >
 > **Rampa de vertical**: este padrão é a espinha da vertical `onion-investigation` — desenho, rampa
-> F0-F3 e capability draft no ADR
-> [onion-adr-verticals-investigation-cartography-2026-07.md](../../analysis/onion-adr-verticals-investigation-cartography-2026-07.md).
+> F0-F3 e capability draft no ADR `onion-adr-verticals-investigation-cartography-2026-07.md` (ADR
+> interno do core, provisório F0) — **em síntese:** desenha duas verticais novas via SDAAL —
+> investigação (KG + pesquisa multi-fonte juntas, acopladas fracamente pelo tipo de nó `evidence`) e
+> cartografia de contextos de domínio — sob a doutrina gated-until-trigger (registra desenho e gatilhos,
+> não autoriza construir) e soberania (cada instância implementa seu motor, não se porta o radar do adotante).
 > **F1 disparou em 2026-07-04** (1º dogfood na federação, sessão de um adotante — ver nota de doutrina abaixo)
 > e **F2 executou no mesmo dia** (dogfood do core via `/meta:evolve` → `/meta:kg` + `kg-radar.sh`).
 > Resta F3 (plugin `onion-investigation`), gated por maturidade de uso.
 >
 > **Camada de DOMÍNIO promovida em 2026-07-10** — 2º dogfood de campo (sinal
-> [2026-07-08-kg-dogfood-completo-promover](../../evolution/inbox/_processed/2026-07-08-kg-dogfood-completo-promover.md):
-> o grafo de auditoria evoluiu para SSOT de domínio) elevou o padrão a **duas camadas**
+> `2026-07-08-kg-dogfood-completo-promover.md`, sinal upstream interno do core — o grafo de auditoria,
+> 111 nós/170 arestas e 4 fatias de domínio, evoluiu para SSOT de domínio e pediu des-gate do `/meta:kg`
+> + promoção do **schema + método, não do código**) elevou o padrão a **duas camadas**
 > (`layer: audit|domain`), com radar-de-domínio e a materialização design/atom-map — ver seções abaixo.
 
 ## Nota de doutrina — git merge não reconcilia verdades (confirmada em campo)
@@ -39,7 +43,9 @@
 > uma segura na develop (pesquisa-para-meta, aguarda validação on-policy) e — o achado mais valioso —
 > uma flui **ao contrário** (PROD→DEV): dados vivos refutaram a urgência do framing original da
 > pesquisa (métrica inflada ~82× por contagem-fantasma). Sinal completo:
-> [`2026-07-04-kg-primeiro-dogfood-federacao.md`](../../evolution/inbox/_processed/2026-07-04-kg-primeiro-dogfood-federacao.md).
+> `2026-07-04-kg-primeiro-dogfood-federacao.md` (sinal upstream interno do core) — **em síntese:** o 1º
+> dogfood do KG na federação, onde um adotante reconciliou `develop`×`main` num `.kg.yaml` (56 nós/81
+> arestas, zero contradições) e o radar deu o veredito **por-verdade** impossível de derivar de merge textual.
 
 ## Nota de doutrina — integridade técnica ≠ completude de rastreabilidade (absorvida do campo)
 
@@ -72,8 +78,13 @@
 > fechou fiel, e há um exemplo de campo de referência.
 >
 > **Absorvida via o ingestor de doutrina** (trust-gated: um adotante regulado tem `can_correct_to: [onion-evolve]`):
-> [onion-adr-doctrine-ingestor-2026-07](../../analysis/onion-adr-doctrine-ingestor-2026-07.md) · grafo da
-> absorção: `docs/onion/graph/<adopter>-doctrine-absorption-2026-07.kg.yaml` (radar exit 0).
+> `onion-adr-doctrine-ingestor-2026-07.md` (ADR interno do core) — **em síntese:** o elo ingestor que
+> faltava na cadeia adotante→core: o core absorve doutrina de campo por **absorção curada, trust-gated
+> (policy-as-data em `members.yaml`), KG-backed (vira `.kg.yaml` com radar exit 0) e human-gated** — o
+> precursor CURADO da síntese coletiva da RFC-0003 F4, nunca o sintetizador automático; aterrissa por
+> tipo (doutrina→KB com crédito ao adotante; feature/fix→backlog; já-feito→`superseded`) e absorve o
+> princípio/método, jamais o código. Grafo da absorção:
+> `docs/onion/graph/<adopter>-doctrine-absorption-2026-07.kg.yaml` (radar exit 0).
 
 ## O problema que o padrão resolve
 
@@ -106,6 +117,16 @@ camadas** (campo `layer`, default `audit` — retrocompatível):
 O grafo é **append-mostly**: auto-correções viram arestas `REFUTES` explícitas — a história não se
 apaga, se **reconcilia** (mesmo parentesco do protocolo de re-teste do diário: `superseded: true`,
 nunca deletar — `/meta:diary review`).
+
+> **Normativo: `id` em INGLÊS, `label` em pt-BR.** Segue a skill `language-standards`/
+> [`code-standards`](../../meta-specs/code-standards.md) — `id` é identificador (código: inglês),
+> `label` é prosa lida por humano (pt-BR). **Custo real medido em campo** (sinal onion-pessoal-app,
+> 2026-07-19): quando os `id` derivaram para português, o **contrato entre artefatos quebrou** — o
+> `atom-map.md` nomeava `E_REPLY`/`E_PHOTO` e o `.kg.yaml` correspondente nomeava
+> `E_RESPOSTA`/`E_FOTO`, dois artefatos do **mesmo contrato** discordando do nome do **mesmo átomo**
+> (exatamente o que o par doc-grafo existe para evitar — ver §Design/atom-map abaixo). Seja honesto
+> sobre o limite: detectar idioma em `id` é **frágil** — isto é **convenção de autoria**, não gate
+> mecânico do radar.
 
 > **Escopo da camada `audit` — não é sobre código, é sobre investigação.** A gramática epistêmica
 > (`claim`/`evidence`/`decision`/`question` + `SUPPORTS`/`REFUTES`/`SUPERSEDES`) serve **qualquer
@@ -140,12 +161,15 @@ sem erro visível**. Evite:
   interpretada como o booleano `true` pelo parser YAML 1.1 → **os gatilhos de transição somem** (no
   campo: 9 gatilhos perdidos numa migração, um estado-absorvente **falso** apareceu). **Cite o evento
   entre aspas** (`on: "EVENTO"`) ou trate a chave `True` ao ler; nunca deixe `on:` nu.
-- **Colisão de keyword-substring com o radar.** O `kg-radar.sh` é awk puro (por design determinístico:
-  não aluga LLM) e captura campos por substring de linha (`plane:`/`status:`/`impact:`), tomando a
-  **última** ocorrência. Um campo livre — `label:`, `trace:`, `reason:` — cujo **texto** contenha
-  `plane:`/`status:`/etc. **sobrescreve o campo real**. Regra: **emita os campos livres ANTES dos
-  escalares** no bloco do nó (para o escalar real vencer), e evite as substrings de keyword dentro de
-  texto livre. É footgun garantido — trate como convenção, não como acaso.
+- **Colisão de keyword-substring com o radar — CORRIGIDA em 2026-07-19 (não é mais footgun).** O
+  `kg-radar.sh` é awk puro (por design determinístico: não aluga LLM) e **até 2026-07-19** capturava
+  campos por substring de linha, tomando a **última** ocorrência: um campo livre (`label:`, `trace:`,
+  `reason:`) cujo texto contivesse `plane:`/`status:`/etc. **sobrescrevia o campo real**. O workaround
+  de então — *"emita os campos livres antes dos escalares"* — **está obsoleto**: os campos passaram a
+  casar em **posição de campo** (`^[[:space:]]*<campo>:`), em `nodes`, `edges` e `meta`. **Escreva
+  labels livremente; a ordem dos campos não importa mais.** ⚠️ A armadilha permanece **inerente a
+  qualquer porta line-based** noutro runtime — por isso virou item obrigatório do contrato de
+  conformidade (ver §Multi-runtime).
 - **Vírgulas finais em flow-maps.** Trailing commas em mapas inline quebram o parse silenciosamente na
   migração — revise antes de rodar o radar.
 
@@ -171,7 +195,7 @@ sem erro visível**. Evite:
    - **fonte-única**: nó de domínio com >1 `READS` saindo (1 átomo = 1 fonte — ver §design abaixo).
 5. **FRESCOR** (`--freshness`, ⚠ atenção, **não reprova**) — a SSOT foi re-verificada contra o vivo?
    **STALE-MISSING** (nó `plane:PROD` sem `verified_at:`) · **STALE-OLD** (`verified_at` anterior à
-   `meta.baseline`). Ver §[Frescor e versão de schema](#frescor-e-versão-de-schema--o-radar-recusaavisa-quando-a-ssot-driftou).
+   `meta.baseline`) · **UNANCHORED** (`node_type: claim` com `verified_at:` sem `verified_against:` — carimbo sem alvo declarado). Ver §[Frescor e versão de schema](#frescor-e-versão-de-schema--o-radar-recusaavisa-quando-a-ssot-driftou).
 6. **SCHEMA** (`--schema`, ✗ **reprova**) — `meta.schema_version` bate com a versão que o radar entende?
    Divergência = recusa (o radar não sabe ler o arquivo); ausência = ⚠ retrocompat.
 
@@ -194,8 +218,11 @@ bela SSOT que mente", e um consumidor confiante (IA inclusive) *propaga* a menti
 dogfood mais intenso do padrão até hoje (um adotante, 2026-07-15/16: `maxByLevel`
 no grafo `2/4/8/8/8` × real vivo `2/4/12/15/20`; bloqueador "aberto" já corrigido; feature "aguardando
 push" já deployada). O valor do KG **não** é ser escrito uma vez — é ser **re-verificável**. Duas
-guardas (ADR [`kg-freshness-gate`](../../analysis/onion-adr-kg-freshness-gate-2026-07.md)), a mesma
-máquina com duas referências — *o radar recusa/avisa quando a SSOT driftou*:
+guardas (ADR `onion-adr-kg-freshness-gate-2026-07.md`, interno do core — **em síntese:** um KG-SSOT
+apodrece quando claims `plane: PROD` não são re-verificadas contra o vivo e drifta do validador quando o
+schema evolui sem versão; o core adota **duas guardas irmãs** — frescor (`verified_at`/`verified_against`
++ gate STALE) e versão de schema (`schema_version` + recusa por divergência) — e promoveu a doutrina
+SSOT-as-runtime à KB), a mesma máquina com duas referências — *o radar recusa/avisa quando a SSOT driftou*:
 
 **A. Frescor (drift no tempo — `--freshness`, ⚠ aviso).** Um nó que rastreia um artefato **móvel** é uma
 **foto**; sem carimbo de *quando* foi verificado, envelhece.
@@ -207,6 +234,30 @@ máquina com duas referências — *o radar recusa/avisa quando a SSOT driftou*:
 - **STALE-MISSING**: nó rastreado sem `verified_at:` → ⚠ (o modo-de-falha exato do campo — a SSOT de um adotante
   não tinha *nenhuma* disciplina de frescor, nem em PROD nem no nó DEV de estratégia `C_CONSOLIDATION_MAP`).
   **STALE-OLD**: `verified_at` anterior a **`meta.baseline:`** (uma data no `meta:`) → ⚠, a verdade envelheceu.
+- **MISPLANED** (todos os tipos): `plane: PROD` com `verified_against: branch|commit` → ⚠. `plane: PROD` afirma
+  "cruzei com o **artefato vivo**"; `branch`/`commit` declara "olhei a **fonte**". É contradição **interna ao
+  próprio nó** — detectável sem rede, sem contexto, sem heurística. Crédito: sinal de campo do adotante um adotante
+  (2026-07-27), que **mediu 21 nós** do próprio repo afirmando sobre produção com evidência de leitura de código,
+  **com o radar verde**. Escapavam pelo filtro por tipo do UNANCHORED (quase todos eram `evidence`) — reduzir
+  ruído tinha cegado o gate para outra classe, e por isso o MISPLANED **não** filtra por tipo. **Teto declarado
+  pelo próprio autor do sinal:** audita a procedência *declarada*, não se a declaração é verdadeira. `pin` não é
+  cobrado por ser ambíguo (ler o stamp do checkout vivo é PROD legítimo).
+- **UNANCHORED** (só em `node_type: claim`): tem `verified_at:` mas **não diz `verified_against:`** → ⚠. Carimbo **sem alvo declarado**
+  não distingue verificado de declarado. Modo-de-falha de campo (2026-07-25, adotante): nós `plane: PROD` com
+  `verified_at` *porque um `curl` respondera* — só que o `curl` mediu o **core** e a claim era sobre o
+  **adotante**. O carimbo estava no artefato errado e **nada no arquivo denunciava**. O radar não julga a
+  semântica do alvo (não pode); ele **exige que o alvo seja escrito** — e é escrevendo-o que o desalinhamento
+  fica legível a quem lê. Em PROD, `verified_against:` deixa de ser opt-in na prática: passa a ser o que
+  separa "cruzei com o vivo" de "afirmei".
+
+  **Escopo: só quem AFIRMA.** Medido nos 22 grafos do core (2026-07-26), sem filtro o veredito produzia
+  **275 avisos — 170 deles em tipos que já ancoram por outro campo**: `evidence` **é** a âncora (101 das
+  114 já traziam `trace:`), `decision` já é cobrada pelo bloco de PROVENIÊNCIA (mesma obrigação, outro
+  nome), `entity` de domínio ancora por `trace:` + `READS`/`WRITES`, `artifact` **nomeia** o alvo (alvo do
+  alvo é tautologia) e `question` não afirma. 275 avisos treinam o leitor a ignorar — o mesmo motivo pelo
+  qual nós `superseded`/`refuted` já eram pulados. Os 170 não somem: viram **uma linha `ℹ` contada**, para
+  o filtro ser auditável em vez de mágico. Lição atrás da lição: o veredito foi shipado **sem teste** e
+  com alcance largo demais; a correção veio junto com a fixture e o caso `(MUT)` que faltavam.
 - **Aviso, não erro** — um nó stale **mente**, não corrompe; o veredito certo é "re-verifique", não
   "recuse o arquivo". Determinístico: compara **duas datas do próprio arquivo** (`verified_at` × `baseline`),
   **sem "agora"** — reproduzível.
@@ -224,7 +275,7 @@ valida não é fonte da verdade (no campo: a SSOT viva estava no schema de uma f
 
 ## SSOT-as-runtime — o KG é o primeiro ato (mecanismo, não conselho)
 
-> **Origem da decisão:** ADR [`onion-adr-kg-freshness-gate-2026-07`](../../analysis/onion-adr-kg-freshness-gate-2026-07.md)
+> **Origem da decisão:** ADR `onion-adr-kg-freshness-gate-2026-07.md` (interno do core)
 > §*SSOT como runtime, não artefato* — que é a **SSOT do desenho** (frescor/schema, evidência, ciclo,
 > gatilhos). Esta seção é a **doutrina durável** que o ADR moldou; ela **cita**, não reescreve. Para *por
 > que* se decidiu, e para a evidência completa dos três adotantes, leia o ADR.
@@ -237,8 +288,8 @@ reconstroem o estado **por inferência** e o grafo o **declara**.
 **A formulação do maestro** (ADR §SSOT como runtime): *o `.kg.yaml` é o **bytecode**; o LLM é a **VM**
 que deve **executá-lo***. A SSOT é o programa que se **executa**, não o documento que se arquiva — o
 valor só aparece quando o KG é o **substrato de execução**. (A metáfora é **didática**, não argumento
-técnico — ver a ressalva do maestro em
-[`onion-repositioning-sdaal-session-2026-06-17`](../../analysis/onion-repositioning-sdaal-session-2026-06-17.md):
+técnico — ver a ressalva do maestro em `onion-repositioning-sdaal-session-2026-06-17.md` (sessão de
+estratégia interna do core, handoff entre instâncias):
 *"o engenheiro sênior vai perguntar 'cadê os testes?'"*.)
 
 **O ciclo obrigatório — `read(KG) → verify(vivo) → act → write(KG)`:**
@@ -255,6 +306,99 @@ técnico — ver a ressalva do maestro em
 
 **KG-first + drive-to-verify são o par canônico** (ADR §SSOT como runtime): nenhum sozinho basta — o KG
 stale engana; o git sozinho esquece o que a SSOT já sabia.
+
+### Relatório é PROJEÇÃO do grafo, não fonte paralela (a metade que faltava — achado de campo, um adotante regulado, 2026-07-20)
+
+O ciclo `read→verify→act→write` acima estava **fechado na leitura e aberto na escrita**. Toda a doutrina
+desta seção — hierarquia de forcing-function, comandos cabeados, `allowed-tools` liberando o radar —
+existe para garantir que ninguém *raciocine* sem antes consultar o grafo. Mas nada, até este achado,
+impedia que um comando **produzisse conhecimento estruturado e o deixasse fora do grafo**. O laço estava
+fechado em "não deixe o KG mentir" e aberto em "não deixe conhecimento viver fora do KG".
+
+**A evidência auto-incriminadora** (sinal de campo de um adotante regulado,
+`2026-07-20-gate-proveniencia-invertido.md`, sinal upstream interno do core — o laço do KG-SSOT fechado
+na leitura e aberto na escrita: três mecanismos protegem o grafo de *estar errado*, nenhum impede
+conhecimento de *nascer fora dele*):
+uma rodada de auditoria orquestrada — **70 agentes, 0 erros, 50 achados confirmados + 10 refutados**,
+tudo em JSON estruturado — e **nada disso foi ingerido no `.kg.yaml`**. A raiz não estava na execução
+(que rodou limpa); estava no **plano**: ele reservava uma fase para "construir o grafo" e a fase seguinte
+para "avaliar", com a saída da avaliação declarada em markdown solto. O grafo virou **predecessor** da
+avaliação em vez de ser o **destino** dela — exatamente o inverso da direção que o `write(KG)` do ciclo
+acima exige.
+
+**Autocrítica, sem esconder:** o core já tinha o diagnóstico e o próprio slogan certos. A seção
+[Por que mecanismo, e não "lembre-se de consultar"](#por-que-mecanismo-e-não-lembre-se-de-consultar),
+neste mesmo documento, já dizia — antes deste achado — que "síntese que não persistiu é síntese
+perdida" e que "advice-que-depende-de-lembrar falhou empiricamente". O core diagnosticou corretamente e
+escreveu a frase certa: **"mecanismo, não conselho"** — e mesmo assim deixou a perna da escrita como
+**conselho**, sem uma trava equivalente à do `read`. Um adotante regulado construiu o mecanismo que faltava; o core
+só tinha o texto.
+
+**O princípio, para valer daqui em diante:** se um comando produz achados estruturados, o destino é o
+`.kg.yaml`; o markdown é **vista** (projeção), nunca fonte paralela. Enquanto o relatório for redigido
+**em paralelo** ao grafo — e não **a partir dele** ou **direto nele** — ele pode divergir do que o grafo
+declara, recriando, dentro do próprio instrumento anti-divergência, a divergência que ele existe para
+combater.
+
+O mecanismo que fecha este furo (gate de proveniência que trata artefato novo sem nó como violação HARD,
+com passivo existente tolerado em baseline decrescente) é tratado à parte, para não duplicar a
+especificação aqui — ele vive em
+[`.claude/validation/kg-provenance-coverage.sh`](../../../.claude/validation/kg-provenance-coverage.sh)
+(REGRA 29 do lint), e a **doutrina da catraca** que o torna adotável está em
+[`onion-guardrails.md`](onion-guardrails.md).
+
+> ⚠️ **"Coberto" ≠ "verificado" — a cobertura é por CITAÇÃO, não por conteúdo.** O gate responde
+> *"existe nó que cite este documento?"*, e um nó que o cite **sem sustentá-lo** satisfaz o gate. Isso é
+> **deliberado**: cobertura tem de ser decidível por script (determinismo), e julgar se a citação sustenta
+> a afirmação é semântico. O lado semântico já tem dono — é o **radar** (`STALE-TRACE`, decisão-sem-proveniência)
+> e a **verificação adversarial**. Dito em voz alta porque "coberto" lido como "conferido" seria a mesma
+> falsa-garantia que a doutrina `declarado≠verificado` existe para matar.
+
+### Investigação NASCE no grafo — o irmão INTERNO da proveniência (marcador `kg:`)
+
+A REGRA 29 acima olha da **borda do grafo para fora**: *"este relatório existe no grafo?"* (algum nó o
+cita). Falta a pergunta virada para **dentro** da própria migalha/doc: *"o grafo que esta investigação
+declara ter nascido dela é **real e são**?"*. É o mesmo eixo espacial da 29 — proveniência — mas medido
+por **marcador autodeclarado** em vez de por **citação**. Por isso: **irmão INTERNO** da 29.
+
+**Origem de campo** (memória do maestro 2026-07-23, *"radar sub-usado"*): o passo `write(KG)` (passo 7)
+da skill `onion-orchestration` era **ADVICE** — e advice-que-depende-de-lembrar **falhou de novo**, o
+mesmo modo de falha que esta seção inteira documenta. Uma sessão correu **8 passadas do contrato de
+inferência (Elenxo)** e a saída **evaporou em prosa**; só virou grafo **depois, à mão**
+(`inference-contract-audit-2026-07.kg.yaml`, grafo interno do core — a escada de refutações onde cada
+passada pôs um "está fechado" que o verify REFUTOU um nível mais fundo, até a Regra de Admissão fechar o
+regresso), quando o radar então reconstruiu a escada inteira + a tese-núcleo por peso. O **radar é runtime**, não
+lint ocasional — e estava **sub-usado**. A correção é **em camadas, honesta**: (1) uma **FASE `write(KG)`
+canônica** no template da classe FINDINGS da orquestração (default-path, caminho de menor resistência —
+materializa o `.kg.yaml` + roda o radar **antes** de retornar); (2) este **gate de integridade do
+marcador**; (3) a **pergunta guiada** no `/meta:diary create` (*"nasceu no grafo? path do `.kg.yaml`,
+ou prosa-só + porquê"*); (4) o **limite honesto** declarado abaixo.
+
+**O marcador `kg:`** é um campo de frontmatter — em migalha epistêmica (`type` decision/error/learning/
+reflection) ou doc de achado — que aponta para o `.kg.yaml` onde a investigação nasceu. Quem **declara**
+`kg:` tem de apontar para um grafo que **existe**, **é** `.kg.yaml`, e **passa no `kg-radar --integrity`
+E `--schema`** (exit 0). Pendurado, não-grafo, ou radar-reprova ⇒ **HARD**. O gate vive em
+[`.claude/validation/kg-born-marker.sh`](../../../.claude/validation/kg-born-marker.sh) (REGRA 43 do lint),
+e o **marcador `kg:` é o pressuposto — o gate o prova** (com mutation test da severidade), na regra de
+admissão da casa ([`inference-mitigation.md`](inference-mitigation.md)).
+
+> ⚠️ **Por que NÃO tem catraca/baseline — e por que isso é o CORRETO, não frouxidão.** A REGRA 29 precisa
+> de catraca porque cobra **ausência** (doc sem nó = violação): sem baseline reprovaria dezenas de legados
+> no 1º dia e seria desligada — o erro da catraca. Aqui é o **oposto**: a **ausência** do marcador `kg:`
+> **não é violação**. As ~72 migalhas existentes não declaram `kg:` — e o gate **nasce silencioso**, sem
+> retro-reprovar ninguém. Só o `kg:` **declarado-mas-inválido** reprova. `missing != violation` ⇒ não há
+> passivo a tolerar ⇒ não há baseline. Pôr catraca aqui **repetiria** o erro que a 29 existe para não
+> repetir. (Ver a doutrina da catraca em [`onion-guardrails.md`](onion-guardrails.md) — referenciada, não
+> reescrita: a 29 é por citação **com** catraca; a 43 é por marcador **sem** catraca, e a diferença é
+> exatamente `missing != violation`.)
+
+> 🎯 **O LIMITE HONESTO — mesmo rigor do Nível B da REGRA 42.** Investigação **não-declarada** é
+> **estruturalmente indetectável**: a investigação pode não deixar rastro nenhum no repo. Este gate **não
+> força o nascimento** — garante a **integridade do que se declara**. O nascimento de fato fica por conta
+> de **disciplina + default-path** (a FASE `write(KG)` canônica da orquestração, camada 1), **não** deste
+> HARD. Não fingir que o gate força o nascimento seria a mesma desonestidade que dizer "coberto = conferido":
+> ele só prova que o `.kg.yaml` **declarado** é real e são.
+
 
 ### Os nomes: gênero × espécie (para parar de multiplicar sinônimos)
 
@@ -281,7 +425,7 @@ conselho**. Dois episódios distintos, do mesmo adotante (um adotante), na mesma
 
 | Episódio | Sinal | O que aconteceu |
 |---|---|---|
-| **origem da doutrina** | [`ssot-como-runtime-para-adr`](../../evolution/inbox/_processed/2026-07-16-ssot-como-runtime-para-adr.md) | montou o KG canônico e **o ignorou 3× na mesma sessão** — reconstruiu de git/memória enquanto o grafo já tinha a resposta (`E_ABANDON_APPLY_PROOF`, `C_CONSOLIDATION_MAP`) |
+| **origem da doutrina** | `2026-07-16-ssot-como-runtime-para-adr.md` (sinal upstream interno do core — a operação: *construir o SSOT ≠ operar a partir dele*; o par KG-first→drive-to-verify como ciclo canônico) | montou o KG canônico e **o ignorou 3× na mesma sessão** — reconstruiu de git/memória enquanto o grafo já tinha a resposta (`E_ABANDON_APPLY_PROOF`, `C_CONSOLIDATION_MAP`) |
 | **escalada a mecanismo** | `mandar-a-doutrina-kg-first` | **depois** de escrever a doutrina, reincidiu **≥4×**: planejou um redesenho do motor sem consultar o grafo. Ao consultar, o KG **corrigiu 4 erros** que ele cometeria — janela `7d`→**`14d` medido** (`C_WINDOW_SWEEP`); morte-da-chamada só-TTL→**sinal + derivação** (`C_ABANDON_PUSHED`/`Q_RELEASE_SIGNAL`); conflito com `I_NO_AGE_RELEASE`; e **metade do redesenho já existia como nó** (`R_PARAMETA`, `R_ADR018`) |
 
 > **A reincidência É o dado.** Não é falha de disciplina do consumidor — é falha de *design* do loop.
@@ -290,8 +434,9 @@ conselho**. Dois episódios distintos, do mesmo adotante (um adotante), na mesma
 
 Não é anedota de um adotante: a pesquisa de migalhas do core já **mediu** o gargalo — recall passivo
 quase perfeito **despenca para 40-60% no uso ativo em decisão**
-([work-models-research](../../analysis/onion-work-models-research-2026-07.md)). *Escrever a migalha é
-fácil; a absorção na decisão seguinte é o gargalo.* A forcing function ataca exatamente esse ponto.
+(`onion-work-models-research-2026-07.md`, pesquisa interna do core — deep-research de 104 agentes/24
+achados confirmados sobre coordenação assíncrona e autonomia agendada; o gargalo medido é a **absorção**,
+não a escrita da migalha). *Escrever a migalha é fácil; a absorção na decisão seguinte é o gargalo.* A forcing function ataca exatamente esse ponto.
 
 **Hierarquia de forcing-function** (do mais fraco ao que só o core entrega):
 
@@ -323,6 +468,55 @@ projeção `kg state` como irmã de 1ª classe do radar, e distribuição downst
 doutrina **gated-until-trigger** deste próprio padrão: o mecanismo vem depois do uso que o prove, não
 antes.
 
+## Multi-runtime — o motor tem UMA autoridade e portas conformance-gated (absorvida do campo: onion-pessoal-app)
+
+O validador local de `.kg.yaml` deve **DELEGAR** ao `kg-radar.sh`, nunca reimplementar a gramática —
+parser duplicado é onde o **falso-verde** volta (doutrina do local-validator, sessão 2026-07-18). Mas o
+campo achou a exceção que a regra não cobria: **um runtime onde o `.sh` não roda.** O app companheiro
+(`onion-pessoal-app`) precisa do gate de escrita **no device** — Hermes/React Native, sem bash. Delegar é
+impossível ali. A regra generalizada:
+
+> **O `kg-radar.sh` é a AUTORIDADE ÚNICA — o SSOT do motor.** Delegue quando o runtime permitir; quando ele
+> **proíbe** delegação (on-device/Hermes/…), uma porta em outro runtime é legítima **SÓ como adapter
+> conformance-gated** — e um **teste de conformidade porta↔`.sh` sobre os MESMOS fixtures É o gate
+> anti-drift** que a doutrina do local-validator exige. O que torna a reimplementação segura não é a porta;
+> é o conformance.
+
+**O corte certo do que portar** (validado em campo): porte o **subset que REPROVA** — INTEGRIDADE (ids
+duplicados, aresta para nó inexistente, órfão, enum inválido) + SCHEMA (versão). As camadas **analíticas
+soft** — reconciliação (REFUTES/SUPERSEDES), atenção (peso × centralidade), frescor, radar-de-domínio —
+**ficam no `.sh`** do nó confiável, porque não são gate: são leitura, não reprova. Um gate de escrita
+on-device só precisa do que reprova.
+
+**Invariante que o conformance protege:** a porta **não pode bifurcar a gramática**. Os **nomes de campo
+permanecem canônicos** — `node_type`, não `type` (o `.sh` é normativo: linha *"node_type: <tipo> (não
+`type:`)"*). Um perfil **leve** de KG (captura/pessoal) é sancionado como **subconjunto ESTRITO com nomes
+canônicos** — obrigatório `{schema_version, id, node_type, edges válidas}`; opcional `{impact, confidence,
+status, layer}` (alimentam a análise soft, degradam gracioso no radar completo). Leveza = **omitir
+opcionais**, nunca **renomear obrigatórios**; o conformance sobre os fixtures pega a bifurcação.
+
+**Origem de campo (2026-07-19):** `kgRadar.ts` (porta JS do subset-que-reprova) com conformance JS↔sh
+**6/6** — 1 KG válido + 5 defeitos (aresta pendurada, enum, id duplicado, schema divergente, edge_type).
+O sinal upstream perguntou se isto vira doutrina; vira: **kg-radar como SDAAL de múltiplos runtimes com
+contrato de conformidade.** É o mesmo princípio SDAAL do resto do Onion — uma abstração/autoridade, N
+implementações que provam conformidade ao contrato — aplicado ao motor de KG.
+
+> **O contrato de conformidade DEVE incluir o caso CAMPO-CITADO-EM-TEXTO-LIVRE** (crédito: sinal de
+> campo onion-pessoal-app, 2026-07-19 — descoberto errando: a estrela pushou um grafo quebrado).
+> **Histórico e estado atual:** o `kg-radar.sh` é line-based e, até 2026-07-19, casava campos por
+> **substring de linha**; um `label` cujo texto citasse um token (ex.: `label: "66 nós, TODOS
+> layer:audit, ZERO domain"`) virava configuração e produzia falso-`B_TRAP`, reprovando um grafo
+> correto. **Isso está CORRIGIDO no soberano**: todos os campos passaram a casar em **posição de
+> campo** (`^[[:space:]]*<campo>:`, match *e* `sub` ancorados), estendendo a defesa que já existia
+> só para `trace:` — em **todas as seções**: `nodes`, `edges` (`to`/`edge_type`/`on`) e `meta`.
+> **Por que segue no contrato:** a armadilha é **inerente a parser line-based**, então **toda porta
+> em outro runtime nasce com ela** — a porta JS inclusive. O fixture de conformidade porta-vs-`.sh`
+> precisa cobrir o caso explicitamente, senão a porta sela verde **reproduzindo o bug que o gate
+> existe para impedir** (falso-verde pela porta, não pelo `.sh`). Dois vetores reais medidos, ambos
+> obrigatórios no fixture: (1) `label` citando `layer:`/`status:`/…; (2) em aresta, `to:
+> D_migrate_to:v2` recortado na última ocorrência (→ nó inexistente) e `on:` lido de dentro de
+> `reason:` (`reas·on:`).
+
 ## Anti-whack-a-mole (disciplina complementar)
 
 - **SSOT-por-conceito**: uma variável = um significado; nomear distinto quando fluxos divergem.
@@ -334,8 +528,13 @@ antes.
 ## Design/atom-map — a 1ª instância da camada domain (ADR design-extends-kg)
 
 A rastreabilidade de **átomos de UI** não ganha grafo próprio — **estende esta camada domain**
-([ADR](../../analysis/onion-adr-design-extends-kg-2026-07.md), gate satisfeito pelo artefato real do
-o app de um adotante em [2026-07-09](../../evolution/inbox/_processed/2026-07-09-artefato-command-center-atom-map.md)):
+(`onion-adr-design-extends-kg-2026-07.md`, ADR interno do core — **em síntese:** design e KG-SDAAL são
+eixos **ortogonais**: design **DIVERGE** (generativo, gate WCAG decide) e o KG **REGE** (rastreabilidade +
+fonte-única, depois de decidir); o `atom-map` é **join**, não 2º grafo, e o `SourceTag` é a aresta
+`TRACES_TO` renderizada — adaptador do adotante, não motor do core; gate satisfeito pelo artefato real do
+app de um adotante, `2026-07-09-artefato-command-center-atom-map.md` (sinal-artefato interno do core — a
+Fase 0 do redesign: ~35 átomos, cada um com 1 fonte + 1 dono-de-exibição + 1 dono-de-escrita, ledger de
+de-dup e invariante de fonte-única verificável por grep)):
 
 - **átomo de informação** = nó `entity` com `layer: domain` (1 átomo = 1 fonte + 1 dono-de-exibição
   + 1 dono-de-escrita);
@@ -354,8 +553,22 @@ ortogonais — dois papéis, um substrato.
 **Motor de projeção ≠ motor de UI de adotante.** O core **não** distribui componentes de front
 (identidade + soberania: o `SourceTag` é sempre implementação local do adotante). O que o core tem é
 **projeção read-only dos próprios artefatos** — `kg-console.sh` renderiza o `.kg.yaml` em HTML
-self-contained (grafo interativo + veredito do `kg-radar.sh` embutido), mesmo padrão do
+self-contained (grafo interativo Cytoscape + veredito do `kg-radar.sh` embutido), mesmo padrão do
 `federation-console.sh` (zero backend, zero CDN, determinístico). Ver ≠ distribuir.
+
+**A IA que EXPLICA o grafo — narração pré-cozida** (ratificado no ADR *console rico do KG*,
+`docs/analysis/onion-adr-kg-console-rich-2026-07.md` — decisão de arquitetura core-only). O console evoluiu de
+SVG estático para um grafo Cytoscape com **encoding epistêmico** (tamanho ∝ atenção, opacidade ∝
+confiança, borda por status, halo âmbar = stale, aresta por SUPPORTS/REFUTES⊣/SUPERSEDES⇢) e um
+**tour narrado** que conduz o leitor por atenção — a narrativa é o que torna o grafo grande legível
+(vence o teto de ~50 nós). A narração é um artefato `<slug>.narration.json` **autorado por agente**
+(modo `/meta:kg narrate`) e **embutido** pelo console, tocado **offline** (não live-chat, que quebraria
+o CSP): o `kg-console.sh` continua **LLM-free** — o único ponto com IA é a autoria. Ela é **projeção
+dos 4 vereditos do radar** (atenção→ordem; REFUTES/SUPERSEDES→Aufhebung; STALE→"o que re-verificar"),
+nunca fonte paralela — e **cita só ids que existem**, garantido por mecanismo (`kg-narrate-validate.sh`,
+**REGRA 47**), não promessa. Fronteira de soberania: o que viaja na federação é o **contrato JSON**
+(`kg-view.sh --json`) + o método de encoding + o arco de narração — **nunca o JS do renderer** (o
+Cytoscape é *uma* implementação). Ver ≠ distribuir, uma camada acima.
 
 ## Mapeamento completo — o playbook (`/meta:kg map <área>`)
 
@@ -371,10 +584,10 @@ comando [`/meta:kg`](../../../.claude/commands/meta/kg.md) §Modo map. O essenci
   1. **UI → atom-map** (contrato de átomos): 1 átomo = 1 fonte + 1 dono-de-exibição + 1
      dono-de-escrita; `SourceTag` (endpoint+concept+formula) como rastreabilidade-componente;
      ledger de de-duplicação; **pergunta atômica por aba**. Exemplar:
-     [artefato command-center](../../evolution/inbox/_processed/2026-07-09-artefato-command-center-atom-map.md).
+     `2026-07-09-artefato-command-center-atom-map.md` (sinal-artefato interno do core).
   2. **Backend/API/funcionalidade → fatias de domínio**: entidades/estados/eventos/regras ancoradas
      no código; endpoint = `entity` fonte. Exemplar:
-     [kg-dogfood-completo](../../evolution/inbox/_processed/2026-07-08-kg-dogfood-completo-promover.md)
+     `2026-07-08-kg-dogfood-completo-promover.md` (sinal upstream interno do core)
      (4 fatias: ciclo do SLOT, integração PULL, máquina de SLA, dicionário ubíquo).
   3. **Jornadas/fluxos → máquina de estados**: passos = `state` do progresso do ator/processo,
      avanço = `TRANSITIONS(on evento)`, cada passo `TRACES_TO` tela/endpoint. O radar entrega valor
@@ -385,10 +598,25 @@ comando [`/meta:kg`](../../../.claude/commands/meta/kg.md) §Modo map. O essenci
 - **Invariante grep-verificável no repo do adotante**: cada endpoint-dono aparece como fonte de
   exibição em 1 componente ("cara-crachá" — `verify-read-path-first` aplicado ao front).
 
+### A 3ª aplicação — o mesmo motor como DIAGNÓSTICO de engajamento (`/meta:kg diagnose`)
+
+O `map` mapeia **software**; a mesma máquina — 2 camadas + radar — mapeia um **engajamento de
+consultoria** (descoberta de negócio). É a **tese-núcleo aplicada ao diagnóstico**: o grafo é
+runtime, o **radar diagnostica**. Cada primitiva ganha leitura de negócio: **atenção** = onde focar
+a consultoria (não a dedo — o radar ranqueia); **reconciliação** = a hipótese que a descoberta
+refutou (fontes conflitam → `claim` a reconciliar); **estado-absorvente** (`--domain`) = **o gargalo
+do cliente**, onde a jornada morre (a mesma detecção que achou o SLOT-limbo num software). As 2
+camadas: `domain` = o negócio do cliente (SSOT), `audit` = a epistemologia da consultoria
+(hipóteses/teses) que `TRACES_TO` o domínio. A cadência é humano-no-loop —
+**construir→pausar→perguntar→responder**, radar como gate por lote. **Soberania:** o método/modo vai
+ao core; o **KG do engajamento** (dado do cliente) fica no repo dev do adotante e **nunca sai** —
+mesma partição do gate client-safe. Nasceu de dogfood de campo (~107 nós/172 arestas). Detalhe:
+`.claude/commands/meta/kg.md` §Modo diagnose — decisão de arquitetura core-only.
+
 ## Generalização para o core — EXECUTADA (2026-07-10) + Fase 2
 
 O gate abriu (2026-07-04) e a camada domain foi promovida (2026-07-10, sinal
-[kg-dogfood-completo](../../evolution/inbox/_processed/2026-07-08-kg-dogfood-completo-promover.md)):
+`2026-07-08-kg-dogfood-completo-promover.md`, sinal upstream interno do core):
 o motor soberano `.claude/validation/kg-radar.sh` computa as 4 saídas + `--triples` do YAML puro,
 zero serviço externo, com fixtures no selftest de guardas. A implementação de referência do adotante reusa o stack ML
 dele (embeddings MiniLM, pgvector, grafo `ElementLink`) — **não portar dependências**: o que viaja

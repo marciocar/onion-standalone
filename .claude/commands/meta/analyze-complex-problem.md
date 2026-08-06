@@ -3,6 +3,7 @@ name: analyze-complex-problem
 description: |
   Análise estruturada de problemas complexos com template oficial.
   Use para análises críticas, migrações, arquitetura ou performance.
+  Diferença vs /quick:analysis: este é o caminho COMPLETO (tipado, com gate/template oficial); use /quick:analysis para análise rápida sem cerimônia.
 model: opus
 allowed-tools: Read Grep Glob Write
 
@@ -149,6 +150,12 @@ mkdir -p docs/analysis/
 # Salvar análise
 write docs/analysis/[slug]-analysis.md
 ```
+> ⚠️ **Grafo primeiro, markdown como VISTA** (sinal de campo de um adotante regulado, 2026-07-20). `docs/analysis/`
+> está no escopo **HARD** do gate de proveniência invertido (`kg-provenance-coverage.sh`): documento novo
+> aqui **precisa ser citado** por algum nó (`trace:`/`evidence:`) de um `.kg.yaml`. Ordem correta: modele
+> os achados no grafo **antes** de renderizar o relatório — o markdown é projeção, não fonte paralela.
+> O erro que originou esta regra entrou no **planejamento** ("saída: relatório.md"), não na execução.
+
 
 ## 📤 Output Esperado
 

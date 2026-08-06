@@ -26,10 +26,12 @@ Estabelecer contexto completo do projeto incluindo:
 ## 📋 Checklist de Preparação
 
 ### 0. KG-first — o `.kg.yaml` é o SSOT vivo do estado/domínio (antes da prosa)
-- ✅ **Se existir um `.kg.yaml` no repo, consulte-o PRIMEIRO** (`ls docs/onion/graph/*.kg.yaml
-  docs/*/graph/*.kg.yaml *.kg.yaml 2>/dev/null`) — ele é a fonte da verdade de estado/domínio, **acima**
+- ✅ **Se existir um `.kg.yaml` no repo, consulte-o PRIMEIRO** (`git ls-files '*.kg.yaml' | grep -v '/fixtures/'`
+  — resolve AO VIVO; o glob hardcoded anterior enumerava só 31 de 49 grafos, **36% cegos**, e os invisíveis
+  eram justamente os de `docs/evolution/research/<tema>/`) — ele é a fonte da verdade de estado/domínio, **acima**
   da prosa dos docs. Rode `bash .claude/validation/kg-radar.sh <arquivo>` e absorva o veredito (atenção,
-  reconciliação, integridade, frescor) citando **ids de nó**.
+  **estado**, reconciliação, integridade, frescor) citando **ids de nó**. A seção **ESTADO**
+  lista o que segue `open` e que o radar afunda — o trabalho que sobrou, não o que pesa.
 - ✅ **Drive-to-verify:** claims `plane: PROD` de alto impacto → cruzar contra o vivo antes de assumir; nó
   stale mente (`--freshness`). Sem `.kg.yaml` → siga para o item 1.
 - ⚙️ **Mecanismo, não conselho** (sinal de campo 2026-07-16): consultar o KG **por padrão** é a forcing
@@ -73,6 +75,10 @@ Estabelecer contexto completo do projeto incluindo:
 - ✅ Conhecer `docs/applying/onion-adoption-manual.md` — a **persona autobiográfica** (1ª pessoa) + ecossistema vivo: adotantes reais, **Onion-Bridge** (mobile via Agent SDK) e o site **`onionevolve.com`** (autobiografia pública; backend `app.onionevolve.com` com clone do core no VPS)
 - ✅ Sem esta etapa, a sessão sabe *operar* o framework mas não sabe *quem ele é* — perguntas de identidade/persona/site ficam sem resposta
 
+### 4.6 Aparte do Maestro — canal lateral tipado (side-channel)
+- ✅ Conhecer `docs/knowledge-base/agentic-patterns/harness/maestro-aside.md` — o vocabulário de **marcadores tipados** que o maestro usa no meio da sessão para rotear a intenção (dúvida/correção/lembrete/etapa/memória/pesquisa-paralela) ao mecanismo certo **sem descarrilhar** a tarefa.
+- ✅ Marcadores (no início da mensagem): `dúvida:` `corrige:` `reforço:` `nota:` `guarda:` `+etapa:` `-etapa:` `paralelo:` `guarda-regra:`. O hook `UserPromptSubmit` (`.claude/hooks/aside-router-hook.sh`) injeta a **rota canônica** como recall (nunca gate; os irreversíveis pedem confirmação — Ato 3/W6).
+
 ### 5. Co-evolução (se `docs/evolution/` existir)
 - ✅ Reconhecer o papel do repo: `source` (core) · `adopted` (consumidor) — via `.claude/.onion-version` ou `.claude/validation/onion-version.sh`
 - ✅ Conferir os canais de co-evolução: `docs/evolution/inbox/` (upstream, sinal/feedback) e, em consumidores, `docs/evolution/inbound/` (downstream, relatório de update/anúncio do core). O hook SessionStart "you have mail" já avisa a **contagem** no boot (📬 inbox / 📥 inbound); o warm-up apenas **orienta** — não re-conta.
@@ -91,8 +97,8 @@ Estabelecer contexto completo do projeto incluindo:
 - `docs/evolution/README.md` - Modelo de co-evolução core↔derivados (se presente)
 
 ### Estrutura de Comandos
-- 75 comandos em 7 categorias
-- 37 agentes especializados em 7 categorias
+- 102 comandos em 10 categorias
+- 51 agentes especializados em 9 categorias
 - Knowledge Bases estruturadas para IA
 
 ## 💡 Quando Usar Este Warm-up
