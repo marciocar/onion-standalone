@@ -282,7 +282,7 @@ senão a branch principal `main`/`master`). Consumido pelo `/engineer:pr`. Vive 
 quando ausente, a detecção (passo 3) adapta-se ao repo a cada PR.
 
 > **PROPOSTO (design-alvo, gated — não shipped):** `integration_branch` é **um papel de branch**. O ADR
-> [branch-roles-sdaal](../analysis/onion-adr-branch-roles-sdaal-2026-07.md) generaliza a resolução de base de
+> `onion-adr-branch-roles-sdaal-2026-07` (core-only, não viaja) generaliza a resolução de base de
 > **1 papel** para **N papéis** por faceta (fluxo/ambiente/linhagem), via um mapa `branch_roles:` no stamp:
 > ```yaml
 > branch_roles:            # PROPOSTO — schema-alvo; consumido só a partir da Fase 1 (gated)
@@ -296,7 +296,7 @@ quando ausente, a detecção (passo 3) adapta-se ao repo a cada PR.
 > é schema documentado, ainda não consumido.
 
 Adicionar este **arquivo** (não diretório) não fere §7. Consumidores: `/meta:adopt` (escreve), `/engineer:pr`
-(lê `integration_branch`), a **federação** (versão de cada membro) e o CI. Decisão: [ADR de Adoção](../analysis/onion-adr-repo-adoption-2026-06.md).
+(lê `integration_branch`), a **federação** (versão de cada membro) e o CI. Decisão: [ADR de Adoção](../knowledge-base/decisions/onion-adr-repo-adoption-2026-06.md).
 
 ### 6.2 Sessões e estado
 
@@ -324,7 +324,7 @@ Os contextos de domínio (`docs/business-context/`, `docs/technical-context/`,
 única vez. A geração pelos comandos `/docs:build-*-docs` é o **primeiro tick**; manter o contexto
 fiel à realidade é parte da sua definição. A gramática completa vive na KB
 [domain-context-lifecycle.md](../knowledge-base/concepts/domain-context-lifecycle.md); a decisão,
-no [ADR de ciclo de vida de contexto](../analysis/onion-adr-domain-context-lifecycle-2026-06.md).
+no [ADR de ciclo de vida de contexto](../knowledge-base/decisions/onion-adr-domain-context-lifecycle-2026-06.md).
 
 Regras normativas:
 

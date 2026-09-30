@@ -30,7 +30,7 @@ não depende de "lembrar de reconhecer" — a **estrutura** (hook) faz a rota em
 
 Três invariantes que o protocolo respeita:
 - **Maestro é fonte confiável** (R15.2, [untrusted-content-provenance](../../../../.claude/commands/common/prompts/untrusted-content-provenance.md)): o aparte do maestro **não** é envelopado como untrusted — isso é só para conteúdo de terceiros.
-- **Efeito irreversível cruza gate** (Ato 3 / W6 — ADR de work-models/topologias de sessão, `docs/analysis/onion-adr-work-models-session-topologies-2026-07.md`, interno do core): `-etapa:` e `guarda-regra:` injetam **propor→confirmar**, não auto-executam.
+- **Efeito irreversível cruza gate** (Ato 3 / W6 — ADR de work-models/topologias de sessão, `../../decisions/onion-adr-work-models-session-topologies-2026-07.md`, interno do core): `-etapa:` e `guarda-regra:` injetam **propor→confirmar**, não auto-executam.
 - **Custo-zero quando vazio**: mensagem sem marcador não emite nada (não polui o contexto) — mesma disciplina de motd dos hooks `session-beacon`/`co-evolution-inbox-check`.
 
 ## O vocabulário (conjunto FECHADO)
@@ -62,7 +62,7 @@ Cada marcador aponta o mecanismo **nativo do Claude Code** + o **mecanismo Onion
 |---|---|---|
 | `dúvida:` | **`/btw`** — pergunta lateral efêmera enquanto trabalha (vê o contexto, não entra no histórico); `f` forka p/ ter ferramentas | — |
 | `corrige:` | **agora** → `Esc` (interrompe **mantendo** o trabalho) e reorienta · **depois** → `Enter` (ENFILEIRA; aplica na próxima fronteira de passo, custo-zero) | worklog: registrar a virada em `notes.md` |
-| `reforço:` | `additionalContext` (canal de absorção) | [`/meta:diary`](../../../../.claude/commands/meta/diary.md) `significance:` se revela identidade |
+| `reforço:` | `additionalContext` (canal de absorção) | `/meta:diary` `significance:` se revela identidade |
 | `nota:` | anotação efêmera | `notes.md` append-only / scratchpad ([worklog-protocol](../../concepts/worklog-protocol.md)) |
 | `guarda:` | **auto-memory** ("lembre que…" → grava em `~/.claude/projects/<proj>/memory/`); `/memory` p/ navegar | `/meta:diary` (aprendizado, com `conflict_class`+`review_after`); [session-memory-lifecycle](../../concepts/session-memory-lifecycle.md) |
 | `+etapa:` | TodoWrite / plano | `STATE.md` bloco `NEXT` / `plan.md` |

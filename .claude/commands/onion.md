@@ -3,7 +3,6 @@ name: onion
 description: |
   Ponto de entrada inteligente para o Sistema Onion.
   Use para navegação, recomendações e orquestração de workflows.
-model: sonnet
 allowed-tools: Read Bash(git *) Bash(ls .claude/sessions*)
 
 parameters:
@@ -84,8 +83,8 @@ Delegar para o agente com contexto coletado.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 📊 Estrutura:
-∟ 102 comandos em 10 categorias
-∟ 51 agentes especializados
+∟ comandos invocáveis, por categoria (contagem na SSOT gerada: `docs/onion/inventory.md`)
+∟ agentes especializados, por categoria
 ∟ Task Manager Abstraction (Jira/ClickUp/Asana/Linear)
 
 🚀 Comandos Principais:

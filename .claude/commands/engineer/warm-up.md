@@ -3,7 +3,6 @@ name: warm-up
 description: |
   Preparação de contexto técnico e de engenharia.
   Foca em arquitetura, padrões de código, estrutura do projeto, comandos de desenvolvimento e frameworks técnicos.
-model: sonnet
 allowed-tools: Read Grep Bash(find *)
 category: engineer
 tags: [warmup, context, engineering, technical]
@@ -126,7 +125,7 @@ Estabelecer contexto focado em:
 - ✅ Distinguir **worklog** (estado em arquivo) do **transcript** nativo (`claude --resume`)
 
 ### Co-evolução do framework (se `docs/evolution/` existir)
-- ✅ Sinais core↔derivados passam por dois canais: `docs/evolution/inbox/` (upstream: bug/pedido/field-signal consumidor→core) e, em consumidores, `docs/evolution/inbound/` (downstream: relatório de update/anúncio core→consumidor). O hook "you have mail" (📬 inbox / 📥 inbound) avisa a contagem no boot; rode `/meta:co-evolve` para ler/gerenciar. Protocolo (3 fluxos): [docs/evolution/README.md](../../../docs/evolution/README.md)
+- ✅ Sinais core↔derivados passam por dois canais: `docs/evolution/inbox/` (upstream: bug/pedido/field-signal consumidor→core) e, em consumidores, `docs/evolution/inbound/` (downstream: relatório de update/anúncio core→consumidor). O hook "you have mail" (📬 inbox / 📥 inbound) avisa a contagem no boot; rode `/meta:co-evolve` para ler/gerenciar. Protocolo (3 fluxos): `docs/evolution/README.md` (core-only, não viaja)
 
 ## 💡 Quando Usar Este Warm-up
 

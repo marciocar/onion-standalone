@@ -1,7 +1,6 @@
 ---
 description: 🗺️ O MAPA da Constelação de Estudos — visão macro das N estrelas (estudos discuss/*) lendo SÓ os metadados (frontmatter+Tier-0) de cada SEED. Painel com phase · next_action · colisão de scope_globs · convergência de objective_tags · presença (farol vivo por worktree). Read-only, sob convite.
 name: constellation
-model: sonnet
 allowed-tools: Read Bash(bash .claude/validation/constellation-map.sh*)
 argument-hint: "[--json]"
 category: meta
@@ -18,8 +17,8 @@ estrela, este comando reorienta a **constelação** — o painel macro de todos 
 frontmatter + bloco Tier-0 de cada `docs/discussions/*/SEED.md`.
 
 > Doutrina: [constellation-of-studies.md](../../../docs/knowledge-base/concepts/constellation-of-studies.md)
-> · ADR: [onion-adr-constellation-operating-model-2026-07.md](../../../docs/analysis/onion-adr-constellation-operating-model-2026-07.md)
-> · Schema Tier-0: [docs/discussions/_template/SEED.md](../../../docs/discussions/_template/SEED.md)
+> · ADR: [onion-adr-constellation-operating-model-2026-07.md](../../../docs/knowledge-base/decisions/onion-adr-constellation-operating-model-2026-07.md)
+> · Schema Tier-0: `docs/discussions/_template/SEED.md` (core-only, não viaja)
 
 ## Invariantes (não-negociáveis — ADR §NÃO-fazer)
 

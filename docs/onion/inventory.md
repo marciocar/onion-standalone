@@ -8,37 +8,42 @@
 
 | Recurso | Quantidade |
 |---------|-----------:|
-| Comandos invocáveis | **75** |
-| Agentes | **37** |
-| Skills | **10** |
-| Knowledge Bases | **83** |
+| Comandos invocáveis | **90** |
+| Agentes | **51** |
+| Skills | **12** |
+| Knowledge Bases | **107** |
 
-## Comandos por categoria (7 categorias + root)
+## Comandos por categoria (10 categorias + root)
 
 | Categoria | Comandos |
 |-----------|---------:|
+| `meta/` | 23 |
 | `product/` | 21 |
-| `meta/` | 14 |
 | `engineer/` | 12 |
-| `docs/` | 10 |
+| `docs/` | 11 |
 | `validate/` | 6 |
 | `git/` | 6 |
 | `test/` | 3 |
+| `design/` | 3 |
+| `quick/` | 1 |
+| `development/` | 1 |
 | _root_ (`onion`, `warm-up`, `catch-up`) | 3 |
-| **Total** | **75** |
+| **Total** | **90** |
 
-## Agentes por categoria (7 categorias)
+## Agentes por categoria (9 categorias)
 
 | Categoria | Agentes |
 |-----------|--------:|
-| `development/` | 18 |
-| `product/` | 8 |
+| `development/` | 20 |
+| `product/` | 9 |
+| `meta/` | 5 |
 | `git/` | 5 |
+| `compliance/` | 5 |
 | `testing/` | 3 |
-| `review/` | 1 |
-| `meta/` | 1 |
+| `review/` | 2 |
+| `research/` | 1 |
 | `deployment/` | 1 |
-| **Total** | **37** |
+| **Total** | **51** |
 
 ## Contextos de domínio (spec-as-code — populados no projeto-alvo)
 

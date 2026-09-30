@@ -1,7 +1,6 @@
 ---
 name: co-relay
 description: 'Carteiro-LOCAL do doc-bridge (UPSTREAM) — espelho do /meta:co-deliver. Relaya um sinal do adotante (docs/evolution/inbox/) direto no inbox/ do CORE que vive na MESMA máquina, para o hook "you have mail" sinalizar 📬 sem o maestro copiar à mão. ENTREGA-SEM-COMMIT (o adotante nunca commita no repo alheio — invariante I3); o commit + triagem é da sessão do core. Dissolve o incidente "commit cross-repo na branch errada" (sinal S2): sem commit, não há pergunta de branch/push. Roda só no ADOTANTE.'
-model: sonnet
 category: meta
 tags: [co-evolution, upstream, transport, carteiro, inbox, relay, bridge]
 version: "1.1.0"
@@ -15,7 +14,7 @@ argument-hint: "[<signal-file>] --target <path-local-do-core> [--from <dir>] [--
 Transporta um **sinal** que o adotante escreveu (`docs/evolution/inbox/`) para o `inbox/` do **core na mesma
 máquina** — automatizando o `cp` que o maestro fazia à mão. É o **espelho UPSTREAM** do [`/meta:co-deliver`]
 (co-deliver.md) (que é downstream, core→adotante). Materializa o sub-protocolo do regime manual fixado no
-[ADR de relay manual](../../../docs/analysis/onion-adr-manual-relay-subprotocol-2026-06.md).
+[ADR de relay manual](../../../docs/knowledge-base/decisions/onion-adr-manual-relay-subprotocol-2026-06.md).
 
 > **O que este comando NÃO é.** Não escreve o sinal — isso é a sessão do adotante (autor). Este é o
 > **carteiro**: pega o sinal pronto no inbox/ e o **relaya** ao core. E não é o transporte distribuído
@@ -34,7 +33,10 @@ S2 ("commit cross-repo na branch errada") é **estruturalmente impossível**.
 
 **Ler o STAMP `.claude/.onion-version` (campo `role:`) — NÃO rode `onion-version.sh`** (aquele hardcoda
 `role: source` por ser a identidade da FONTE; cópia byte-idêntica no adotante mentiria 'source').
-- `role: adopted` → **ADOTANTE** → segue.
+- `role: adopted` **, `hub` ou `standalone`** → **ALVO** → segue. (O `case` do helper aceita
+  exatamente estes três; a prosa dizia só `adopted` até 2026-09-25 e, lida ao pé da letra, **mandava
+  um hub parar** — sinal de campo de um adotante `hub`. Um hub relaya upstream como qualquer
+  consumidor; o que ele tem A MAIS é adoção para baixo, que não passa por aqui.)
 - `role: source` / stamp ausente → **CORE/pré-adoção** → **parar**: o core não relaya upstream; ele anuncia
   downstream via [`/meta:co-announce`](co-announce.md). (O helper aplica a mesma guarda e sai com exit 2.)
 
@@ -93,6 +95,6 @@ Saída sugerida (ORIENTE o próximo passo — não pergunte se deve commitar):
 ## 🔗 Referências
 
 - Espelho downstream: [`/meta:co-deliver`](co-deliver.md)
-- Orientação/gestão: [`/meta:co-evolve`](co-evolve.md) · Protocolo: [docs/evolution/README.md](../../../docs/evolution/README.md)
-- Sub-protocolo (decisão): [ADR de relay manual](../../../docs/analysis/onion-adr-manual-relay-subprotocol-2026-06.md) · Eixo dos 3 atos: [ADR transporte vs execução](../../../docs/analysis/onion-adr-comms-transport-vs-execution-2026-06.md)
-- Hook: `.claude/hooks/co-evolution-inbox-check.sh` · Registro: [members.yaml](../../../docs/evolution/federation/members.yaml)
+- Orientação/gestão: [`/meta:co-evolve`](co-evolve.md) · Protocolo: `docs/evolution/README.md` (core-only, não viaja)
+- Sub-protocolo (decisão): [ADR de relay manual](../../../docs/knowledge-base/decisions/onion-adr-manual-relay-subprotocol-2026-06.md) · Eixo dos 3 atos: [ADR transporte vs execução](../../../docs/knowledge-base/decisions/onion-adr-comms-transport-vs-execution-2026-06.md)
+- Hook: `.claude/hooks/co-evolution-inbox-check.sh` · Registro: `members.yaml` (core-only, não viaja)

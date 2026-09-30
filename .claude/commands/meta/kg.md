@@ -7,7 +7,6 @@ description: |
   Roda o radar determinístico (kg-radar.sh) para atenção, reconciliação, integridade e radar-de-domínio.
   Modo `map <área>`: PFR de mapeamento completo (inventário → atom-map/fatias → .kg.yaml → radar).
   Nascido do 1º dogfood do core (auditoria /meta:evolve 2026-07-04) — F2 da vertical onion-investigation.
-model: sonnet
 category: meta
 tags: [kg, knowledge-graph, investigation, sdaal, radar, reconciliation, domain-layer]
 version: "1.4.0"
@@ -33,7 +32,7 @@ impressão do modelo.
 
 > Doutrina: [knowledge-graph-sdaal.md](../../../docs/knowledge-base/concepts/knowledge-graph-sdaal.md)
 > (inclui a nota *"git merge não reconcilia verdades"*, confirmada em campo).
-> Rampa da vertical: [ADR verticals](../../../docs/analysis/onion-adr-verticals-investigation-cartography-2026-07.md).
+> Rampa da vertical: [ADR verticals](../../../docs/knowledge-base/decisions/onion-adr-verticals-investigation-cartography-2026-07.md).
 
 ## 🟢 Quando usar
 
@@ -69,6 +68,7 @@ meta:
   id: <slug>
   schema_version: "1"        # versão da gramática — o radar RECUSA (--schema) se divergir da que entende
   baseline: AAAA-MM-DD       # opcional: nó PROD com verified_at anterior a esta data = STALE-OLD (--freshness)
+  review_after: AAAA-MM-DD   # grafos de PESQUISA: quando revisitar (cadência por tipo — ferramenta 30d · modelos 45d · mercado 90d · benchmark 120d · doutrina 12m); vencido = SOFT no lint
   date: AAAA-MM-DD
 nodes:
   - id: C_MEU_CLAIM          # prefixos por convenção: C_ claim · E_ evidence · D_ decision · Q_ question · A_ artifact
@@ -78,9 +78,14 @@ nodes:
     plane: DEV               # DEV = fonte/branch · PROD = artefato vivo (deploy+config+dados)
     impact: 4                # 1-5
     confidence: 0.9          # 0-1
-    status: open             # open | confirmed | refuted | superseded | done
+    status: open             # open | confirmed | drifted | unverifiable | refuted | superseded | done
+                             # drifted/unverifiable: saída de re-verificação (/meta:kg-freshness)
     verified_against: branch # nomeia o ALVO verificado (branch|commit|deploy|config|dump:) — rastreia por frescor mesmo em DEV; obrigatório junto de verified_at EM node_type: claim (ausente = ⚠ UNANCHORED); nos demais tipos a âncora é trace:/TRACES_TO
     verified_at: AAAA-MM-DD  # quando a claim foi cruzada com o vivo (nó PROD ou com verified_against; ausente = ⚠ STALE-MISSING)
+    valid_from: AAAA-MM-DD   # opcional (evidence): quando o FATO passou a valer — bi-temporal: ≠ verified_at (quando VOCÊ verificou)
+    source_tier: 8           # opcional (evidence): autoridade da fonte 1-10 (escala DREAM: 9-10 definitiva · 7-8 alta · 4-6 moderada · 1-3 baixa)
+    source_kind: primary     # opcional (evidence): primary | paper | engineer | analyst | forum | vendor-on-competitor | aggregator
+                             # confidence ≥ 0.8 com tier ≤ 3 ou vendor-on-competitor = SOFT no lint (doutrina: common/prompts/research-doctrine.md)
     label: "afirmacao verificavel em uma frase"
     trace: "arquivo:linha"   # migalha inline (o radar ignora; humanos e LLMs seguem)
 edges:
@@ -108,6 +113,7 @@ eventos, regras). O audit **`TRACES_TO`** o domain — mesma convenção de um a
 - Vazio → `ls docs/onion/graph/*.kg.yaml` e propor o existente mais recente.
 
 ### Passo 2 — Modelar (o juízo é seu; a estrutura é do schema)
+- **Pesquisa?** Antes de modelar, a lente: [`research-doctrine.md`](../common/prompts/research-doctrine.md) (corpus primeiro via `kg-corpus-grep.sh`, mercado invariante, tier de fonte, bi-temporal, revisita).
 - Cada **achado** vira `claim` com `plane` honesto (conclusão tirada de branch = DEV; medição do
   artefato vivo = PROD) e `trace` para a fonte.
 - Cada **verificação** vira `evidence` + aresta `SUPPORTS` ou `REFUTES`. Refutou? O claim **fica**
@@ -311,6 +317,12 @@ uma vez e embutido**; o grafo se explica no cliente.
 bash .claude/validation/kg-radar.sh <arquivo> --radar          # atenção → ordem do tour
 bash .claude/validation/kg-radar.sh <arquivo> --reconcile      # REFUTES/SUPERSEDES → passos de Aufhebung
 bash .claude/validation/kg-radar.sh <arquivo> --freshness-tsv  # STALE → passo "o que re-verificar"
+bash .claude/validation/kg-radar.sh <arquivo> --open-tsv        # a FILA COMPLETA de trabalho aberto
+
+# a fila do CORPUS INTEIRO (o radar lê um grafo por vez; o laço é de quem chama):
+for f in $(git ls-files '*.kg.yaml' | grep -v /fixtures/); do
+  bash .claude/validation/kg-radar.sh "$f" --open-tsv
+done | sort -t$'\t' -k8 -rn | head -20
 bash .claude/validation/kg-view.sh  <arquivo> --json           # os ids canônicos (paridade com o radar)
 ```
 
@@ -487,16 +499,16 @@ Antes de qualquer projeção cruzar fronteira (material pro cliente, sinal pro c
   vivo — é o que aposenta o ⚠ STALE-MISSING e deixa o próximo leitor (humano ou IA) confiar sem re-checar.
 - **Átomos de UI** (design) são nós `layer: domain`: átomo `READS` sua fonte (1 só — fonte-única),
   `TRACES_TO` o componente dono; o `SourceTag` do adotante é a aresta *renderizada*, não motor do core.
-  Doutrina: [ADR design-extends-kg](../../../docs/analysis/onion-adr-design-extends-kg-2026-07.md).
+  Doutrina: [ADR design-extends-kg](../../../docs/knowledge-base/decisions/onion-adr-design-extends-kg-2026-07.md).
 - **Fase-2 semântica** (método, não código do core): embeddings + cosseno para flag de redundância
   entre nós — cada instância implementa com seu stack (soberania); o core fica no determinístico.
 - 1º dogfood real (56 nós/81 arestas em um adotante; 37 nós/33 arestas no core): ver
-  [onion-evolution-2026-07-04.md](../../../docs/analysis/onion-evolution-2026-07-04.md) e o sinal
-  [2026-07-04-kg-primeiro-dogfood-federacao.md](../../../docs/evolution/inbox/_processed/2026-07-04-kg-primeiro-dogfood-federacao.md).
+  `onion-evolution-2026-07-04` (core-only) e o sinal
+  `2026-07-04-kg-primeiro-dogfood-federacao.md` (core-only, não viaja).
 
 ## 🔗 Referências
 
 - Doutrina: [knowledge-graph-sdaal.md](../../../docs/knowledge-base/concepts/knowledge-graph-sdaal.md)
 - Motor: `.claude/validation/kg-radar.sh` (soberano; awk determinístico)
-- Vertical: [onion-adr-verticals-investigation-cartography-2026-07.md](../../../docs/analysis/onion-adr-verticals-investigation-cartography-2026-07.md)
+- Vertical: [onion-adr-verticals-investigation-cartography-2026-07.md](../../../docs/knowledge-base/decisions/onion-adr-verticals-investigation-cartography-2026-07.md)
 - Lente irmã (estrutura do framework): `/meta:graph`

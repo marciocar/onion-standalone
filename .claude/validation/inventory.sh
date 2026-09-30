@@ -11,10 +11,11 @@
 #               --json               : objeto JSON (para consumo por ferramentas)
 #               --env                : pares KEY=VALUE (para o lint sourçar)
 #
-# Contrato  : "comando invocável" = .md em .claude/commands/ exceto common/ e
-#             READMEs. "agente" = .md em .claude/agents/ exceto READMEs.
-#             "skill" = diretório em .claude/skills/. "KB" = .md em
-#             docs/knowledge-base/ exceto index.md.
+# Contrato  : "comando invocável" = .md em commands/ exceto common/ e READMEs.
+#             "agente" = .md em agents/ exceto READMEs. "skill" = diretório em
+#             skills/. "KB" = .md em docs/knowledge-base/ exceto index.md.
+#             (Citado sem o prefixo do layout de propósito: este script viaja no
+#             plugin, onde `.claude/` não resolve — REGRA 74.)
 #
 # Determinístico, sem LLM. Mesma entrada (filesystem) → mesma saída.
 # =============================================================================
@@ -28,29 +29,53 @@ KB_DIR="${REPO_ROOT}/docs/knowledge-base"
 DOCS_DIR="${REPO_ROOT}/docs"
 
 # ---------------------------------------------------------------------------
+# ENUMERAÇÃO RASTREADA (sinal de campo de um adotante, 2026-09-04): contar por `find` no filesystem
+# inclui arquivo GITIGNORADO — o inventário local ficava verde e o CI, num checkout limpo, reprovava a
+# REGRA 8. `git ls-files` vê o MESMO conjunto que o CI. Fallback para `find` quando não há git (adotante
+# pré-init, tarball): declarado, nunca silencioso.
+# ---------------------------------------------------------------------------
+_tracked_or_find() {   # $1=dir → lista arquivos RASTREADOS sob o dir (ou todos, sem git)
+  local dir="$1"
+  # ⚠️ A CONDIÇÃO É "HOUVE RESULTADO?", NÃO "HÁ GIT?" — e a diferença custou uma SSOT mentirosa
+  # no histórico de um adotante. Sinal de campo 2026-09-08, adoção greenfield real: o repo É git
+  # desde o `git init` do PASSO 0c, mas o framework recém-copiado ainda está UNTRACKED, então
+  # `git ls-files` devolve VAZIO e o fallback para `find` NUNCA dispara. Resultado medido:
+  # `inventory.md` com `Comandos 0 · Agentes 0` e rc=0, com 146 e 60 arquivos no disco — e o
+  # `inventory.md` tem catraca byte-a-byte (REGRA 8), então o adotante commitou uma SSOT que
+  # DECLARA uma superfície que não existe. Assimetria que localizou o defeito: Skills e KBs
+  # saíram certos, porque não passam por aqui.
+  # A cura é a pergunta certa: se a enumeração rastreada veio VAZIA e o diretório TEM arquivos,
+  # cai no `find`. Ausência de resultado não é resultado.
+  local out=""
+  if git -C "${REPO_ROOT}" rev-parse --git-dir >/dev/null 2>&1; then
+    out="$(git -C "${REPO_ROOT}" ls-files -- "${dir#${REPO_ROOT}/}" 2>/dev/null | sed "s|^|${REPO_ROOT}/|")"
+  fi
+  if [ -n "${out}" ]; then
+    printf '%s\n' "${out}"
+  else
+    find "${dir}" -type f -print 2>/dev/null
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Contagem de comandos invocáveis por categoria (exclui common/ e READMEs)
 # ---------------------------------------------------------------------------
 count_commands_in() {
   # $1 = diretório de categoria
-  find "$1" -maxdepth 10 -name "*.md" \
-    ! -iname "readme.md" \
-    -print 2>/dev/null | wc -l | tr -d ' '
+  _tracked_or_find "$1" | grep -E '\.md$' | grep -viE '/readme\.md$' | grep -c . || true
 }
 
 # Total invocável (categorias + root onion/warm-up/catch-up), exclui common/ e READMEs
 count_commands_total() {
-  find "${CLAUDE_DIR}/commands" -name "*.md" \
-    ! -path "*/common/*" \
-    ! -iname "readme.md" \
-    -print 2>/dev/null | wc -l | tr -d ' '
+  _tracked_or_find "${CLAUDE_DIR}/commands" | grep -E '\.md$' | grep -v '/common/' | grep -viE '/readme\.md$' | grep -c . || true
 }
 
 count_agents_in() {
-  find "$1" -name "*.md" ! -iname "readme.md" -print 2>/dev/null | wc -l | tr -d ' '
+  _tracked_or_find "$1" | grep -E '\.md$' | grep -viE '/readme\.md$' | grep -c . || true
 }
 
 count_agents_total() {
-  find "${CLAUDE_DIR}/agents" -name "*.md" ! -iname "readme.md" -print 2>/dev/null | wc -l | tr -d ' '
+  _tracked_or_find "${CLAUDE_DIR}/agents" | grep -E '\.md$' | grep -viE '/readme\.md$' | grep -c . || true
 }
 
 count_skills() {

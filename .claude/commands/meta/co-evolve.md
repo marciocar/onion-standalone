@@ -1,7 +1,6 @@
 ---
 name: co-evolve
 description: Orienta a sessão na co-evolução Onion core↔derivados — detecta o papel do repo (core/consumidor via .claude/.onion-version), lê o inbox de mensagens pendentes, mostra a posição nos 3 fluxos e como sinalizar/gerenciar. Use no início de sessão ou quando o hook avisar 📬.
-model: haiku
 category: meta
 tags: [co-evolution, inbox, bridge, federation, onboarding, sdaal]
 version: "1.4.0"
@@ -15,7 +14,7 @@ argument-hint: "(sem argumentos — lê o estado de co-evolução deste repo)"
 Mostra a posição **deste repo** no modelo de co-evolução do Onion, lê o `inbox` e orienta o que fazer.
 **Read-only por padrão** — só move mensagens para `_processed/` quando você confirmar.
 
-> Modelo (resumo autossuficiente — o protocolo canônico completo vive em `onion-evolve/docs/evolution/`):
+> Modelo (resumo autossuficiente — o protocolo canônico completo vive em `docs/evolution/` do repositório-fonte, que é privado; o que segue basta para operar):
 > 3 fluxos — **downstream** core→projetos (releases/anúncios) · **upstream** projetos→core (sinal/bug/pedido-de-ajuda
 > via `inbox/`) · **handoff** dentro do repo (worktrees + um escritor por escopo). O humano é o **maestro**;
 > coordenação é **git-async** (sem IA-fala-IA).
@@ -28,8 +27,21 @@ O `role` pode vir de dois lugares (o core **não** tem `.onion-version` estátic
    e ler `role:` (a fonte/core retorna `role: source`).
 3. Se nenhum dos dois → repo ainda não é Onion (ou pré-adoção) — avisar e parar.
 
-Mapear: **`role: source` → CORE** (`onion-evolve`, dono do framework + protocolo) ·
-**`role: adopted` → CONSUMIDOR** (projeto que adotou o Onion, ex. vendorizado/standalone).
+Mapear:
+
+| `role:` no stamp | papel na co-evolução | o que faz aqui |
+|---|---|---|
+| **`source`** | **CORE** (`onion-evolve`) | dono do framework + do protocolo; lê `inbox/`, anuncia downstream |
+| **`adopted`** | **CONSUMIDOR** | lê `inbound/`, relaya sinal upstream via `/meta:co-relay` |
+| **`hub`** | **CONSUMIDOR para cima, AUTORIDADE para baixo** | perante o core age como consumidor (lê `inbound/`, relaya upstream). Para baixo é autoridade de adoção (Camada 2): roda `/meta:adopt` e `--update` nos **projetos dele**. ⚠️ O hub **não** anuncia downstream com `/meta:co-announce` nem mantém `members.yaml` de topologia — federação cross-empresa é Camada 3, autoridade do core. O que chega aos projetos dele chega pelo `--update`, que já emite o relatório em `inbound/` do projeto. |
+| **`standalone`** | **CONSUMIDOR** (T3, adota o core direto, sem sub-adotados) | idêntico a `adopted` na co-evolução |
+
+> ⚠️ **Esta tabela nasceu de um sinal de campo** (um adotante `hub`, 2026-09-25): a prosa só conhecia
+> `source` e `adopted`, então a primeira sessão de um hub tinha de **inferir** onde se encaixava,
+> enquanto os scripts (`co-relay.sh`, `co-deliver.sh`) já aceitavam `adopted|hub|standalone` desde
+> 2026-09-17 — quando a omissão **inversa** custou um sinal entregue à mão. Mecanismo evoluiu, prosa
+> não; e é a prosa que a sessão lê primeiro. A REGRA 90 (Prosa de comando conhece os papéis que o
+> script aceita) existe para que o par não desencontre de novo.
 
 ## Passo 2 — Ler os canais (mensagens pendentes)
 
@@ -71,7 +83,7 @@ Para cada, resumir `title`/`date`/`type` do frontmatter. Canal vazio/ausente →
 
 ## Passo 3 — Orientar conforme o papel
 
-**Se CONSUMIDOR (projeto):**
+**Se CONSUMIDOR (`adopted` / `standalone` / `hub` olhando para cima):**
 - **Pedir ajuda / reportar bug / dar feedback ao core (upstream):** escrever um markdown datado
   (`AAAA-MM-DD-<assunto>.md`) no **próprio** `inbox/` (`docs/evolution/inbox/` — é o que "a relayar ao core")
   e **transportar com [`/meta:co-relay`](co-relay.md)** (`/meta:co-relay <sinal> --target <path-do-core>`):
@@ -92,7 +104,7 @@ Para cada, resumir `title`/`date`/`type` do frontmatter. Canal vazio/ausente →
 ## Passo 3.5 — Propor rascunho (responder-gated, topologia W6)
 
 Havendo mensagem pendente (📬/📥) ou migalha vencida (⏰), **proponha — nunca execute**
-([ADR work-models](../../../docs/analysis/onion-adr-work-models-session-topologies-2026-07.md) §2:
+([ADR work-models](../../../docs/knowledge-base/decisions/onion-adr-work-models-session-topologies-2026-07.md) §2:
 atos 1-2 automáticos; o ato 3 vira *propor→confirmar*):
 
 - **CORE com 📬:** redigir o **rascunho de triagem** (veredito: fix/feature/backlog/informativo + resposta
@@ -129,4 +141,6 @@ deduplica por conteúdo na entrega; esta linha cobre entregas de carteiros antig
 
 ## Referência canônica
 
-`onion-evolve/docs/evolution/README.md` (modelo dos 3 fluxos + ritual) e `rfc/rfc-0001-co-evolution-comms.md`.
+`docs/evolution/README.md` (modelo dos 3 fluxos + ritual) e `rfc/rfc-0001-co-evolution-comms.md`, **no
+repositório-fonte — que é privado**. Instalado por plugin, você não os abre: o resumo acima é
+autossuficiente para operar, e dúvidas vão para as issues do marketplace público.

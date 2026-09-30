@@ -74,6 +74,31 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
+# A MORTE DO LINT NAO PODE PASSAR POR VEREDITO (medido 2026-09-23, na porta publica)
+# ---------------------------------------------------------------------------
+# O `set -e` acima + um `grep` que LEGITIMAMENTE nao casa mataram este lint DENTRO de uma funcao
+# (`check_radar_aufhebung`, baseline vazio): rc=1, ZERO sumario, e o CI leu esse rc=1 como "achou
+# violacao HARD". Gate morto disfarcado de julgamento e pior que crash — manda alguem cacar uma
+# violacao que nao existe, e o defeito real segue de pe. Foram DUAS hipoteses erradas antes de
+# medir, porque a morte era silenciosa: nada na saida dizia que a varredura nao completou.
+# O flag prova que o sumario FOI alcancado. Qualquer saida antes dele e `NAO PUDE JULGAR` e sai 2 —
+# a mesma convencao dos scripts-irmaos (0 pode julgar · 1 veredito · 2 nao pude).
+_LINT_SUMMARY_REACHED=0
+_lint_on_exit() {
+  local rc="$1"
+  trap - EXIT                                     # sem recursao
+  if [ "${_LINT_SUMMARY_REACHED}" -eq 1 ]; then exit "${rc}"; fi
+  echo ""
+  echo "MORREU  O lint terminou ANTES do sumario (rc=${rc}) — NAO PUDE JULGAR (nao e 'zero HARD',"
+  echo "        nem veredito). As violacoes acima sao PARCIAIS: a varredura nao completou."
+  echo "        Diagnostico: rode \`bash -x\` e leia a ULTIMA linha rastreada. O modo-de-falha"
+  echo "        conhecido e \`set -e\` sobre comando que legitimamente nao casa (grep sem"
+  echo "        resultado, array vazio) fora de uma guarda \`|| true\`."
+  exit 2
+}
+trap '_lint_on_exit "$?"' EXIT
+
+# ---------------------------------------------------------------------------
 # Resolução de caminhos: suporte a execução de qualquer diretório
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -93,6 +118,19 @@ CLAUDE_DIR="${REPO_ROOT}/.claude"
 # `grep` dentro do predicado por-arquivo, tira ~1.461 execuções de grep por varredura.
 _stamp_has() { grep -qE "$1" "${REPO_ROOT}/.claude/.onion-version" 2>/dev/null; }
 _ROLE_TAIL='[[:space:]]*(#.*)?$'
+# ⚠️ `standalone` NAO ENTRA AQUI, E A TENTATIVA FOI MEDIDA E REVERTIDA NO MESMO PR (2026-09-18).
+# `IS_DERIVED` nao e "que papel e este" — e um PORTEIRO: dezenove sitios o consomem, dezessete deles
+# como `[ "${IS_DERIVED}" -eq 1 ] && return 0`. Acrescentar um papel aqui DESLIGA dezessete guardas
+# de uma vez. Medido: a mesma arvore, trocando SO o carimbo `standalone`→`source`, vai de 0 HARD
+# para 3 HARD — o verde era comprado por isencao, nao conquistado.
+# E o dano concreto que isso abriria, provado pela passada adversarial: com `standalone` derivado, a
+# REGRA 80 e a REGRA 81 calam, e uma porta PUBLICA carregando o painel com a biografia do core
+# (294 residuos, 1.586 achados que nao sao dela) passaria em 0 HARD. Seria curar a instancia do
+# defeito e apagar o DETECTOR DA CLASSE no mesmo commit.
+# ONDE `standalone` ENTRA, e por que la e diferente: nos predicados que perguntam "a evidencia
+# core-privada esta legitimamente ausente neste papel?" (escada, residuo de revisao, carteiro). La a
+# ausencia e de OBJETO e a isencao e correta. Aqui a pergunta e outra — "devo julgar este repo?" —
+# e a porta DEVE ser julgada: ela distribui a maquinaria completa.
 IS_DERIVED=0; _stamp_has "^([[:space:]]*role:[[:space:]]*(adopted|hub)${_ROLE_TAIL}|[[:space:]]*decoupled_from:)" && IS_DERIVED=1
 IS_LEAF=0;    _stamp_has "^[[:space:]]*role:[[:space:]]*adopted${_ROLE_TAIL}" && IS_LEAF=1
 
@@ -123,7 +161,11 @@ if [ -n "${ONLY_PATH}" ]; then
     /*) ;;
     *) ONLY_PATH="$(cd "$(dirname "${ONLY_PATH}")" 2>/dev/null && pwd)/$(basename "${ONLY_PATH}")" ;;
   esac
-  [ -f "${ONLY_PATH}" ] || { echo "ERRO: --only: arquivo inexistente: ${ONLY_PATH}" >&2; exit 2; }
+  # A6 (revisor independente, 2026-09-24): esta e a UNICA saida legitima antes do sumario, e sem o
+  # flag ela herdava o banner `MORREU` dizendo "as violacoes acima sao PARCIAIS" e "rode bash -x" —
+  # diagnostico enganoso num caso onde nada foi varrido e a causa e o ARGUMENTO. O rc 2 esta certo
+  # (nao pude julgar); errado era o texto. Ligar o flag aqui deixa o trap calado e preserva o rc.
+  [ -f "${ONLY_PATH}" ] || { _LINT_SUMMARY_REACHED=1; echo "ERRO: --only: arquivo inexistente: ${ONLY_PATH}" >&2; exit 2; }
 fi
 FIXED_FILES=0
 declare -a FIX_LOG=()
@@ -273,13 +315,93 @@ check_scan_sanity() {
 # ---------------------------------------------------------------------------
 # Função auxiliar: emitir violação
 # ---------------------------------------------------------------------------
+# ── Nome junto do número (reforço do maestro 2026-09-03: "REGRA 65" sozinho não diz o que é) ────────────
+# Toda linha VIOLATION sai como "REGRA N (Título): mensagem". O título vem do cabeçalho `# REGRA N — Título [SEV]`
+# deste arquivo, e a regra de uma mensagem sem prefixo é a da função que chamou violation() — a MESMA associação
+# que rules-registry.sh usa (o 1º `nome() {` após o cabeçalho). Mecanismo, não disciplina: quem lê o lint não
+# precisa abrir lint-rules.md para saber de que regra se trata.
+declare -A RULE_TITLE=() RULE_OF_FUNC=(); RULE_MAP_BUILT=0
+_rule_map_build() {
+  RULE_MAP_BUILT=1
+  local line n t fn pend=""
+  while IFS= read -r line; do
+    case "${line}" in
+      "# REGRA "[0-9]*" — "*)
+        n="${line#\# REGRA }"; n="${n%% *}"; t="${line#*— }"; t="${t% \[*}"
+        RULE_TITLE["${n}"]="${t}"; pend="${n}" ;;
+      [a-z_]*"() {"*)
+        if [ -n "${pend}" ]; then fn="${line%%(*}"; RULE_OF_FUNC["${fn}"]="${pend}"; pend=""; fi ;;
+    esac
+  done < "${BASH_SOURCE[0]}"
+}
+_rule_label() {   # $1 = mensagem · $2 = função chamadora → mensagem com "REGRA N (Título)" na frente
+  local rule="$1" caller="$2" n="" t=""
+  [ "${RULE_MAP_BUILT}" = 1 ] || _rule_map_build
+  if [[ "${rule}" =~ ^REGRA\ ([0-9]+) ]]; then n="${BASH_REMATCH[1]}"; else n="${RULE_OF_FUNC[${caller}]:-}"; fi
+  [ -n "${n}" ] && t="${RULE_TITLE[${n}]:-}"
+  if [ -z "${t}" ]; then printf '%s' "${rule}"; return 0; fi
+  case "${rule}" in
+    "REGRA ${n} ("*) printf '%s' "${rule}" ;;                                   # já vem com título
+    "REGRA ${n}"*)   printf '%s' "REGRA ${n} (${t})${rule#REGRA ${n}}" ;;      # número sem título → insere
+    *)               printf '%s' "REGRA ${n} (${t}): ${rule}" ;;               # sem prefixo → prefixa pela função
+  esac
+}
+
+# ══ RECORTE POR PAPEL — "não pude julgar" não é a mesma coisa em todo repo ════════════════════
+# Medido 2026-09-17, na 1ª sessão REAL dentro da porta pública: o lint dela acusava HARD em guardas
+# que declaravam honestamente NÃO TER JULGADO — sem `.kg.yaml`, sem `members.yaml`, sem PR. As
+# guardas estavam certas em não passar em silêncio; erradas em tratar AUSÊNCIA LEGÍTIMA como
+# defeito. Uma porta que não recebe o corpus do core não pode ser cobrada pela validade dele.
+#
+# ⚠️ E NÃO VIRA SILÊNCIO — seria trocar um fail-closed por um fail-open. Vira SOFT com classe
+# PRÓPRIA (`[papel/SEM-OBJETO]`), que aparece no sumário, é contável, e diz o papel e a classe. A
+# distinção que importa: no repo-FONTE a mesma ausência continua HARD, porque ali ela É defeito.
+_ROLE_OF_THIS_REPO=""
+_role() {
+  [ -n "${_ROLE_OF_THIS_REPO}" ] && { printf '%s' "${_ROLE_OF_THIS_REPO}"; return; }
+  # ⚠️ LÊ O STAMP DIRETO, não invoca o `onion-version.sh`. Duas razões, e a segunda é a que me
+  # custou uma depuração: (1) `violation()` roda centenas de vezes e cada chamada abriria um bash;
+  # (2) o predicado é consultado de DENTRO de `$( )`, e ali o cache nunca persiste — o custo vira
+  # o caminho quente. O stamp é a mesma fonte que o `onion-version.sh` lê; ler o dado é mais
+  # barato e mais previsível que perguntar ao script que o lê.
+  local stamp="${REPO_ROOT}/.claude/.onion-version"
+  if [ -f "${stamp}" ]; then
+    _ROLE_OF_THIS_REPO="$(awk '/^role:/{print $2; exit}' "${stamp}" 2>/dev/null)"
+  fi
+  [ -n "${_ROLE_OF_THIS_REPO}" ] || _ROLE_OF_THIS_REPO="source"
+  printf '%s' "${_ROLE_OF_THIS_REPO}"
+}
+# A ausência só é LEGÍTIMA se o objeto de fato não existe E o papel não é a fonte. Existir-e-estar-
+# quebrado continua HARD em qualquer papel: o recorte é sobre NÃO RECEBER, nunca sobre "está ruim".
+_without_object_for_role() {
+  local msg="$1"
+  [ "$(_role)" = "source" ] && return 1
+  case "${msg}" in
+    *kg-selo/ISENCAO*|*kg-parity/NAO-MEDIDO*|*kg-yaml/NAO-VERIFICADO*|*kg-verificacao/*)
+      [ -z "$(git -C "${REPO_ROOT}" ls-files '*.kg.yaml' 2>/dev/null | head -1)" ] && return 0 ;;
+    *review-artifact/ISENCAO*)
+      return 0 ;;   # PR é do fluxo do core; porta/adotante não tem o mesmo objeto
+    *REGRA\ 85*|*door-staleness*)
+      [ ! -f "${REPO_ROOT}/docs/evolution/federation/members.yaml" ] && return 0 ;;
+    *frescor-doutrinário/CATRACA-INDISPONIVEL*)
+      return 0 ;;   # a catraca do core nasce do corpus DELE; o alvo emite a própria
+  esac
+  return 1
+}
+
 violation() {
   local severity="$1"   # HARD | SOFT
   local file="$2"
   local rule="$3"
 
+  if [ "${severity}" = "HARD" ] && _without_object_for_role "${rule}"; then
+    severity="SOFT"
+    rule="[papel/SEM-OBJETO] papel '$(_role)' não recebe o objeto desta guarda — ${rule}"
+  fi
+
   # Caminho relativo à raiz do repo para mensagens mais legíveis
   local rel_file="${file#${REPO_ROOT}/}"
+  rule="$(_rule_label "${rule}" "${FUNCNAME[1]:-}")"
 
   echo "VIOLATION: ${rel_file}: ${rule}"
   TOTAL_COUNT=$(( TOTAL_COUNT + 1 ))
@@ -495,7 +617,7 @@ check_kebab_case_filenames() {
     # Detecta violações: letra maiúscula (exceto toda a extensão) ou espaço ou underscore
     local name_part="${base%.*}"  # remove extensão para checagem
 
-    if echo "${name_part}" | grep -qE '[A-Z]| |_'; then
+    if grep -qE '[A-Z]| |_' <<< "${name_part}"; then
       violation "SOFT" "${file}" "filename não segue kebab-case (maiúsculas, espaço ou underscore em '${base}') — renomeie '${base}' para kebab-case"
     fi
   done < <(_find "${CLAUDE_DIR}" -name "*.md" ! -path "*/validation/fixtures/*" -print0 2>/dev/null)
@@ -635,11 +757,252 @@ check_review_artifact() {
   [ -f "${helper}" ] || return 0
   [ -n "${ONLY_PATH}" ] && return 0        # é regra de PR, não de arquivo
   local out sev tag path msg
-  out="$(bash "${helper}" "${REPO_ROOT}" --format=tsv 2>/dev/null || true)"
+  # HELPER MORTO != HELPER LIMPO. `2>/dev/null || true` + `[ -n "$out" ] || return 0` descartava
+  # stderr E exit code: como o modo tsv nao imprime nada quando esta tudo certo, saida vazia
+  # significava ao mesmo tempo "verde" e "explodiu" — e toda a engenharia de ISENCAO/VACUIDADE do
+  # helper morria na fronteira. rc>=2 e erro de execucao (uso/arquivo), nao veredito.
+  # Elenxo 2026-08-07. Aplicado nos DOIS consumidores de propósito: um so seria one-off.
+  local rc=0 errf; errf="$(mktemp)"
+  out="$(bash "${helper}" "${REPO_ROOT}" --format=tsv 2>"${errf}")" || rc=$?
+  if [ "${rc}" -ge 2 ]; then
+    violation "HARD" "${helper}" "[review-artifact/NAO-EXECUTOU] o helper saiu com rc=${rc} — isto e erro de EXECUCAO, nao veredito. stderr: $(head -c 300 "${errf}" | tr '\n' ' ')"
+    rm -f "${errf}"; return 0
+  fi
+  rm -f "${errf}"
   [ -n "${out}" ] || return 0
   while IFS=$'\t' read -r sev tag path msg; do
     [ -n "${sev}" ] || continue
     violation "${sev}" "${REPO_ROOT}/${path}" "[review-artifact/${tag}] ${msg}"
+  done <<< "${out}"
+}
+
+# ===========================================================================
+# REGRA 59 — Modo que a produção consome é exercitado pela bancada [HARD]
+# previne: guarda que roda no gate por um caminho que nenhum teste percorreu — o modo consumido
+#   diverge em silêncio e o falso-verde aparece só no adotante.
+#   ORIGEM (o instrumento se provou ANTES de virar regra, e provou contra MIM): o
+#   `consumed-mode-check.sh` existia desde 2026-08 e estava DESLIGADO, com o plano deste ciclo
+#   mandando "apagar, não ligar". Rodá-lo REFUTOU o próprio plano por execução: 31 pares de
+#   produção, 5 sem teste, todos nomeados. E um deles era `kg-backlog-check.sh [--format tsv]`
+#   — o modo que o LINT consome do script mergeado na véspera (REGRA 58), enquanto a bancada
+#   chamava o helper SEM a flag. O caminho que de fato barra o merge nunca fora exercitado.
+#   ORDEM DELIBERADA, escrita no grafo antes de começar e cumprida: dar `--selftest` ao
+#   detector → escrever o bloco dele na bancada → fechar os 5 modos → SÓ ENTÃO o wire-in.
+#   Ligar antes seria acender uma guarda que nunca se provou, e o CI reprovaria de cara por
+#   dívida pré-existente em vez de por regressão.
+#   O detector se prova em 4 casos (modo coberto → silêncio · descoberto → acusa nomeando
+#   script E flag · mesmo script com flag diferente ainda acusa · fonte ausente → exit 2).
+#   O PAR (script, flags) é a unidade, não o script: distinguir `--markdown` de `(sem-flag)`
+#   é o valor inteiro do instrumento.
+#   SUPRESSÃO CONTADA, nunca silenciosa: flag vinda de variável e modo coberto por delegação
+#   saem no rodapé como "fora de julgamento", com número.
+#   Toda a lógica vive em consumed-mode-check.sh.
+# ===========================================================================
+check_consumed_modes() {
+  local helper="${SCRIPT_DIR}/consumed-mode-check.sh"
+  [ -f "${helper}" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in */lint-artifacts.sh|*/lint-selftest.sh|*/consumed-mode-check.sh) : ;; *) return 0 ;; esac
+  fi
+  local out rc errf
+  rc=0; errf="$(mktemp)"
+  out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>"${errf}")" || rc=$?
+  if [ "${rc}" -ge 2 ]; then
+    violation "HARD" "${helper}" "[modo-consumido/NAO-EXECUTOU] o helper saiu com rc=${rc} — erro de EXECUCAO, nao veredito. stderr: $(head -c 300 "${errf}" | tr '\n' ' ')"
+    rm -f "${errf}"; return 0
+  fi
+  # ⚠️ rc=1 COM STDOUT VAZIO E CONTRADICAO, nao conformidade. O contrato diz "1 = ha modo sem teste",
+  # e nesse caso o helper TEM de nomear pelo menos um. Vazio significa que ele morreu no meio — o
+  # `set -e` dele tambem sai 1 (tmp sem permissao de escrita, por exemplo), e a saida some junto.
+  # Sem esta checagem o wire-in itera sobre nada e o lint passa: e a mesma familia do fail-open de
+  # 2026-08-06 (guarda que testa o modo errado), reproduzida na fronteira do consumidor.
+  if [ "${rc}" -eq 1 ] && [ -z "${out}" ]; then
+    violation "HARD" "${helper}" "[modo-consumido/CONTRADICAO] o helper saiu 1 (=ha modo sem teste) e NAO nomeou nenhum — morreu no meio? stderr: $(head -c 300 "${errf}" | tr '\n' ' ')"
+    rm -f "${errf}"; return 0
+  fi
+  rm -f "${errf}"
+  # process substitution: `printf | while` rodaria o laco em SUBSHELL e o incremento de
+  # HARD_COUNT morreria com ele — fail-open medido na REGRA 58, um dia antes desta.
+  while IFS=$'\t' read -r sev tag path msg; do
+    [ "${sev}" = "HARD" ] || continue
+    violation "HARD" "${path}" "[modo-consumido/${tag}] ${msg}"
+  done < <(printf '%s\n' "${out}")
+}
+
+# ===========================================================================
+# REGRA 60 — Identificador de código em INGLÊS [HARD]
+# previne: identificador em pt-BR entrando no código sem que nenhuma guarda mecânica o veja.
+#   ⚠️ A 1ª LINHA do `previne:` é a ÚNICA que o rules-registry projeta em lint-rules.md — se ela
+#   não fechar a oração, a regra é publicada TRUNCADA. Aconteceu aqui: a versão anterior quebrava
+#   em "...só um revisor humano (ou LLM) o" e a tabela saía com a frase pela metade. O docstring da
+#   REGRA 57 já avisa disso, no mesmo arquivo, e eu repeti mesmo assim.
+#   O que a linha cortada dizia, e que fica no corpo: só um revisor humano (ou LLM) pegaria, e o
+#   gatilho social não se repete sozinho.
+#   ORIGEM (dano medido, não incômodo estético): o revisor de CI apontou esta classe em SEIS PRs
+#   de uma única sessão (#559, #562, #563, #565, #566 e um rename interno). Cada vez eu
+#   renomeei e cada vez voltou, porque a cura era disciplina. Esta casa já mediu que o gatilho
+#   eficaz de correção é SOCIAL — logo "vou prestar mais atenção" é cura nula.
+#   [[fix-must-become-mechanism]]
+#   O DESENHO FOI DECIDIDO POR MEDIÇÃO (PR #568), antes de existir uma linha de código:
+#   casando identificador INTEIRO, só 3 de 636 casavam — cobertura baixa demais, porque os
+#   achados reais eram COMPOSTOS (`semAspas`, `_lib_ao_lado`, `_dep_faltando`). Por SEGMENTO
+#   (split `_` + fronteira camelCase) contra lista SEM HOMÓGRAFO, pega 10 dos 12 históricos com
+#   ZERO falsos nos substitutos em inglês.
+#   NASCE COM BASELINE, como a REGRA 49 e a REGRA 45: 6 residuais anteriores à sessão ficam
+#   SOFT e ocorrência NOVA é HARD. Nascer HARD sobre dívida velha é como se ensina a desligar
+#   um gate — o CI reprovaria de cara por passado, não por regressão.
+#   SÓ IDENTIFICADOR, NUNCA COMENTÁRIO NEM STRING: a doutrina é código em inglês, PROSA EM
+#   pt-BR. Uma varredura minha à mão já errou assim no #565, acusando 48 "sobras" que eram
+#   todas comentário — grep que não distingue os dois esconde o verdadeiro no meio do falso.
+#   TETO DECLARADO: abreviação não é palavra (`arq`, `donenu` escapam), e identificador dentro
+#   de programa awk embutido em string não é lido.
+#   Toda a lógica vive em identifier-language-check.sh.
+# ===========================================================================
+check_identifier_language() {
+  local helper="${SCRIPT_DIR}/identifier-language-check.sh"
+  [ -f "${helper}" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in *.sh) : ;; *) return 0 ;; esac
+  fi
+  local out rc errf
+  rc=0; errf="$(mktemp)"
+  out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>"${errf}")" || rc=$?
+  if [ "${rc}" -ge 2 ]; then
+    violation "HARD" "${helper}" "[idioma/NAO-EXECUTOU] o helper saiu com rc=${rc} — erro de EXECUCAO, nao veredito. stderr: $(head -c 300 "${errf}" | tr '\n' ' ')"
+    rm -f "${errf}"; return 0
+  fi
+  # rc=1 com stdout VAZIO e contradicao, nao conformidade — mesma fronteira que a REGRA 59 aprendeu.
+  if [ "${rc}" -eq 1 ] && [ -z "${out}" ]; then
+    violation "HARD" "${helper}" "[idioma/CONTRADICAO] o helper saiu 1 (=ha violacao) e NAO nomeou nenhuma — morreu no meio? stderr: $(head -c 300 "${errf}" | tr '\n' ' ')"
+    rm -f "${errf}"; return 0
+  fi
+  rm -f "${errf}"
+  # process substitution: `printf | while` mataria o incremento de HARD_COUNT no subshell.
+  while IFS=$'\t' read -r sev tag path msg; do
+    [ "${sev}" = "HARD" ] || continue
+    violation "HARD" "${path}" "[idioma/${tag}] ${msg}"
+  done < <(printf '%s\n' "${out}")
+}
+
+# ===========================================================================
+# REGRA 58 — O backlog cumpre as promessas do próprio `meta:` [HARD]
+# previne: backlog que promete teto e carimbo no cabeçalho e não cobra nenhum dos dois — inchando
+#   até virar cemitério, ou declarando `done` sem medição, sem nada acusar.
+#   ORIGEM (achado por passada adversarial, 2026-08-08): o `meta:` de `fios-abertos.kg.yaml`
+#   promete, em letra grande, TETO DE 20 NÓS, "onda nova exige onda COLHIDA" e "QUEM NÃO
+#   CONSEGUE CARIMBAR NÃO PODE DECLARAR FEITO". As três eram DISCIPLINA. É
+#   `fix-must-become-mechanism` violado dentro do arquivo que nomeia a doutrina — e esta casa
+#   já mediu que o gatilho eficaz de correção é social, logo disciplina não se repete sozinha.
+#   POR QUE A REGRA 49 NÃO ALCANÇA: o backlog nasce todo `plane: DEV`, de propósito, para não
+#   poluir o baseline com nós que afirmam sobre TRABALHO e não sobre produção. A R49 só olha
+#   `plane: PROD`. O efeito colateral, não previsto quando se escolheu DEV, é que declarar
+#   `done` ali sai DE GRAÇA. Esta regra fecha exatamente essa fresta.
+#   O TETO É LIDO DO ARQUIVO, nunca hardcoded: um número no script e outro no `meta:` seria a
+#   mesma classe de `declarado != verificado` que este gate existe para fechar — e a casa
+#   acabou de ver a tabela de doutrina da catraca divergir do código por um PR inteiro.
+#   FAIL-LOUD: `meta:` sem TETO declarado é HARD `SEM-TETO`, não silêncio. Guarda que não sabe
+#   o que cobrar jamais afirma conformidade (P0 da REGRA 30).
+#   ESCOPO FECHADO: só julga grafos que declaram TETO no `meta:` — hoje um. Repo sem nenhum
+#   simplesmente não é julgado, que é a lição do `kg-trace-resolve` (varreu tudo e acusou 11
+#   falsos no 1º adotante: "o CORE É O PIOR ORÁCULO DO QUE VIAJA").
+#   Toda a lógica vive em kg-backlog-check.sh.
+# ===========================================================================
+check_kg_backlog() {
+  local helper="${SCRIPT_DIR}/kg-backlog-check.sh"
+  [ -f "${helper}" ] || return 0
+  local kg out rc errf
+  while IFS= read -r kg; do
+    [ -n "${kg}" ] || continue
+    # ⚠️ O ESCOPO NÃO PODE SER O PRÓPRIO PREDICADO QUE A GUARDA JULGA — e a 1ª versão era.
+    # Ela escopava por `grep TETO`, exatamente o que a classe `SEM-TETO` existe para acusar. Duas
+    # consequências MEDIDAS por passada adversarial, e as duas são fail-open:
+    #   · apagar ou reflowar UMA linha de comentário DESLIGAVA a regra inteira, em silêncio e verde
+    #     — o fail-loud `SEM-TETO` era INALCANÇÁVEL pelo gate (só o helper isolado o via);
+    #   · e o escopo VIAJAVA: um grafo de adotante com "TETO: 3 Nós" num comentário qualquer entrava
+    #     no julgamento e era acusado. É a lição do `kg-trace-resolve` (11 falsos no 1º adotante),
+    #     repetida no PR que a cita no próprio docstring.
+    # Agora o opt-in é um marcador PRÓPRIO, independente do que se julga: quem opta permanece no
+    # escopo mesmo tendo perdido o teto, e é assim que o fail-loud chega ao gate.
+    grep -qE '^[[:space:]]*#[[:space:]]*kg-backlog-guard:[[:space:]]*on\b' "${kg}" || continue
+    if [ -n "${ONLY_PATH}" ]; then
+      case "${ONLY_PATH}" in "${kg}"|*/kg-backlog-check.sh) : ;; *) continue ;; esac
+    fi
+    # rc>=2 e erro de EXECUCAO, nao veredito — mesma fronteira que o kg-selo aprendeu por Elenxo.
+    rc=0; errf="$(mktemp)"
+    out="$(bash "${helper}" "${kg}" --format tsv 2>"${errf}")" || rc=$?
+    if [ "${rc}" -ge 2 ]; then
+      violation "HARD" "${helper}" "[kg-backlog/NAO-EXECUTOU] o helper saiu com rc=${rc} — erro de EXECUCAO, nao veredito. stderr: $(head -c 300 "${errf}" | tr '\n' ' ')"
+      rm -f "${errf}"; continue
+    fi
+    rm -f "${errf}"
+    # ⚠️ PROCESS SUBSTITUTION, NUNCA `printf | while` — e isto e um fail-open MEDIDO, cometido na 1a
+    # versao desta propria regra. `violation()` incrementa `HARD_COUNT`/`TOTAL_COUNT` no shell PAI;
+    # `cmd | while` roda o laco em SUBSHELL e o incremento MORRE com ele. O efeito e o pior possivel:
+    # a linha `VIOLATION:` sai na tela, o humano ve a acusacao, e o lint FECHA COM EXIT 0.
+    # Medido: `printf "HARD\t..." | while read; do violation; done` deixa HARD_COUNT=0 no pai.
+    # Guarda que acusa e nao conta e pior que guarda ausente — ela produz a APARENCIA de rigor.
+    while IFS=$'\t' read -r sev tag path msg; do
+      [ "${sev}" = "HARD" ] || continue
+      violation "HARD" "${path}" "[kg-backlog/${tag}] ${msg}"
+    done < <(printf '%s\n' "${out}")
+  done < <(find "${REPO_ROOT}/docs" -name '*.kg.yaml' -type f 2>/dev/null | sort)
+}
+
+# ===========================================================================
+# REGRA 57 — O veredito do run está SELADO no grafo que ele julgou [HARD]
+# previne: run que mede e não sela — a SSOT segue afirmando o que a medição já derrubou
+#   O radar sai exit 0 nesses casos porque valida o grafo contra SI MESMO, nunca contra o
+#   veredito que o run produziu. (A 1ª linha do `previne:` é a ÚNICA que o rules-registry
+#   projeta em lint-rules.md — se ela não fechar a oração, a regra é publicada truncada.)
+#   ORIGEM (gatilho MEDIDO, não vontade): o falsificador do nó C_ANCORA_SOLTA_79PCT exigia
+#   medir antes de mecanizar — "a medição decide, não a vontade". Ela veio ao contrário do
+#   que o autor supunha. O selo do M8 foi aplicado À MÃO DUAS VEZES e ficou defeituoso NAS
+#   DUAS: em 2026-08-06 (#552) escreveu-se `verified_at` sem status, e a SSOT seguiu
+#   afirmando `whatsapp-sender VIVO` por 12h depois de a medição não achar o serviço; em
+#   2026-08-07 (#555) corrigiu-se o status e ficaram 2 dos 4 DRIFTED sem a reconciliação
+#   que a tabela do Passo 4 manda. Radar exit 0 nas três vezes. [[fix-must-become-mechanism]]
+#   TESTE DE ACEITE, declarado ANTES de escrever o helper e cumprido: contra `964ab1c` acusa
+#   9/9 (os 9 ids do ledger, 0 a mais e 0 a menos); contra `main` pós-#555 acusa exatamente 2
+#   (D_whatsapp_dual_waha_default, D_structured_plan_and_doctrine).
+#   O QUE ELA NÃO COBRA: `status: drifted` para veredito DRIFTED. A doutrina de 2026-08-07
+#   (kg-freshness.md) diz que um DRIFTED já reconciliado deixa o nó `confirmed` — "a memória
+#   do veredito vive na ARESTA, não no status". Cobrar o status daria falso-positivo em 2 dos
+#   4 casos reais e contradiria a própria emenda.
+#   ESCOPO FECHADO, e é o que autoriza HARD com N=1: só julga run que DECLARA `ledger:` no
+#   frontmatter da SYNTHESIS. Repo sem nenhum (o adotante que nunca rodou /meta:kg-freshness)
+#   emite ISENÇÃO CONTADA. É a lição do vexame escrito em kg-trace-resolve.sh: aquela regra
+#   varria TODOS os grafos e acusou 11 falsos no 1º adotante — "o CORE É O PIOR ORÁCULO DO QUE
+#   VIAJA". Aqui a superfície é fechada e conhecida.
+#   TETO DECLARADO: julga se o veredito virou ESCRITA no grafo, nunca se a medição estava
+#   certa — isso é trabalho de worker, não de gate.
+#   Toda a lógica vive em kg-seal-check.sh.
+# ===========================================================================
+check_kg_seal() {
+  local helper="${SCRIPT_DIR}/kg-seal-check.sh"
+  [ -f "${helper}" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      *.kg.yaml|*SYNTHESIS.md|*ledger-por-item.tsv|*/kg-seal-check.sh) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  local out sev tag path msg
+  # HELPER MORTO != HELPER LIMPO. `2>/dev/null || true` + `[ -n "$out" ] || return 0` descartava
+  # stderr E exit code: como o modo tsv nao imprime nada quando esta tudo certo, saida vazia
+  # significava ao mesmo tempo "verde" e "explodiu" — e toda a engenharia de ISENCAO/VACUIDADE do
+  # helper morria na fronteira. rc>=2 e erro de execucao (uso/arquivo), nao veredito.
+  # Elenxo 2026-08-07. Aplicado nos DOIS consumidores de propósito: um so seria one-off.
+  local rc=0 errf; errf="$(mktemp)"
+  out="$(bash "${helper}" "${REPO_ROOT}" --format=tsv 2>"${errf}")" || rc=$?
+  if [ "${rc}" -ge 2 ]; then
+    violation "HARD" "${helper}" "[kg-selo/NAO-EXECUTOU] o helper saiu com rc=${rc} — isto e erro de EXECUCAO, nao veredito. stderr: $(head -c 300 "${errf}" | tr '\n' ' ')"
+    rm -f "${errf}"; return 0
+  fi
+  rm -f "${errf}"
+  [ -n "${out}" ] || return 0
+  while IFS=$'\t' read -r sev tag path msg; do
+    [ -n "${sev}" ] || continue
+    violation "${sev}" "${REPO_ROOT}/${path}" "[kg-selo/${tag}] ${msg}"
   done <<< "${out}"
 }
 
@@ -681,17 +1044,172 @@ check_branch_agent_distinction() {
 # lint-selftest é uma CÓPIA sem `.git` — ali `git ls-files` falha e TODO glob pareceria
 # morto, reprovando até a fixture `good`. Falso-positivo medido no dogfood, 2026-08-03:
 # a guarda acusaria a si mesma no próprio auto-teste. Fora de repo git, cai para `find`.
+_glob_literal_prefix() { # $1=glob → maior prefixo SEM curinga ('' se o glob já começa com um)
+  local g="$1" acc="" seg
+  # `set -f` NÃO é zelo: a expansão sem aspas abaixo sofre PATHNAME EXPANSION, e o argumento é
+  # literalmente um glob — sem isto, `docs/evolution/research/**` viraria a lista de arquivos do cwd.
+  local _noglob=1; case "$-" in *f*) _noglob=0 ;; esac
+  set -f
+  local IFS=/
+  for seg in ${g}; do
+    case "${seg}" in *'*'*|*'?'*|*'['*) break ;; esac
+    [ -n "${seg}" ] || continue
+    acc="${acc:+${acc}/}${seg}"
+  done
+  [ "${_noglob}" -eq 1 ] && set +f
+  printf '%s' "${acc}"
+}
+
+# As raízes que o TRANSPORTE declara viajar — SSOT única (`vendor-manifest.sh --emit-scrub-roots`),
+# nunca uma lista repetida aqui. FAIL-CLOSED: manifesto ausente/vazio devolve vazio, e quem consulta
+# trata isso como "não sei" — ou seja, NÃO concede isenção nenhuma.
+_traveling_surface() {
+  [ -n "${_SURF_TRAVELS_CACHE:-}" ] && { printf '%s' "${_SURF_TRAVELS_CACHE}"; return 0; }
+  local mf="${CLAUDE_DIR}/utils/adopt/vendor-manifest.sh"
+  if [ -f "${mf}" ]; then
+    _SURF_TRAVELS_CACHE="$(bash "${mf}" --emit-scrub-roots 2>/dev/null)" || _SURF_TRAVELS_CACHE=""
+  else
+    _SURF_TRAVELS_CACHE=""
+  fi
+  printf '%s' "${_SURF_TRAVELS_CACHE}"
+}
+
+# Verdadeiro quando NENHUM glob desta regra aponta para superfície que viaja — isto é, o objeto da
+# regra é core-only e, num alvo, ela é estruturalmente incapaz de casar. No papel `source` a árvore é
+# completa: ali a mesma ausência continua HARD (é regra morta de verdade, não falta de objeto).
+_rule_without_object_for_role() { # $1=globs (um por linha)
+  [ "$(_role)" = "source" ] && return 1
+  local surf g prefix r inside=0
+  surf="$(_traveling_surface)"
+  [ -n "${surf}" ] || return 1          # fail-closed: sem SSOT do transporte, não se concede isenção
+  while IFS= read -r g; do
+    [ -n "${g}" ] || continue
+    prefix="$(_glob_literal_prefix "${g}")"
+    [ -n "${prefix}" ] || return 1      # glob que começa em curinga varre o repo todo: tem objeto aqui
+    while IFS= read -r r; do
+      [ -n "${r}" ] || continue
+      case "${prefix}/" in "${r}/"*) inside=1; break ;; esac
+    done <<< "${surf}"
+    [ "${inside}" -eq 1 ] && return 1   # ao menos um glob mira superfície que viaja → cobrança válida
+  done <<< "$1"
+  return 0
+}
+
+# ── EXPANSOR DE BRACES, recursivo, usado pelos DOIS ramos de `_rule_glob_matches` ───────────
+# ⚠️ A 1a versão expandia UM nível e deixava de fora braces aninhadas e com `/` dentro, "para não
+#    virar fail-open". A sonda contra o binário (2026-09-29) REFUTOU a fronteira: o harness carrega
+#    `docs/x/{a,{b,d}}/**` E `docs/x/{a/f.md,b/c/g.md}` — as duas formas são legítimas, e reprová-las
+#    era FALSO POSITIVO em lente viva, o mesmo defeito que esta leva veio curar. Eu havia declarado um
+#    teto sem medir se havia algo atrás dele.
+#    E o fail-open que eu temia NÃO vem da recursão: vem de tratar "tem braces" como "casa". A fixture
+#    `bad-brace-dead` (alternativas em que NENHUMA casa ⇒ ACUSA) é o mutante que prova a diferença.
+# Imprime uma alternativa por linha; sem braces, imprime o próprio glob.
+_expand_braces() { # $1=glob
+  local g="$1" pre mid post depth i ch out rest
+  case "${g}" in *'{'*'}'*) : ;; *) printf '%s\n' "${g}"; return 0 ;; esac
+  # acha o PRIMEIRO `{` e o `}` que o FECHA, contando profundidade — é o que torna o aninhamento certo
+  pre="${g%%\{*}"; rest="${g#*\{}"; depth=1; mid=""; post=""
+  for (( i=0; i<${#rest}; i++ )); do
+    ch="${rest:i:1}"
+    case "${ch}" in
+      '{') depth=$((depth+1)) ;;
+      '}') depth=$((depth-1)); [ "${depth}" -eq 0 ] && { post="${rest:i+1}"; break; } ;;
+    esac
+    mid="${mid}${ch}"
+  done
+  [ "${depth}" -eq 0 ] || { printf '%s\n' "${g}"; return 0; }   # brace não fechada: literal, não chuta
+  # divide `mid` nas vírgulas de NÍVEL ZERO (vírgula dentro de brace aninhada pertence a ela)
+  depth=0; out=""
+  for (( i=0; i<${#mid}; i++ )); do
+    ch="${mid:i:1}"
+    case "${ch}" in
+      '{') depth=$((depth+1)); out="${out}${ch}" ;;
+      '}') depth=$((depth-1)); out="${out}${ch}" ;;
+      ',') if [ "${depth}" -eq 0 ]; then _expand_braces "${pre}${out}${post}"; out=""; else out="${out}${ch}"; fi ;;
+      *)   out="${out}${ch}" ;;
+    esac
+  done
+  _expand_braces "${pre}${out}${post}"
+}
+
 _rule_glob_matches() { # $1=glob
-  local g="$1" pat
+  local g="$1" pat _ls _depth
   if git -C "${REPO_ROOT}" rev-parse --git-dir >/dev/null 2>&1; then
-    git -C "${REPO_ROOT}" ls-files -- "${g}"        | grep -q . && return 0
-    # o harness escreve '**/x'; o pathspec do git resolve o mesmo com o sufixo puro
-    git -C "${REPO_ROOT}" ls-files -- "${g#\*\*/}"  | grep -q . && return 0
+    # ⚠️ SEM PIPE, e a razão é um HARD ESPÚRIO que só o CI produziu (2026-09-14, PR #827):
+    # a forma anterior era `git ls-files -- "$g" | grep -q .`. Sob `set -euo pipefail` (l.74) isso
+    # é uma CORRIDA: `grep -q` sai no PRIMEIRO casamento, e o `git ls-files` que ainda tem bytes a
+    # escrever leva EPIPE e sai 141 — o `pipefail` propaga o 141, o `&&` não dispara, e a regra
+    # viva é acusada de morta. `docs/evolution/research/**` casa 139 arquivos (10 KB, várias
+    # chamadas de `write`), então a janela existe; numa máquina ociosa o git termina antes de o
+    # grep sequer rodar (medido: 0 falhas em 200 tentativas locais) e num runner de 2 núcleos sob
+    # carga, não. É a classe [[pipefail-epipe-early-closer-class]], e o modo de falha é o pior
+    # possível: verde no dev, vermelho no CI, sobre um arquivo que ninguém tocou.
+    # Capturar em variável não tem leitor que feche cedo — 10 KB de caminho é barato.
+    # ⚠️ `:(glob)` É A SEMÂNTICA DO HARNESS, e o pathspec NU não era — medido contra o binário em
+    #    2026-09-29 com lentes-sonda e o log `instructions-loaded.jsonl`:
+    #      · no harness o `*` NÃO cruza `/` (sonda carregou em `raso.kg.yaml`, NÃO em `nivel/fundo`)
+    #      · no pathspec NU do git ele CRUZA: `docs/*.md` devolve 1074 hits, 1072 deles PROFUNDOS
+    #    Efeito do que havia antes: lente MORTA (um `*` que só casaria em subdiretório) era
+    #    ABSOLVIDA — fail-open silencioso, o pior formato. `:(glob)` corrige exato: o mesmo
+    #    `docs/*.md` cai para 2 hits, zero profundos, e `**` segue cruzando nos dois. Sem
+    #    dependência nova, sem lista de casos, e o fallback de sufixo abaixo continua valendo.
+    # ⚠️ BRACES: o harness EXPANDE `{a,b}` e o git NÃO reconhece, nem com `:(glob)` (medido: 0 hits
+    #    nas duas formas). Efeito: lente VIVA acusada de morta — falso positivo HARD. Por isso a
+    #    expansão acontece AQUI, antes de consultar o git, e o casamento é por QUALQUER alternativa,
+    #    que é o que o harness faz. A expansão é de UM nível e só de `{…}` sem `/` dentro: braces
+    #    aninhadas ou com barra ficam de fora e seguem pelo caminho literal — inflar o casamento
+    #    seria trocar um falso positivo por um fail-open, e o teto fica declarado em vez de chutado.
+    local _alts _a
+    _alts="$(_expand_braces "${g}")"
+    while IFS= read -r _a; do
+      [ -n "${_a}" ] || continue
+      # SEM PIPE (ver a nota de EPIPE acima): capturar em variável não tem leitor que feche cedo.
+      _ls="$(git -C "${REPO_ROOT}" ls-files -- ":(glob)${_a}")" || _ls=""
+      [ -n "${_ls}" ] && return 0
+      # o harness escreve '**/x'; o pathspec do git resolve o mesmo com o sufixo puro
+      _ls="$(git -C "${REPO_ROOT}" ls-files -- ":(glob)${_a#\*\*/}")" || _ls=""
+      [ -n "${_ls}" ] && return 0
+    done <<< "${_alts}"
     return 1
   fi
-  pat="${g##*/}"                                   # '**/*.kg.yaml' → '*.kg.yaml'
-  [ -n "${pat}" ] || return 1
-  find "${REPO_ROOT}" -name "${pat}" -not -path '*/.git/*' -print -quit | grep -q .
+  # ⚠️ RAMO NÃO-GIT — e ele MENTIU (2026-09-17, medido). A forma anterior era
+  # `find "${REPO_ROOT}" -name "${g##*/}"`, e `${g##*/}` de `docs/evolution/research/**` é `**`:
+  # um `-name '**'` casa QUALQUER arquivo do repo. Resultado: num destino sem `git init` toda regra
+  # path-scoped passava trivialmente. Foi exatamente assim que um dogfood da porta declarou
+  # "0 HARD" enquanto a porta real (repo git) reprovava — a guarda dava vereditos OPOSTOS nos dois
+  # substratos, e o barato era o que eu media. Classe [[testar-no-caminho-errado-e-nao-testar]].
+  # Agora o ramo não-git respeita o PREFIXO literal do glob, como o pathspec do git faz.
+  local prefix root _hit
+  # ⚠️ AS MESMAS DUAS DIVERGÊNCIAS DO RAMO GIT VALEM AQUI, e a bancada foi quem me mostrou: a
+  #    sandbox de fixtures é montada com `tar` (sem `.git`), então é ESTE o ramo que a cobertura
+  #    ponta-a-ponta exercita. Eu havia curado só o ramo git, e as três fixtures novas reprovaram —
+  #    não por estarem erradas, mas por medirem o caminho que eu não tinha tocado. Classe
+  #    [[testar-no-caminho-errado-e-nao-testar]], invertida: curei o caminho que eu media.
+  #      · `*` NÃO cruza `/` no harness (medido por sonda): logo um sufixo com `*` procura em UM
+  #        nível (`-maxdepth 1`), e só `**` é que desce a árvore;
+  #      · braces EXPANDEM no harness: a expansão é de um nível, igual à do ramo git, e o casamento
+  #        é por QUALQUER alternativa. Braces aninhadas ou com `/` dentro ficam de fora, de propósito.
+  local _alts_ng _ang
+  _alts_ng="$(_expand_braces "${g}")"
+  while IFS= read -r _ang; do
+    [ -n "${_ang}" ] || continue
+    prefix="$(_glob_literal_prefix "${_ang}")"
+    root="${REPO_ROOT}${prefix:+/${prefix}}"
+    [ -e "${root}" ] || continue
+    pat="${_ang##*/}"
+    case "${_ang}" in
+      *'**'*) _depth="" ;;                         # `**` desce a árvore
+      *)      _depth="-maxdepth 1" ;;              # `*` sozinho fica NUM nível, como o harness
+    esac
+    case "${pat}" in
+      ''|'*'|'**')                                 # sufixo puro-curinga: basta haver arquivo sob o prefixo
+        _hit="$(find "${root}" ${_depth} -type f -not -path '*/.git/*' -print -quit 2>/dev/null)" ;;
+      *)                                           # '**/*.kg.yaml' → '*.kg.yaml', procurado SOB o prefixo
+        _hit="$(find "${root}" ${_depth} -name "${pat}" -not -path '*/.git/*' -print -quit 2>/dev/null)" ;;
+    esac
+    [ -n "${_hit}" ] && return 0                   # sem pipe: `find | grep -q` é a corrida EPIPE de sempre
+  done <<< "${_alts_ng}"
+  return 1
 }
 
 check_rules_pathscoped() {
@@ -699,6 +1217,25 @@ check_rules_pathscoped() {
   [ -d "${rules_dir}" ] || return 0          # sem rules/ → nada a checar (adotante)
   local rule globs g matched
   while IFS= read -r -d '' rule; do
+    # ⚠️ O PREDICADO "A LENTE ESTÁ RASTREADA?" FOI TENTADO AQUI E RETIRADO, em 2026-09-29, e o
+    #    porquê fica escrito para ninguém o reintroduzir no escuro. Ele era o 1o dos dois
+    #    sobreviventes da regra duplicada fundida nesta; parecia barato e reprovou as CINCO fixtures
+    #    desta própria regra. A causa: o harness de fixtures copia cada caso para
+    #    `.claude/rules/selftest-fixture-probe.md`, que é UNTRACKED por construção — a guarda nova
+    #    disparava primeiro e o predicado sob teste nunca rodava. E não há sinal que distinga a sonda
+    #    do harness de uma lente que existe só na máquina do autor: as duas são `??` no git.
+    #    Curar isso exigiria código de produção CIENTE DE TESTE (isentar um nome de arquivo do
+    #    harness), o que é pior que o risco coberto — e o risco é pequeno, porque lente untracked
+    #    não sobrevive ao `git add -A` que qualquer commit faz.
+    #    GAP DECLARADO, com gatilho: se uma lente untracked de fato causar dano (adotante sem a
+    #    doutrina, ou perda por `git clean`), o caminho é a guarda de RASTREAMENTO genérica do repo,
+    #    não um predicado especial aqui.
+    # (a1) CORPO não-vazio — o outro sobrevivente da REGRA 91 fundida: lente que só tem frontmatter
+    #      é carregada pelo harness e não diz nada, que é gasto de contexto sem doutrina.
+    if [ -z "$(awk 'NR>1 && /^---[[:space:]]*$/{f=1;next} f' "${rule}" | tr -d '[:space:]')" ]; then
+      violation "HARD" "${rule}" "regra path-scoped com CORPO VAZIO — o harness a carregaria e ela não diria nada — escreva a doutrina abaixo do frontmatter, ou remova a regra"
+      continue
+    fi
     # (a) frontmatter com `paths:` — sem isso a regra nunca é elegível a carregar
     if ! grep -qE '^paths:' "${rule}"; then
       violation "HARD" "${rule}" "regra path-scoped sem 'paths:' no frontmatter — nunca carrega (regra que não chega ao modelo é indistinguível de regra ausente) — adicione 'paths:' com ao menos um glob no frontmatter da regra"
@@ -708,7 +1245,33 @@ check_rules_pathscoped() {
     # O `---` de fechamento do frontmatter TAMBÉM casa "^[[:space:]]*-", e sem o guard abaixo
     # ele entrava como o item de lista "--" — o ramo `paths:` VAZIO nunca disparava e caía no
     # ramo errado. Achado no dogfood da própria regra, 2026-08-03.
-    globs="$(awk '/^---[[:space:]]*$/{f=0;next} /^paths:/{f=1;next} /^[a-zA-Z_-]+:/{f=0} f&&/^[[:space:]]*-[[:space:]]+/{gsub(/^[[:space:]]*-[[:space:]]+/,""); gsub(/^["'"'"']|["'"'"']$/,""); print}' "${rule}")"
+    # ⚠️ TRÊS FORMAS DE `paths:`, e o parser só lia UMA — medido contra o BINÁRIO em 2026-09-29, com
+    #    lentes-sonda e o log `instructions-loaded.jsonl` (que registra `path_glob_match` com o arquivo
+    #    que disparou). O harness ACEITA e CARREGA as três; este parser só via a lista em bloco, então
+    #    acusava "paths: VAZIO" em lente VIVA:
+    #      · bloco   `paths:\n  - "x/**"`      → já lido
+    #      · escalar `paths: "x/**"`            → sonda CARREGOU; o parser devolvia vazio
+    #      · flow    `paths: ["x/**", "y/**"]`  → sonda CARREGOU; o parser devolvia vazio
+    #    Ler as três é ampliar o que a guarda ENXERGA, não afrouxar o que ela cobra: o predicado de
+    #    casamento (linha abaixo) segue o mesmo, e as formas novas passam a ser julgadas por ele.
+    globs="$(awk '
+      /^---[[:space:]]*$/{f=0;next}
+      /^paths:[[:space:]]*\[/ {                                    # flow-list numa linha
+        line=$0; sub(/^paths:[[:space:]]*\[/,"",line); sub(/\].*$/,"",line)
+        nglobs=split(line, parts, /[[:space:]]*,[[:space:]]*/)
+        for (i=1;i<=nglobs;i++){ g=parts[i]
+          gsub(/^[[:space:]]+|[[:space:]]+$/,"",g); gsub(/^["'"'"']|["'"'"']$/,"",g)
+          if (g!="") print g }
+        next }
+      /^paths:[[:space:]]*[^[:space:]]/ {                           # escalar na mesma linha
+        g=$0; sub(/^paths:[[:space:]]*/,"",g)
+        gsub(/^[[:space:]]+|[[:space:]]+$/,"",g); gsub(/^["'"'"']|["'"'"']$/,"",g)
+        if (g!="") print g
+        next }
+      /^paths:/{f=1;next}                                           # bloco: a lista vem abaixo
+      /^[a-zA-Z_-]+:/{f=0}
+      f&&/^[[:space:]]*-[[:space:]]+/{gsub(/^[[:space:]]*-[[:space:]]+/,""); gsub(/^["'"'"']|["'"'"']$/,""); print}
+    ' "${rule}")"
     if [ -z "${globs}" ]; then
       violation "HARD" "${rule}" "'paths:' declarado mas VAZIO — nenhum glob, a regra nunca carrega — adicione ao menos um glob sob 'paths:' (ex.: '  - \"**/*.sh\"')"
       continue
@@ -720,7 +1283,15 @@ check_rules_pathscoped() {
       if _rule_glob_matches "${g}"; then matched=1; break; fi
     done <<< "${globs}"
     if [ "${matched}" -eq 0 ]; then
-      violation "HARD" "${rule}" "nenhum glob de 'paths:' casa arquivo rastreado ($(printf '%s' "${globs}" | tr '\n' ' ')) — a regra existe no disco e NUNCA carrega — corrija o glob para casar um arquivo real rastreado (git ls-files), ou remova a regra se obsoleta"
+      # A allowlist do transporte separa a regra do objeto dela: `.claude/**` viaja inteiro, mas
+      # `docs/evolution/` não (é infra LOCAL do alvo, por desenho do vendor-manifest). As duas
+      # decisões estão certas isoladas; juntas produzem uma regra que SÓ PODE reprovar no alvo.
+      # A guarda declara a isenção — nunca passa calada — e mantém a cobrança viva no `source`.
+      if _rule_without_object_for_role "${globs}"; then
+        violation "SOFT" "${rule}" "[papel/SEM-OBJETO] papel '$(_role)' não recebe o objeto desta regra: nenhum glob de 'paths:' ($(printf '%s' "${globs}" | tr '\n' ' ')) aponta para superfície que VIAJA (vendor-manifest.sh --emit-scrub-roots) — a regra chegou com o framework, o objeto dela é core-only; ela dorme aqui, e a cobrança segue HARD na fonte"
+      else
+        violation "HARD" "${rule}" "nenhum glob de 'paths:' casa arquivo rastreado ($(printf '%s' "${globs}" | tr '\n' ' ')) — a regra existe no disco e NUNCA carrega — corrija o glob para casar um arquivo real rastreado (git ls-files), ou remova a regra se obsoleta"
+      fi
     fi
   done < <(_find "${rules_dir}" -name "*.md" ! -iname 'readme.md' -print0 2>/dev/null)
 }
@@ -755,6 +1326,223 @@ check_inventory_sync() {
 }
 
 # ===========================================================================
+# REGRA 62 — Projeção GERADA em sincronia com a fonte (docs/backlog.md) [HARD]
+# previne: projeção gerada que envelhece calada — o item existe no grafo e some da superfície que as sessões leem
+#
+# Gatilho medido (2026-08-28, PR #700/#701): escrevi uma migalha de diário e não rodei o
+# `diary-index.sh`. A entrada existia no disco e NAO no index.md — o Tier-0 pointer que as
+# sessões leem. O lint passou VERDE. Quem pegou foi o maestro perguntando, não mecanismo:
+# a mesma assinatura de C_LACUNA_E_COBERTURA ("guarda que ninguém vê e guarda que ninguém
+# roda falham igual"). O nó Q_INDICE_DO_DIARIO_SEM_CATRACA prescreveu a cura literal —
+# "uma checagem determinística de projeção-vs-fonte no lint, irmã da que já existe para
+# inventário" — e o resíduo do PR #703 classificou docs/backlog.md como irmão da lacuna.
+#
+# Por que aqui e não num cron: `/meta:backlog` não era chamado por NADA (nem hook, nem cron,
+# nem lint) e auto-início é MOAT declarado (drive.md:22). Pendurar a detecção no lint dá o
+# gatilho sem ferir a invariante: a máquina DETECTA, o humano ATUA.
+#
+# CORE-ONLY por desenho: um adotante não versiona docs/backlog.md nem o diário do core.
+# "O CORE É O PIOR ORÁCULO DO QUE VIAJA" — 11 falsos-positivos no 1o adotante ensinaram.
+# ===========================================================================
+check_generated_projection_sync() {
+  [ "${IS_DERIVED}" -eq 1 ] && return 0
+
+  # {arquivo rastreado | gerador | comando de regeneração p/ a mensagem}
+  #
+  # SÓ o backlog, e a ausência do diário aqui é MEDIÇÃO, não esquecimento. Dois bloqueios
+  # reais, achados ao tentar (2026-08-28):
+  #   (1) `diary-index.sh` faz `REPO="${1:-...}"` — o 1o argumento é o CAMINHO DO REPO, não
+  #       uma flag. Chamá-lo com `--markdown` criaria um diretório chamado `--markdown`.
+  #       Ele não tem modo stdout, que é o que `_gen_into` exige.
+  #   (2) o índice embute `Gerado em: <hoje>`. Comparação por bytes dispararia TODO DIA por
+  #       mudança só de data — máquina de falso-positivo, a classe que esta regra existe
+  #       para não ser.
+  # Por isso Q_INDICE_DO_DIARIO_SEM_CATRACA segue ABERTO, com o gatilho refinado pelo que
+  # se mediu, em vez de fechado por decreto. Ver o nó em guardas-revisao-2026-08.kg.yaml.
+  local -a projections=(
+    "docs/backlog.md|${SCRIPT_DIR}/kg-backlog-project.sh|/meta:backlog"
+  )
+
+  local row tracked gen fixcmd tmp
+  for row in "${projections[@]}"; do
+    tracked="${REPO_ROOT}/${row%%|*}"; row="${row#*|}"
+    gen="${row%%|*}"; fixcmd="${row#*|}"
+
+    # ausência do PAR (gerador ou projeção) = fora de escopo, não violação: é assim que
+    # a R58 escapa de julgar repo que não tem o artefato. Silêncio aqui é correto.
+    [ -f "${gen}" ] || continue
+    [ -f "${tracked}" ] || continue
+
+    tmp="$(mktemp)"
+    if _gen_into "${tmp}" "${tracked}" "${tracked}" -- bash "${gen}" --markdown &&
+       ! diff -q "${tracked}" "${tmp}" >/dev/null 2>&1; then
+      violation "HARD" "${tracked}" "projeção desatualizada vs a fonte — regenere com '${fixcmd}'. Projeção que envelhece calada é pior que ausente: o item existe no disco e some da superfície que as sessões leem."
+    fi
+    rm -f "${tmp}"
+  done
+}
+
+# ===========================================================================
+# REGRA 80 — Números do harness saem de SSOT gerada, nunca de comentário [HARD]
+# previne: contagem sobre o próprio harness escrita à mão, que envelhece calada e é citada como medição
+#
+# Gatilho MEDIDO (2026-09-08). Os números do harness viviam em COMENTÁRIO e divergiam entre
+# si: `689 asserções` no `onion-selftest.yml` (duas vezes), `689` de novo no
+# `onion-validate.yml`, `~850` numa análise — e a bancada daquele dia contou **1135**. Nenhum
+# tinha gerador, nenhum tinha catraca, e — isto é o que importa — todos foram escritos por
+# alguém que os mediu de verdade, na época. É a classe do painel inventado que esta onda
+# apagou, um grau abaixo: não é ficção, é DEFASAGEM. As duas enganam igual, e a defasagem
+# engana por mais tempo, porque um dia foi verdade e ninguém tem motivo para desconfiar.
+#
+# O QUE ELA NÃO FAZ, e a fronteira é o desenho todo: não julga se a bancada é BOA, nem quantas
+# asserções PASSARAM. Ela garante que o que EXISTE está contado por máquina. O que RODOU é
+# resultado de execução e vive na série histórica — o inventário imprime `⊘ NÃO MEDIDO` para
+# isso em vez de um número, que é a terceira saída desta onda inteira.
+#
+# CUSTO: o gerador é estático de propósito (grep + git ls-files + dois helpers de ~0,2s).
+# Contar famílias pelo `--list` custaria 2s a cada lint; conta-se pelo `^_family ` e a BANCADA
+# prova que os dois números batem. Sem essa prova o barato poderia medir outra coisa que o
+# caro — que é exatamente como um harness deixa de espelhar o runner.
+# ===========================================================================
+check_harness_inventory_drift() {
+  # REGRA DE REPO, NÃO DE ARQUIVO — sai cedo sob `--only`, como `check_review_artifact` já fazia.
+  # Sem isto, cada lint de arquivo ÚNICO regenerava a SSOT inteira (que chama rules-registry e
+  # consumed-mode-check): a bancada invoca o lint centenas de vezes com `--only`, e a guarda
+  # passava a custar segundos por caso sem julgar nada relacionado ao arquivo pedido.
+  [ -n "${ONLY_PATH}" ] && return 0
+  # CORE-ONLY, e não por timidez: `docs/onion/testing-inventory.md` é SSOT do harness DESTE
+  # repo. O adotante recebe `.claude/validation/` vendorizado mas não tem (nem deve ter) o doc
+  # do core — exigi-lo faria todo adotante NASCER VERMELHO num arquivo que não é dele. É a
+  # mesma doutrina já escrita neste arquivo para as catracas de baseline.
+  [ "${IS_DERIVED}" -eq 1 ] && return 0
+  local gen="${SCRIPT_DIR}/harness-inventory.sh"
+  local tracked="${REPO_ROOT}/docs/onion/testing-inventory.md"
+  [ -f "${gen}" ] || { violation "HARD" "${gen}" "harness-inventory.sh ausente — a SSOT dos números do harness não pode ser computada"; return; }
+  if [ ! -f "${tracked}" ]; then
+    violation "HARD" "${tracked}" "docs/onion/testing-inventory.md ausente — rode 'bash .claude/validation/harness-inventory.sh --markdown > docs/onion/testing-inventory.md'"
+    return
+  fi
+  local tmp; tmp="$(mktemp)"
+  if _gen_into "${tmp}" "${tracked}" "docs/onion/testing-inventory.md" -- bash "${gen}" --markdown &&
+     ! diff -q "${tracked}" "${tmp}" >/dev/null 2>&1; then
+    violation "HARD" "${tracked}" "inventário do harness desatualizado vs o harness real — regenere com 'bash .claude/validation/harness-inventory.sh --markdown > docs/onion/testing-inventory.md'. Número do harness escrito à mão foi o que produziu '689 asserções' em três comentários de CI depois de deixar de ser verdade."
+  fi
+  rm -f "${tmp}"
+}
+
+# ===========================================================================
+# REGRA 81 — Painel de estado é GERADO dos produtores, nunca redigido [HARD]
+# previne: painel de testes com número sem produtor — metas redesenhadas como medição, que foi o defeito real deste repo
+#
+# Gatilho MEDIDO, e o cadáver estava no repo: até 2026-09-08 `testing-validation-system.md`
+# publicava `Coverage: 85% · Unit Tests: 247 · Mutation: 74% · Bugs Found: 12`. NENHUM tinha
+# produtor — eram as metas da seção anterior redesenhadas como medição, num documento sobre
+# TESTES. Sobreviveu meses porque ninguém desconfia de uma tabela.
+#
+# O QUE ESTA REGRA GARANTE, e é só isto: que o painel publicado é BYTE-A-BYTE o que o gerador
+# produz. Ela NÃO julga se os produtores medem bem — isso é das guardas de cada um. Mas fecha o
+# caminho pelo qual o painel inventado nasceu: alguém DIGITAR um número ali.
+#
+# As outras quatro defesas vivem no gerador, não aqui, porque são propriedades da GERAÇÃO:
+# célula sem comando não é impressa · métrica sem produtor imprime ⊘ NÃO MEDIDO · zero produtor
+# vivo derruba o gerador · o painel não imprime "hoje" (artefato catracado com data de hoje
+# produz uma HARD por dia, e guarda que grita sem motivo ensina a ser ignorada).
+# ===========================================================================
+check_testing_state_drift() {
+  # REGRA DE REPO, NÃO DE ARQUIVO (mesma razão da REGRA 80) — e aqui pesa mais: o painel chama
+  # TRÊS produtores, então um `--only` de uma linha disparava a geração do painel inteiro.
+  [ -n "${ONLY_PATH}" ] && return 0
+  # CORE-ONLY pela mesma razão da REGRA 80: o painel é deste repo; exigi-lo do adotante o faria
+  # nascer vermelho num arquivo que não é dele.
+  [ "${IS_DERIVED}" -eq 1 ] && return 0
+  local gen="${SCRIPT_DIR}/testing-state.sh"
+  local tracked="${REPO_ROOT}/docs/onion/testing-state.md"
+  [ -f "${gen}" ] || { violation "HARD" "${gen}" "testing-state.sh ausente — o painel não pode ser computado"; return; }
+  if [ ! -f "${tracked}" ]; then
+    violation "HARD" "${tracked}" "docs/onion/testing-state.md ausente — rode 'bash .claude/validation/testing-state.sh --markdown > docs/onion/testing-state.md'"
+    return
+  fi
+  local tmp; tmp="$(mktemp)"
+  if _gen_into "${tmp}" "${tracked}" "docs/onion/testing-state.md" -- bash "${gen}" --markdown &&
+     ! diff -q "${tracked}" "${tmp}" >/dev/null 2>&1; then
+    violation "HARD" "${tracked}" "painel de estado desatualizado vs os produtores — regenere com 'bash .claude/validation/testing-state.sh --markdown > docs/onion/testing-state.md'. O painel anterior deste repo publicava 'Coverage: 85%' sem produtor nenhum; a catraca existe para que um número digitado à mão não sobreviva a um lint."
+  fi
+  rm -f "${tmp}"
+}
+
+# ===========================================================================
+# REGRA 63 — Colheita de grafo emite os ids colhidos no resíduo de revisão [HARD]
+# previne: nó removido de um .kg.yaml sem registro consultável de que existiu — a promessa "a história fica no artefato de revisão" cumprida só na letra
+#
+# Gatilho MEDIDO (Elenxo de 2026-08-29, PR #710). O `meta:` do fios-abertos promete que,
+# ao colher, "a história fica no git E no artefato de revisão". Medição: o git cumpre; o
+# RESÍDUO não cumpre nada. O da colheita de 2026-08-28 (chore-harvest-fios-abertos-onda1)
+# nomeia 2 ids — os PRESERVADOS — e ZERO dos 18 apagados. Consequência medida: 14 dos 18
+# conceitos não existem hoje em nenhum artefato consultável do repo.
+#
+# Esta regra NÃO proíbe colher e NÃO obriga a arquivar — o Elenxo derrubou "mover" como
+# cura (não preserva envelhecimento; `archive: on` já produziu 319 abertos fora da fila).
+# Ela mecaniza a promessa que JÁ ESTÁ ESCRITA: quem apaga um nó, NOMEIA o que apagou, no
+# artefato que a REGRA 56 já obriga a existir. Custo zero de estrutura nova.
+#
+# Só morde quando há remoção de nó: PR que não colhe não é julgado.
+# ===========================================================================
+check_harvest_names_removed_nodes() {
+  [ "${IS_DERIVED}" -eq 1 ] && return 0
+  command -v git >/dev/null 2>&1 || return 0
+
+  local default_branch base branch slug art
+  # `|| true` OBRIGATORIO: sob `set -euo pipefail` (linha 74), um pipeline cujo PRIMEIRO
+  # elemento falha devolve erro mesmo com o `sed` sucedendo — e a atribuicao morta MATA O
+  # LINT INTEIRO, deixando toda guarda posterior sem rodar. Medido: em sandbox sem git, 11
+  # fixtures falharam com "esperava violacao, nenhuma apareceu" — o lint abortava aqui e as
+  # guardas seguintes nunca eram alcancadas. `2>/dev/null` esconde o stderr, NAO o exit code.
+  default_branch="$(git -C "${REPO_ROOT}" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
+  [ -n "${default_branch}" ] || default_branch="main"
+  # Resolucao de base em CASCATA, e o silencio final e DECLARADO. No CI o checkout costuma nao
+  # ter `main` local nem `origin/HEAD` setado: a versao anterior devolvia base vazia e retornava
+  # 0 CALADA — a guarda ficava MORTA no unico ambiente que a executa em todo PR. Fail-open com
+  # cara de aprovacao, a mesma classe que este PR corrige noutros dois pontos.
+  local ref
+  for ref in "origin/${default_branch}" "${default_branch}" "origin/main" "main" "origin/master"; do
+    base="$(git -C "${REPO_ROOT}" merge-base "${ref}" HEAD 2>/dev/null || true)"
+    [ -n "${base}" ] && break
+  done
+  if [ -z "${base}" ]; then
+    violation "SOFT" "docs/onion/graph" "REGRA 63 nao pode julgar: nenhuma base de comparacao resolvivel (tentadas origin/${default_branch}, ${default_branch}, origin/main, main, origin/master). A guarda declara que NAO SABE em vez de passar em silencio"
+    return 0
+  fi
+
+  branch="$(git -C "${REPO_ROOT}" branch --show-current 2>/dev/null || true)"
+  [ -n "${branch}" ] || return 0
+  [ "${branch}" = "${default_branch}" ] && return 0   # em main não há PR a julgar
+
+  # ids REMOVIDOS de qualquer .kg.yaml neste ramo. `-  - id:` é a assinatura da colheita.
+  local removed
+  removed="$(git -C "${REPO_ROOT}" diff --no-ext-diff --no-color "${base}" HEAD -- '*.kg.yaml' 2>/dev/null \
+             | grep -E '^-[[:space:]]*-[[:space:]]*id:' \
+             | sed -E 's/^-[[:space:]]*-[[:space:]]*id:[[:space:]]*//; s/[[:space:]]*$//' | sort -u || true)"
+  [ -n "${removed}" ] || return 0   # não houve colheita → nada a julgar
+
+  slug="$(printf '%s' "${branch}" | tr '/' '-')"
+  art="${REPO_ROOT}/docs/evolution/review/${slug}.md"
+  if [ ! -f "${art}" ]; then
+    violation "HARD" "docs/evolution/review/${slug}.md" "este ramo REMOVE nó(s) de .kg.yaml e não há resíduo de revisão — a colheita tem de NOMEAR o que apagou (a REGRA 56 já exige o artefato; esta exige o conteúdo)"
+    return
+  fi
+
+  local id missing=0 missing_ids=""
+  while IFS= read -r id; do
+    [ -n "${id}" ] || continue
+    grep -qF "${id}" "${art}" || { missing=$((missing + 1)); missing_ids="${missing_ids} ${id}"; }
+  done <<< "${removed}"
+
+  if [ "${missing}" -gt 0 ]; then
+    violation "HARD" "docs/evolution/review/${slug}.md" "colheita sem registro: ${missing} id(s) removido(s) de .kg.yaml NÃO aparecem no resíduo —${missing_ids}. O que se apaga sem nomear deixa de existir para quem vier depois: 14 de 18 conceitos da colheita de 2026-08-28 não existem hoje em nenhum artefato consultável"
+  fi
+}
+
+# ===========================================================================
 # REGRA 19 — Plugins de vertical (plugins/*) sincronizados com as fontes [HARD]
 # previne: plugin de vertical driftando das fontes — bundle de adoção errado
 #           Cada plugins/<name> é GERADO por assemble-plugin.sh a partir de
@@ -773,6 +1561,22 @@ check_plugins_sync() {
   [ -f "${asm}" ] || return 0            # sem assembler → nada a checar (repo sem a feature)
   [ -d "${vdir}" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0   # sem jq → pula gracioso (mesma graça dos outros)
+  # GATE sob --only (Elenxo 2026-08-13, KG: docs/onion/graph/elenxo-mecanismos-lint-2026-08-13.kg.yaml):
+  # guarda de estado GLOBAL que rodava inteira em toda invocação --only (8,9s para validar 1 arquivo
+  # alheio — 61% do custo somando as irmãs sem gate). A ÁREA desta guarda não é só marketplace/plugins:
+  # é também TODA FONTE BUNDLADA (108 paths declarados nos manifestos — agentes, comandos, skills, KBs).
+  # A 1ª versão do gate casava só o prefixo e ficou CEGA a drift de fonte via --only (2 HARD engolidas,
+  # provado pelo 2º Elenxo: probe em commands/meta/kg.md). Pertencimento se decide no MANIFESTO, que
+  # declara os paths LITERAIS — grep -qF custa ~ms contra os 8,9s da guarda.
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      */utils/marketplace/*|*/plugins/*) : ;;
+      *)
+        local _rel="${ONLY_PATH#"${REPO_ROOT}"/}"
+        grep -qF -- "${_rel}" "${vdir}"/*.manifest.sh 2>/dev/null || return 0
+        ;;
+    esac
+  fi
 
   local manifest name committed tmp
   for manifest in "${vdir}"/*.manifest.sh; do
@@ -785,7 +1589,14 @@ check_plugins_sync() {
       continue
     fi
     tmp="$(mktemp -d)"
-    bash "${asm}" "${manifest}" "${REPO_ROOT}" "${tmp}/${name}" >/dev/null 2>&1
+    # ASSEMBLE FALHO É VIOLATION, NÃO MORTE (2º Elenxo 2026-08-13, achado adjacente pré-existente:
+    # apagar uma fonte bundlada não produzia 'fora de sincronia' — matava o lint em rc=2 SEM
+    # sumário, e os chamadores por ausência-de-mensagem liam a morte como PASS).
+    if ! bash "${asm}" "${manifest}" "${REPO_ROOT}" "${tmp}/${name}" >/dev/null 2>&1; then
+      violation "HARD" "plugins/${name}" "assemble FALHOU (fonte bundlada ausente/quebrada?) — rode 'bash .claude/utils/marketplace/assemble-plugin.sh ${manifest#${REPO_ROOT}/}' e leia o erro"
+      rm -rf "${tmp}"
+      continue
+    fi
     # (a) tudo exceto provenance.json (ref/commit_date voláteis lá dentro)
     if ! diff -r -x provenance.json "${committed}" "${tmp}/${name}" >/dev/null 2>&1; then
       violation "HARD" "plugins/${name}" "plugin fora de sincronia com a fonte — regenere com 'bash .claude/utils/marketplace/assemble-plugin.sh ${manifest#${REPO_ROOT}/}'"
@@ -814,9 +1625,19 @@ check_plugins_sync() {
 check_capability_conformance() {
   local vdir="${SCRIPT_DIR}/../utils/marketplace/verticals"
   [ -d "${vdir}" ] || return 0
+  # ⚠️ NUNCA blanket-skip aqui: o selftest r20 exercita ESTA guarda via --only (fixture
+  # bad-overclaim injetada como manifesto) — um `[ -n ONLY_PATH ] && return 0` a cegaria e o r20
+  # falharia em silêncio. Provado por sabotagem no Elenxo 2026-08-13.
+  # O filtro compara por INODE (-ef), não por string, e isso mata DUAS classes de uma vez
+  # (2º Elenxo): (a) string-compare exigia normalizar o vdir (que carrega `validation/../utils/`
+  # literal) E o ONLY_PATH — e a normalização só cobre o ramo relativo; um --only absoluto com
+  # `/./` ou `//` desligava a REGRA 20 INTEIRA em silêncio; (b) o `cd` da normalização, sob
+  # `set -euo pipefail`, matava o lint sem sumário se o dir sumisse/perdesse permissão — a classe
+  # morte-silenciosa que este arquivo já documenta 4 vezes. `-ef` resolve as duas sem cd.
   local manifest report name claimed bronze silver gold unresolved met
   for manifest in "${vdir}"/*.manifest.sh; do
     [ -f "${manifest}" ] || continue
+    if [ -n "${ONLY_PATH}" ] && ! [ "${manifest}" -ef "${ONLY_PATH}" ]; then continue; fi
     # Subshell: source o manifesto e computa os tiers cumpridos + requires não-resolvidos.
     report="$(
       REPO_ROOT="${REPO_ROOT}"
@@ -869,6 +1690,10 @@ check_capability_conformance() {
 #           Impede roles.yaml apontar p/ vertical inexistente. Pula gracioso sem python3/yaml.
 # ===========================================================================
 check_role_bundle_sync() {
+  # GATE sob --only — ver o racional em check_plugins_sync (mesmo Elenxo). Inclui commands/meta/:
+  # a REGRA valida work_tool -> comando EXISTENTE, então rename/delete de um comando meta tem de
+  # disparar (2º Elenxo provou a cegueira com mv co-deliver.md: o PRE acusava, o gate estreito não).
+  if [ -n "${ONLY_PATH}" ]; then case "${ONLY_PATH}" in */utils/marketplace/*|*/.claude-plugin/*|*/commands/meta/*) : ;; *) return 0 ;; esac; fi
   local roles="${SCRIPT_DIR}/../utils/marketplace/roles.yaml"
   local vdir="${SCRIPT_DIR}/../utils/marketplace/verticals"
   local mkt="${REPO_ROOT}/.claude-plugin/marketplace.json"
@@ -898,7 +1723,7 @@ PY
   # --- WORK_TOOLS (eixo cross-cutting, 2026-07-19) — drift-guard próprio ---
   #   (1) todo `work_tools:` de papel referencia um set válido (ou none/tbd);
   #   (2) todo tool nomeado em work_tool_sets resolve a um comando real .claude/commands/meta/<tool>.md;
-  #   (3) o conjunto `full` está coberto pelo manifesto onion-work-tools (roles.yaml <-> manifesto).
+  #   (3) o conjunto `full` está coberto pelo manifesto onion — o núcleo absorveu onion-work-tools em 2026-09-04 (roles.yaml <-> manifesto).
   local wt_out kind a b
   wt_out="$(python3 - "${roles}" <<'PY'
 import sys, yaml
@@ -920,12 +1745,61 @@ PY
       TOOL) [ -f "${REPO_ROOT}/.claude/commands/meta/${a}.md" ] || violation "HARD" "utils/marketplace/roles.yaml" "work_tool '${a}' sem comando em .claude/commands/meta/${a}.md — crie com /meta:create-command ${a} (ou corrija o nome em work_tool_sets se foi digitado errado)" ;;
     esac
   done <<< "${wt_out}"
-  local wtman="${vdir}/onion-work-tools.manifest.sh" ft
+  local wtman="${vdir}/onion.manifest.sh" ft   # 2026-09-04: onion absorveu onion-work-tools (F2)
   if [ -f "${wtman}" ]; then
     for ft in $(python3 -c "import yaml; d=yaml.safe_load(open('${roles}')) or {}; print(' '.join((d.get('work_tool_sets') or {}).get('full') or []))" 2>/dev/null); do
-      grep -q "commands/meta/${ft}.md" "${wtman}" || violation "HARD" "utils/marketplace/verticals/onion-work-tools.manifest.sh" "work_tool 'full:${ft}' (roles.yaml) ausente do manifesto onion-work-tools — adicione 'commands/meta/${ft}.md' ao manifesto onion-work-tools.manifest.sh"
+      grep -q "commands/meta/${ft}.md" "${wtman}" || violation "HARD" "utils/marketplace/verticals/onion.manifest.sh" "work_tool 'full:${ft}' (roles.yaml) ausente do manifesto onion (núcleo) — adicione 'commands/meta/${ft}.md' ao manifesto onion.manifest.sh"
     done
   fi
+}
+
+# ===========================================================================
+# REGRA 61 — Fronteira de MOAT: manifesto de plugin publicável não vaza meta-fábrica nem grafo privado [HARD]
+# previne: publicar a AUTO-REPLICAÇÃO (create-*/adopt/marketplace/decouple) ou o SSOT PRIVADO do core
+#           (docs/onion/graph/*) num plugin distribuível. A doutrina L1-distribui/L2-L3-moat vira
+#           MECANISMO: vazar o moat é erro de lint, não questão de lembrar. Checa as FONTES DECLARADAS
+#           (arrays do manifesto), não a prosa — sourcia o manifesto (como o assemble-plugin.sh faz),
+#           então comentário/descrição que MENCIONE a meta-fábrica não dispara; só a lista real de fontes.
+# ===========================================================================
+check_moat_boundary() {
+  if [ -n "${ONLY_PATH}" ]; then case "${ONLY_PATH}" in */utils/marketplace/*) : ;; *) return 0 ;; esac; fi
+  [ "${IS_DERIVED}" -eq 1 ] && return 0
+  local vdir="${SCRIPT_DIR}/../utils/marketplace/verticals" root="${REPO_ROOT}" m src entry files ef bn bad abs
+  [ -d "${vdir}" ] || return 0
+  # DENYLIST por BASENAME de meta-fábrica/federação-downstream (comandos achatam no plugin → basename é
+  # o que resta) + por PATH (utils/adopt|marketplace|federation, e QUALQUER *.kg.yaml — o SSOT é do
+  # adotante). co-evolve/co-relay (UPSTREAM) são permitidos por desenho; co-announce/co-deliver (DOWNSTREAM)
+  # e federation-* (ledger L3) não. absorb-skill e evolve são fábrica.
+  local moat_base='^(create-(abstraction|agent|agent-express|command|knowledge-base|skill|vertical)|absorb-skill|adopt|evolve|federation-.*|co-announce|co-deliver|decouple-source|assemble-plugin|generate-marketplace)\.(md|sh)$'
+  local moat_path='(/utils/adopt/|/utils/marketplace/|/utils/federation/|\.kg\.yaml$)'
+  for m in "${vdir}"/*.manifest.sh; do
+    [ -f "${m}" ] || continue
+    src="$( set +u; . "${m}" >/dev/null 2>&1; printf '%s\n' \
+      "${COMMANDS[@]-}" "${AGENTS[@]-}" "${UTILS[@]-}" "${VALIDATION[@]-}" \
+      "${SKILLS[@]-}" "${HOOKS[@]-}" "${DOCS[@]-}" "${TEMPLATES[@]-}" 2>/dev/null | grep -v '^[[:space:]]*$' )"
+    bad=""
+    while IFS= read -r entry; do
+      [ -n "${entry}" ] || continue
+      # EXPANDE como o assembler (dir → cp -R arrasta tudo; arquivo/inexistente → ele mesmo). Fecha o
+      # bypass por diretório-pai (declarar commands/meta arrastaria a fábrica sem casar a string).
+      abs="${root}/${entry}"
+      if [ -d "${abs}" ]; then
+        files="$(cd "${root}" && find "${entry}" -type f 2>/dev/null)"
+      else
+        files="${entry}"
+      fi
+      while IFS= read -r ef; do
+        [ -n "${ef}" ] || continue
+        bn="$(basename "${ef}")"
+        if grep -qE "${moat_base}" <<< "${bn}" || grep -qE "${moat_path}" <<< "/${ef}"; then
+          bad="${bad}${entry}→${ef} "
+        fi
+      done <<< "${files}"
+    done <<< "${src}"
+    if [ -n "${bad}" ]; then
+      violation "HARD" "utils/marketplace/verticals/$(basename "${m}")" "manifesto de plugin PUBLICÁVEL arrasta fonte de MOAT (meta-fábrica/federação/grafo — checado pela EXPANSÃO do que o assembler copiaria, não só a string declarada): $(printf '%s' "${bad}" | cut -c1-240). Estreite a declaração — o plugin leva o MOTOR, nunca a fábrica nem o SSOT privado."
+    fi
+  done
 }
 
 # ===========================================================================
@@ -1043,6 +1917,8 @@ check_agent_card_sync() {
 #   violava "membro nenhum", não "membro sem canal").
 # ===========================================================================
 check_outbox_channel_exists() {
+  # GATE POR RELEVÂNCIA sob --only — ver o racional em check_plugins_sync (mesmo Elenxo).
+  if [ -n "${ONLY_PATH}" ]; then case "${ONLY_PATH}" in */docs/evolution/federation/*) : ;; *) return 0 ;; esac; fi
   local outbox="${REPO_ROOT}/docs/evolution/federation/outbox"
   local members="${REPO_ROOT}/docs/evolution/federation/members.yaml"
   [ -d "${outbox}" ] && [ -f "${members}" ] || return 0
@@ -1226,6 +2102,19 @@ ${lines}"
   done < <(
     _find "${CLAUDE_DIR}/commands" "${CLAUDE_DIR}/agents" -name "*.md" -print0 2>/dev/null
   )
+  # .github/workflows também é CONSUMIDOR (E_LINT_NAO_ENXERGA_WORKFLOWS, Onda 8 2026-09-01):
+  # um step de Actions é shell puro — chamada direta a provider ali é a MESMA dívida SDAAL,
+  # e ficava invisível porque o _find só via .claude/. Workflows não têm allowlist de adapter.
+  while IFS= read -r -d '' file; do
+    if grep -qE "${pattern}" "${file}"; then
+      local wlines
+      wlines=$(grep -nE "${pattern}" "${file}" | head -3 | sed 's/^/      /')
+      violation "HARD" "${file}" "chamada direta a provider em WORKFLOW (use a peça executável do adapter — SDAAL §9). Ocorrências:
+${wlines}"
+    fi
+  done < <(
+    _find "${REPO_ROOT}/.github/workflows" -name "*.yml" -print0 2>/dev/null
+  )
 }
 
 # ===========================================================================
@@ -1261,7 +2150,7 @@ check_abstraction_methods_exist() {
     local m
     while IFS= read -r m; do
       [ -z "${m}" ] && continue
-      if ! printf '%s\n' "${methods}" | grep -qx "${m}"; then
+      if ! grep -qx "${m}" <<< "${methods}"; then
         local where
         where=$(grep -nE "(taskManager|tm|forge)\.${m}\(" "${file}" | head -2 | sed 's/^/      /')
         violation "HARD" "${file}" "método de abstração inexistente na interface: '${m}()' (use um método de ITaskManager/IForge — ex.: searchTasks). Ocorrências:
@@ -1289,11 +2178,11 @@ check_agent_tool_names() {
   while IFS= read -r -d '' agent; do
     while IFS= read -r tool; do
       [ -z "${tool}" ] && continue
-      if echo "${tool}" | grep -qE "^(${CURSOR})$"; then
+      if grep -qE "^(${CURSOR})$" <<< "${tool}"; then
         violation "HARD" "${agent}" "tool name estilo-Cursor: '${tool}' — use nome nativo do Claude Code (Read/Write/Edit/Bash/Grep/Glob/WebSearch/WebFetch/TodoWrite)"
-      elif echo "${tool}" | grep -qE '^mcp_[A-Za-z]' && ! echo "${tool}" | grep -qE '^mcp__'; then
+      elif grep -qE '^mcp_[A-Za-z]' <<< "${tool}" && ! grep -qE '^mcp__' <<< "${tool}"; then
         violation "HARD" "${agent}" "tool MCP em formato inválido: '${tool}' — Claude Code usa 'mcp__<server>__<tool>' (duplo underscore)"
-      elif echo "${tool}" | grep -qiE '^mcp__(claude_ai_)?(clickup|jira|atlassian|asana|linear|github|gitlab|bitbucket)__'; then
+      elif grep -qiE '^mcp__(claude_ai_)?(clickup|jira|atlassian|asana|linear|github|gitlab|bitbucket)__' <<< "${tool}"; then
         case "${agent}" in
           */clickup-specialist.md|*/jira-specialist.md) : ;;   # especialistas de provider podem
           *) violation "HARD" "${agent}" "tool MCP de provider direto no frontmatter: '${tool}' — providers de task/forge vão via adapter SDAAL (taskManager.*/forge.*), não mcp__<provider>__* (integrations §9; só adapters/especialistas)" ;;
@@ -1393,6 +2282,375 @@ check_context_freshness_stamp() {
       fi
     done < <(_find "${base}" -name "*.md" ! -iname "readme.md" ! -iname "index.md" -print0 2>/dev/null)
   done
+}
+
+
+# ===========================================================================
+# REGRA 83 — Id de modelo VERSIONADO só na SSOT declarada [HARD]
+# previne: versão literal de modelo espalhada por config, que caduca sem aviso
+#   CONTRA-FLUXO DO PORTE (2026-09-16). Esta REGRA não nasceu aqui: nasceu no porte
+#   Codex, e o core não a tinha. Lá, `model = "gpt-5.4"` estava fixado em `config.toml`
+#   e em 47 agentes; quando a OpenAI mudou o lineup, o `@onion` PAROU DE INICIAR — o
+#   modelo do perfil não existia mais para a conta. A REGRA 3 (Campo model: restrito à
+#   allowlist sonnet|opus|haiku|fable) cobre o frontmatter de comando/agente e resolveria
+#   o caso se ele fosse `model:` em markdown; ela NÃO enxerga `model =` em TOML, nem
+#   `"model":` num payload JSON, nem uma variável de workflow. O buraco só apareceu porque
+#   existe um substrato diferente para pisar nele — é literalmente o que uma prova de
+#   portabilidade serve para fazer.
+#
+#   O QUE ELA COBRA: id de modelo com VERSÃO (claude-sonnet-5, gpt-5.4, gemini-3-1…) em
+#   arquivo de CONFIGURAÇÃO/EXECUÇÃO da superfície que viaja, fora das SSOTs declaradas.
+#   O que NÃO cobra, e a fronteira é deliberada:
+#     · PROSA/KB que documenta o panorama de modelos (agent-orchestration.md cita 24 —
+#       é documentação de catálogo de terceiro, não configuração nossa; frescor dali é
+#       assunto da REGRA 42 (Gate de FRESCOR DOUTRINÁRIO, com catraca));
+#     · COMENTÁRIO (`#`) — registro histórico de medição não é pin;
+#     · FIXTURE de bancada — dado de teste precisa do literal para testar o literal.
+#   Sem esses três recortes a guarda acusaria 5 sítios legítimos e 1 real, e guarda que
+#   grita no inócuo ensina a ser ignorada.
+#
+#   SSOTs DECLARADAS (o literal PODE viver aqui, e só aqui):
+#     · .claude/settings.json → fallbackModel  (projeção da escada; REGRA 70)
+#     · env REVIEW_MODEL nos workflows de review (uma chave, lida pelas chamadas)
+# ===========================================================================
+check_model_version_fora_da_ssot() {
+  local f hit n
+  while IFS= read -r f; do
+    case "${f}" in
+      */fixtures/*|*lint-selftest.sh|*review-verdict.sh) continue ;;
+      */settings.json) continue ;;   # SSOT declarada (fallbackModel, REGRA 70)
+    esac
+    # ⚠️ A VARIÁVEL DO `read` TEM DE SER A MESMA DO CORPO. Medido 2026-09-16: o rename que curou
+    # a REGRA 60 (Identificador de código em INGLÊS) trocou o corpo e ESQUECEU o `read`, e sob
+    # `set -u` o lint MORREU nesta linha — em silêncio para quem só olhava o sumário, porque a
+    # morte aconteceu no meio e as guardas seguintes nem rodaram. A bancada pegou; o olho, não.
+    while IFS= read -r hit; do
+      n="${hit%%:*}"; hit="${hit#*:}"
+      # ⚠️ SEM PIPE NOS FILTROS, e a razão é medida: `printf "$x" | grep -q P && continue` sob
+      # `pipefail` é a classe `pipefail-epipe-early-closer` — o `grep -q` fecha cedo, o `printf`
+      # leva EPIPE, o status do pipeline vira 141 e o `&& continue` NÃO DISPARA. O filtro existe,
+      # parece correto, e não filtra nada: os dois casos de falso-positivo da bancada reprovaram
+      # exatamente assim. Casamento de padrão do próprio bash não abre processo nem pipe.
+      # comentário (shell/yaml/toml) não é configuração — é registro histórico de medição
+      case "${hit}" in [[:space:]]*\#*|\#*) continue ;; esac
+      # a própria declaração da SSOT é o lugar onde o literal DEVE morar
+      case "${hit}" in *REVIEW_MODEL*:*) continue ;; esac
+      violation "HARD" "${f#"${REPO_ROOT}/"}:${n}" "REGRA 83 (Id de modelo VERSIONADO só na SSOT declarada): versão literal de modelo em configuração, fora da SSOT — ela caduca sem aviso e o agente PARA DE INICIAR quando o lineup muda (medido no porte Codex, 2026-09-16). Aponte para a SSOT (env REVIEW_MODEL / fallbackModel) em vez de repetir o literal."
+      # ⚠️ O PADRÃO FOI CALIBRADO CONTRA AS FORMAS REAIS, e a 1ª redação não casava NENHUMA.
+      # Ela exigia dois grupos numéricos (`-[a-z0-9]+-?[0-9]+`) e morria em `gpt-5.4`, porque ali
+      # o segundo grupo é `.4`, não `-4`. A bancada pegou — com a guarda escrita, plugada e
+      # "verde", que é o pior estado possível: cobertura declarada e nula. Formas que ela PRECISA
+      # casar, todas medidas neste repo: gpt-5.4 · claude-sonnet-5 · claude-opus-5 ·
+      # claude-fable-5-1 · claude-haiku-4-5-20251001 · "model":"..." em payload JSON.
+    done < <(grep -nE '(model|MODEL)[^A-Za-z0-9]{0,6}[:=][^A-Za-z]{0,6}"?(claude|gpt|gemini|llama)-[a-z0-9.-]*[0-9]' "${f}" || true)
+  # ⚠️ `_find`, NUNCA `find` cru — e isto custou uma reprovação da bancada. O helper poda
+  # `.claude/worktrees/` (worktrees git locais, gitignored) e respeita `--only`; um `find` cru
+  # varre os worktrees e acusa o LINT DE OUTRA BRANCH como se fosse artefato deste repo. O
+  # próprio `_find` documenta essa poda em dez linhas, e eu a reintroduzi ao duplicar a varredura
+  # em vez de reusar o helper. Guarda nova que abre sua própria varredura herda zero calibração.
+  done < <(_find "${REPO_ROOT}/.claude" "${REPO_ROOT}/.github/workflows" -type f \
+             \( -name '*.toml' -o -name '*.json' -o -name '*.yml' -o -name '*.yaml' -o -name '*.sh' \) -print 2>/dev/null || true)
+}
+
+
+# ===========================================================================
+# REGRA 87 — PR que EDITA um `.kg.yaml` enxergou os `confirmed` dele [SOFT]
+# previne: propor contra o próprio corpus — o defeito medido em 2026-09-19
+#   Em 2026-09-18 uma proposta de desenho foi ao maestro, foi SELADA, e caiu na passada
+#   adversarial do dia seguinte contra DOIS nós `confirmed` do arquivo que estava sendo
+#   editado — um deles tier 9 e textual ("não deve desenhar nada que dependa de opt-in
+#   COMO SALVAGUARDA"), o outro registrando o desenho proposto como JÁ REFUTADO. O hook
+#   da perna de leitura existia para impedir isso e não disparou (era matcher `Read`, e o
+#   trabalho passou por bash — 95,3% da superfície real, medido em 19.084 chamadas).
+#
+#   O hook foi curado. Esta regra é a SEGUNDA CAMADA, e ela existe porque a primeira avisa
+#   no meio de 16.338 chamadas de shell: um aviso ali tem chance real de passar despercebido.
+#   Aqui o sinal chega no PR, onde a proposta já está escrita e ainda dá tempo de voltar.
+#
+# ⚠️ SOFT, E A RAZÃO É DECLARADA, não timidez: esta guarda foi desenhada HORAS depois do
+#   incidente que ela endereça, e o registro do próprio achado diz que mexer às pressas num
+#   mecanismo logo após um incidente é como o incidente. SOFT dá a ela um ciclo de uso real
+#   antes de ganhar dente. O gatilho para promover a HARD: alguém reincidir na classe COM
+#   este aviso na tela — aí o aviso provou ser insuficiente, e não antes.
+#   (E a doutrina desta casa: "nada disso nasce bloqueando — um gate que impede trabalho é
+#   contornado com --no-verify na primeira sexta-feira, e aí se perde o mecanismo E a
+#   informação".)
+check_kg_edit_saw_confirmed() {
+  local base; base="$(git -C "${REPO_ROOT}" merge-base HEAD origin/main 2>/dev/null || true)"
+  [ -n "${base}" ] || return 0            # sem base comparável: não há o que julgar
+  local _r87_graphs
+  _r87_graphs="$(git -C "${REPO_ROOT}" diff --name-only "${base}" HEAD -- '*.kg.yaml' 2>/dev/null \
+             | grep -v '/fixtures/' || true)"
+  [ -n "${_r87_graphs}" ] || return 0     # PR não toca grafo: SEM-OBJETO, e silêncio é correto
+
+  local _r87_slug _r87_art
+  _r87_slug="$(git -C "${REPO_ROOT}" branch --show-current 2>/dev/null | tr '/' '-' || true)"
+  _r87_art="${REPO_ROOT}/docs/evolution/review/${_r87_slug}.md"
+  [ -f "${_r87_art}" ] || return 0        # sem resíduo: quem cobra é a REGRA 56, não esta
+
+  # ⚠️ "CITOU ALGUM DOS DE MAIOR IMPACTO", NUNCA "CITOU TODOS" — e a 1ª redação exigia TODOS, o que
+  # a tornava INSATISFAZÍVEL. Medido em 2026-09-19 sobre os 98 grafos versionados (sem fixtures):
+  # mediana 9 nós `confirmed` de impacto>=4 por grafo, 43 grafos com MAIS DE 10, e o pior com 236.
+  # Ela reprovava até o PR que a introduziu (38 nós). Um SOFT permanentemente vermelho não é sinal —
+  # é fundo, e é exatamente a patologia que este PR alega estar curando no hook.
+  # A pergunta satisfazível é outra: *você olhou ALGUM dos de maior impacto?* Citar zero dos três
+  # mais pesados de um grafo que você acabou de editar é o sinal real — foi o caso do incidente.
+  local _r87_g _r87_top _r87_i _r87_hit _r87_silent="" _r87_files=""
+  while IFS= read -r _r87_g; do
+    [ -n "${_r87_g}" ] || continue
+    _r87_top="$(LC_ALL=C awk -F': ' '
+        /^  - id:/         { id=$2; imp=0; conf=0 }
+        /^    impact:/     { imp=$2+0 }
+        /^    status: confirmed/ { conf=1 }
+        (conf==1 && imp>=4 && id!="") { print imp"\t"id; id="" }
+      ' "${REPO_ROOT}/${_r87_g}" 2>/dev/null | LC_ALL=C sort -rn -k1,1 | cut -f2 | sed -n '1,3p' || true)"
+    [ -n "${_r87_top}" ] || continue      # grafo sem `confirmed` de peso: nada a cobrar
+    _r87_hit=0
+    while IFS= read -r _r87_i; do
+      [ -n "${_r87_i}" ] || continue
+      LC_ALL=C grep -qF "${_r87_i}" "${_r87_art}" 2>/dev/null && { _r87_hit=1; break; }
+    done <<< "${_r87_top}"
+    if [ "${_r87_hit}" -eq 0 ]; then
+      _r87_files="${_r87_files}${_r87_g} "
+      [ -z "${_r87_silent}" ] && _r87_silent="$(printf '%s' "${_r87_top}" | tr '\n' ' ')"
+    fi
+  done <<< "${_r87_graphs}"
+
+  if [ -n "${_r87_files}" ]; then
+    violation "SOFT" "docs/evolution/review/${_r87_slug}.md" \
+      "[kg-edit-confirmed] o PR edita ${_r87_files% } e o resíduo não cita NENHUM dos \`confirmed\` de maior impacto desse(s) arquivo(s) (os 3 do topo: ${_r87_silent% }) — não é erro por si, mas foi EXATAMENTE assim que uma proposta selada caiu em 2026-09-19: ela contrariava dois \`confirmed\` do arquivo que estava editando. Basta conferir se algum deles já responde (ou já refuta) o que você propõe."
+  fi
+}
+
+# ===========================================================================
+# REGRA 84 — Índice de leitura do KG em sincronia com os traces [HARD]
+# previne: o hook da perna de leitura mentir POR OMISSÃO
+#   `docs/onion/kg-read-index.tsv` é PROJEÇÃO GERADA de todos os `trace:` do corpus, e é o
+#   que o hook `kg-read-leg.sh` consulta em 8 ms (gerar custa 7.722 ms — por isso é índice
+#   commitado, e não varredura ao vivo). Um índice defasado não faz o hook gritar errado:
+#   faz ele FICAR CALADO sobre um nó que existe. E calado é indistinguível de "não há grafo",
+#   que é exatamente o fail-open que a perna de leitura foi ligada para curar.
+#   Nó novo com `trace:` sem regenerar o índice = a perna de leitura nasce cega para ele.
+# ===========================================================================
+check_kg_read_index_sync() {
+  local idx="${REPO_ROOT}/docs/onion/kg-read-index.tsv"
+  local gen="${SCRIPT_DIR}/kg-trace-resolve.sh"
+  [ -f "${gen}" ] || return 0
+  if [ ! -f "${idx}" ]; then
+    violation "HARD" "docs/onion/kg-read-index.tsv" "REGRA 84 (Índice de leitura do KG em sincronia com os traces): índice AUSENTE — o hook da perna de leitura fica calado para o corpus inteiro. Gere: bash .claude/validation/kg-trace-resolve.sh . --emit-index > docs/onion/kg-read-index.tsv"
+    return
+  fi
+  # ⚠️ O `2>/dev/null || true` DA 1a VERSAO COLAPSAVA DOIS MUNDOS, e o preco foi medido em 2026-09-24
+  # adotando um repo novo: o gate do adotante BARROU O PRIMEIRO COMMIT dele por este HARD. A causa nao
+  # era defeito nenhum do adotante — o corpus dele tem UM grafo (a semente da adocao) cujo `trace:` e
+  # PROSA, e prosa e LEGITIMA pelo contrato do proprio resolvedor (kg-trace-resolve.sh:33-34: "nao
+  # parece caminho → nome solto, chave de config, comando, prosa. `trace:` aceita mais que arquivo").
+  # Indice vazio ali e o estado NORMAL do dia 1, nao falha de ambiente.
+  # E o gerador JA DISTINGUE os dois casos: sai 3 com "indice VAZIO (parser leu 0 nos com trace
+  # resolvivel)" quando o corpus legitimamente nao tem trace de arquivo, e outro rc quando quebra.
+  # Quem nao lia era esta guarda — ela jogava fora o rc E o stderr e chamava tudo de gerador quebrado.
+  # E o modo-de-falha que a propria doutrina de adocao nomeia: gate que nasce reprovando o adotante no
+  # dia 1 acaba DESLIGADO, e ai nenhuma regra vale.
+  local new_index gen_err gen_rc=0
+  gen_err="$(mktemp)"
+  new_index="$(bash "${gen}" "${REPO_ROOT}" --emit-index 2>"${gen_err}")" || gen_rc=$?
+  if [ -z "${new_index}" ]; then
+    # `grep -F` com termo ASCII: o hook roda em locale C e acento nao casa classe multibyte (licao
+    # `bancada-mede-no-locale-do-hook`). "VAZIO" e "resolv" bastam e sao ASCII.
+    if [ "${gen_rc}" -eq 3 ] && grep -qF 'VAZIO' "${gen_err}" && grep -qF 'resolv' "${gen_err}"; then
+      violation "SOFT" "docs/onion/kg-read-index.tsv" "REGRA 84 (Índice de leitura do KG em sincronia com os traces): [kg-read-index/CORPUS-SEM-TRACE-DE-ARQUIVO] o corpus nao tem NENHUM nó cujo \`trace:\` resolva para arquivo — índice vazio LEGÍTIMO (é o dia 1 de todo adotante: a semente da adoção tem trace em prosa, e prosa é válida). A perna de leitura nada tem a indexar ainda; ela liga sozinha quando o primeiro nó com trace de ARQUIVO nascer. Nada a corrigir."
+    else
+      violation "HARD" "docs/onion/kg-read-index.tsv" "REGRA 84 (Índice de leitura do KG em sincronia com os traces): o gerador devolveu vazio SEM declarar corpus-sem-trace (rc=${gen_rc}) — isto é falha de ambiente ou parser, não estado legítimo. NÃO regenere por cima (sobrescreveria o índice bom). stderr: $(head -c 200 "${gen_err}" | tr '\n' ' ')"
+    fi
+    rm -f "${gen_err}"
+    return
+  fi
+  rm -f "${gen_err}"
+  if ! printf '%s\n' "${new_index}" | LC_ALL=C diff -q - "${idx}" >/dev/null 2>&1; then
+    violation "HARD" "docs/onion/kg-read-index.tsv" "REGRA 84 (Índice de leitura do KG em sincronia com os traces): índice DEFASADO vs os \`trace:\` do corpus — o hook de leitura está cego para os nós que faltam. Regenere: bash .claude/validation/kg-trace-resolve.sh . --emit-index > docs/onion/kg-read-index.tsv"
+  fi
+}
+
+
+# ===========================================================================
+# REGRA 85 — Porta pública espelha o core, com catraca [HARD]
+# previne: a porta MENTIR sobre o que o core é, por falta de re-materialização
+#   O `materialize-door.sh` resolve o COMO se publica. O QUANDO era uma frase —
+#   "toda leva mergeada em main que toque a superfície que viaja" — e frase não
+#   dispara. Medido 2026-09-17: `onion-standalone` estava 377 commits atrás na
+#   superfície que viaja, parado desde 2026-07-19. Não é negligência de ninguém:
+#   é o modo de falha previsível de um gatilho que depende de alguém lembrar.
+#   E o custo é específico: porta defasada não fica "desatualizada", ela MENTE
+#   sobre o core para quem a usa como referência.
+#   CATRACA, nunca muro: reprovar toda porta defasada nasceria vermelho (377) e
+#   seria desligada na primeira sexta-feira. O passivo entra no baseline e SÓ
+#   ENCOLHE; porta que ANDA PARA TRÁS é HARD. Porta nova nasce com teto BAIXO,
+#   porque não tem passivo a carregar.
+#   Conta só commit que tocou as raízes de `--emit-scrub-roots`: commit de
+#   biografia não defasa a porta — ela não o receberia de qualquer forma.
+# ===========================================================================
+check_door_staleness() {
+  local sc="${SCRIPT_DIR}/door-staleness-check.sh"
+  [ -f "${sc}" ] || return 0
+  local out rc=0
+  out="$(bash "${sc}" "${REPO_ROOT}" 2>&1)" || rc=$?
+  [ "${rc}" -eq 0 ] && return 0
+  local line
+  while IFS= read -r line; do
+    case "${line}" in
+      # ⚠️ ANDOU-PARA-TRAS DEIXOU DE SER HARD EM 2026-09-24, POR DECISÃO DO MAESTRO, e a razão está
+      # medida no próprio `door-staleness-baseline.txt`: a cura que esta linha cobra — re-materializar
+      # a porta — SÓ EXISTE DEPOIS DO MERGE, porque materializar do HEAD da branch publicaria trabalho
+      # não-mergeado num repo PÚBLICO. Resultado, repetido 5+ vezes no registro deste arquivo: todo PR
+      # nascia com HARD que NENHUMA ação dentro dele podia limpar, e `lint-onion-artifacts` não é
+      # dispensável no `pr-merge-verified.sh` — por desenho. Uma leva chegou a pagar DUAS
+      # materializações (a 18a publicou lint defeituoso só para destravar o merge; a 19a levou a cura).
+      # A frase que fecha o argumento já estava escrita DENTRO do `door-staleness-check.sh`: "uma guarda
+      # que só pode ser satisfeita depois do merge não é gate de pré-merge". Faltava tirar a conclusão
+      # sobre o MOMENTO da cobrança, e é o que a decisão fez (nó D_ONDE_COBRAR_A_DEFASAGEM_DA_PORTA).
+      # A cobrança mudou de LUGAR, não desapareceu: `onion-door-staleness.yml` roda no push para main
+      # — o único instante em que re-materializar é possível — e falha lá, alto, com a porta nomeada.
+      # SEM-BASELINE e PIN-DESCONHECIDO seguem HARD: não são questão de momento, são registro quebrado.
+      *ANDOU-PARA-TRAS*)
+        violation "SOFT" "docs/evolution/federation/members.yaml" "REGRA 85 (Porta pública espelha o core, com catraca): [porta/DEFASADA-COBRADA-POS-MERGE] ${line} — re-materialize (bash ops/materialize-door.sh <clone>), publique e avance o pin. NÃO bloqueia este PR de propósito: a cura só existe depois do merge, e a cobrança bloqueante mora no workflow \`onion-door-staleness\` (push para main). Porta defasada MENTE sobre o core — mas o PR não é o lugar de consertar."
+        ;;
+      *SEM-BASELINE*|*PIN-DESCONHECIDO*)
+        violation "HARD" "docs/evolution/federation/members.yaml" "REGRA 85 (Porta pública espelha o core, com catraca): ${line} — isto NÃO é questão de momento: é registro quebrado (pin que não existe na história, ou porta sem teto declarado). Corrija no members.yaml / door-staleness-baseline.txt antes do merge."
+        ;;
+      ERRO*) violation "HARD" ".claude/validation/door-staleness-check.sh" "REGRA 85 (Porta pública espelha o core, com catraca): a guarda não pôde julgar — ${line}" ;;
+    esac
+  done <<< "${out}"
+}
+
+# ===========================================================================
+# REGRA 86 — Workflow de CI PARSEIA como YAML [HARD]
+# previne: workflow inexecutável passando por existente, e guarda morta por sintaxe
+#   Medido 2026-09-17: `onion-review-diagnose.yml` tinha DOIS blocos `env:` no mesmo
+#   job e o YAML inteiro não parseava. Ele ficou INEXECUTÁVEL — e com ele a instrução
+#   que o `onion-review.yml` dá em prosa: *"não reescreva causa neste bloco sem rodar
+#   o diagnóstico"*. A doutrina mandava não adivinhar e apontava para um instrumento
+#   morto; adivinhar virava a única coisa que sobrava.
+#   POR QUE NADA PEGOU, e é a forma do defeito: o `workflow_dispatch` só falha quando
+#   alguém DISPARA, e o gatilho `pull_request` do arquivo é restrito a ele mesmo —
+#   ninguém mais o tocou desde que quebrou (um dia inteiro). O harness CONTAVA os
+#   workflows (`harness-inventory.sh`) e nunca os LIA: contar não é validar, e SSOT
+#   que conta artefato quebrado conta um número que parece saúde.
+#   Guarda que só se exercita quando invocada à mão envelhece calada.
+# ===========================================================================
+# REGRA 88 — Job de workflow que EXECUTA arquivo do repo faz checkout [HARD]
+# previne: job sem `actions/checkout` invocando script versionado; o bash sai 127 e o `rc != 0`
+#          vira reprovacao de TODO PR, com mensagem que acusa o codigo revisado em vez do gate.
+#
+# POR QUE EXISTE (medido 2026-09-20, achado por passada adversarial, NAO por leitura): o job
+# `onion-review-verdict` viveu meses sem arvore — e com razao, so lia `needs.*.outputs`. Ao mover
+# a decisao do gate para um script do repo, introduzi a PRIMEIRA dependencia de arquivo naquele
+# job e nao percebi. Sem checkout: `bash .claude/validation/review-verdict.sh` -> 127 -> exit 1 em
+# TODO PR revisado, inclusive os `conforme` (44 dos ultimos 56), com a mensagem FALSA "apontou 0
+# violação(ões)". E o PR que introduzia o defeito NAO podia mede-lo: editar `onion-review.yml`
+# faz a action se auto-pular, entao o caminho so acenderia no PR SEGUINTE, ja em main.
+#
+# TETO DECLARADO: olha `run:` de steps do MESMO job e procura invocacao de caminho versionado por
+# prefixo conhecido. Nao resolve variavel (`${{ env.X }}/s.sh`), nao segue `uses:` de action
+# composta, e nao sabe de `working-directory`. Cobre a forma que produziu o incidente; o que nao
+# alcanca, nao finge alcancar.
+check_workflow_job_needs_checkout() {
+  command -v python3 >/dev/null 2>&1 || return 0   # sem parser nao se opina (skip gracioso)
+  local out
+  out="$(python3 - "${REPO_ROOT}" <<'PYCK'
+import sys, os, glob, yaml
+root = sys.argv[1]
+PREF = ('.claude/', 'ops/', '.githooks/', 'scripts/', './.claude/', './ops/')
+bad = []
+for wf in sorted(glob.glob(os.path.join(root, '.github', 'workflows', '*.yml'))
+                 + glob.glob(os.path.join(root, '.github', 'workflows', '*.yaml'))):
+    try:
+        doc = yaml.safe_load(open(wf, encoding='utf-8'))
+    except Exception:
+        continue                      # YAML quebrado e assunto de check_workflows_parse
+    if not isinstance(doc, dict):
+        continue
+    for jname, job in (doc.get('jobs') or {}).items():
+        if not isinstance(job, dict):
+            continue
+        steps = job.get('steps') or []
+        if not isinstance(steps, list):
+            continue
+        tem_checkout = any(
+            isinstance(st, dict) and str(st.get('uses') or '').startswith('actions/checkout')
+            for st in steps)
+        if tem_checkout:
+            continue
+        for st in steps:
+            if not isinstance(st, dict):
+                continue
+            run = st.get('run')
+            if not isinstance(run, str):
+                continue
+            for linha in run.splitlines():
+                t = linha.strip()
+                for tok in t.split():
+                    if tok.startswith(PREF) and (tok.endswith('.sh') or tok.endswith('.py')):
+                        bad.append((os.path.relpath(wf, root), jname, tok))
+                        break
+                else:
+                    continue
+                break
+for w, j, tok in bad:
+    print('%s\t%s\t%s' % (w, j, tok))
+PYCK
+)" || return 0
+  [ -n "${out}" ] || return 0
+  # ⚠️ CATRACA, NAO HARD NU — e a razao esta escrita no cabecalho da guarda de idioma desta casa:
+  #    "dividas existente e SOFT e ocorrencia NOVA e HARD; nascer HARD sobre divida velha e como se
+  #    ensina a desligar um gate". Esta regra VIAJA no `lint-artifacts.sh`, entao todo adotante a
+  #    recebe — e um adotante com 3 jobs nessa forma teria 3 HARD no dia 1, sobre workflows que o
+  #    Onion nao escreveu. Baseline vazio AQUI (0 violacoes medidas); o adotante gera o dele com
+  #    `--emit-baseline`. Mesmo padrao da REGRA 45 e da REGRA 49.
+  local _r88_base="${SCRIPT_DIR}/workflow-checkout-baseline.txt" _r88_tol=0
+  local wf job tok _r88_key _r88_sev
+  while IFS=$'\t' read -r wf job tok; do
+    [ -n "${wf}" ] || continue
+    _r88_key="${wf}	${job}"
+    if [ -f "${_r88_base}" ] && LC_ALL=C grep -qxF "${_r88_key}" "${_r88_base}"; then
+      _r88_tol=$((_r88_tol+1)); continue
+    fi
+    violation "HARD" "${wf}" "REGRA 88 (Job de workflow que EXECUTA arquivo do repo faz checkout): job \`${job}\` roda \`${tok}\` e NAO tem step \`actions/checkout\` — sem arvore o bash sai 127 e o job reprova TODO PR, culpando o codigo revisado em vez do proprio gate"
+  done <<< "${out}"
+  [ "${_r88_tol}" -gt 0 ] && violation "SOFT" "${_r88_base#"${REPO_ROOT}/"}" "REGRA 88 (Job de workflow que EXECUTA arquivo do repo faz checkout): [workflow-checkout/PASSIVO] ${_r88_tol} job(s) tolerado(s) pelo baseline — a metrica de saude e este numero DIMINUINDO"
+  return 0
+}
+
+check_workflows_parse() {
+  command -v python3 >/dev/null 2>&1 || return 0   # sem parser não se opina (skip gracioso)
+  local wf
+  while IFS= read -r wf; do
+    [ -n "${wf}" ] || continue
+    [ -f "${REPO_ROOT}/${wf}" ] || continue
+    # ⚠️ `yaml.safe_load` SOZINHO NÃO BASTA, e a bancada me pegou nisto na primeira redação desta
+    # guarda: o YAML padrão ACEITA chave duplicada (fica com a última), enquanto o parser do
+    # GitHub a REJEITA. Ou seja, a versão ingênua desta regra passaria verde no defeito EXATO que
+    # a originou (`env:` duplicado) — meia-cura, que nesta casa é cura nenhuma. O loader abaixo
+    # levanta na duplicata, que é o contrato do consumidor real.
+    local err
+    err="$(python3 - "${REPO_ROOT}/${wf}" 2>&1 <<'PYWF'
+import sys, yaml
+class Estrito(yaml.SafeLoader): pass
+def _sem_duplicata(loader, node, deep=False):
+    vistas = set()
+    for k, _ in node.value:
+        chave = loader.construct_object(k, deep=deep)
+        if chave in vistas:
+            raise yaml.constructor.ConstructorError(
+                None, None, "chave duplicada: '%s' (o GitHub rejeita; o YAML padrao aceita e fica com a ultima)" % (chave,), k.start_mark)
+        vistas.add(chave)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep)
+Estrito.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _sem_duplicata)
+with open(sys.argv[1], encoding='utf-8') as fh:
+    yaml.load(fh, Loader=Estrito)
+PYWF
+)" && continue
+    violation "HARD" "${wf}" "REGRA 86 (Workflow de CI PARSEIA como YAML): o arquivo NÃO parseia — o GitHub recusa o workflow inteiro e ele fica inexecutável, mas segue no repo parecendo vivo ($(printf '%s' "${err}" | tr '\n' ' ' | cut -c1-160))"
+  done < <(git -C "${REPO_ROOT}" ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml' 2>/dev/null)
 }
 
 # ===========================================================================
@@ -1515,11 +2773,11 @@ check_inventory_total_drift() {
       case "${line}" in [[:space:]]*\|*|\|*) continue ;; esac
       n="$(printf '%s' "${line}" | grep -oiE '\([0-9]+ total' | grep -oE '[0-9]+' | head -1 || true)"
       [ -z "${n}" ] && continue
-      if printf '%s' "${line}" | grep -qiE 'agentes'; then
+      if grep -qiE 'agentes' <<< "${line}"; then
         if [ "${n}" != "${agent}" ]; then
           violation "SOFT" "${f}" "contagem-total de agentes divergente da SSOT: '(${n} total)' (esperado ${agent}) — /meta:inventory"
         fi
-      elif printf '%s' "${line}" | grep -qiE 'comandos'; then
+      elif grep -qiE 'comandos' <<< "${line}"; then
         if [ "${n}" != "${cmd}" ]; then
           violation "SOFT" "${f}" "contagem-total de comandos divergente da SSOT: '(${n} total)' (esperado ${cmd}) — /meta:inventory"
         fi
@@ -1533,7 +2791,7 @@ check_inventory_total_drift() {
     while IFS= read -r line; do
       [ -z "${line}" ] && continue
       case "${line}" in [[:space:]]*\|*|\|*) continue ;; esac
-      if printf '%s' "${line}" | grep -qiE 'paralel|orquestração de workers|orquestração paralela|orchestrator-worker|frota|fan-out|simultân|supervision'; then continue; fi
+      if grep -qiE 'paralel|orquestração de workers|orquestração paralela|orchestrator-worker|frota|fan-out|simultân|supervision' <<< "${line}"; then continue; fi
       n="$(printf '%s' "${line}" | grep -oiE '(^|[^0-9-])[0-9]+\+ comandos' | grep -oE '[0-9]+' | head -1 || true)"
       if [ -n "${n}" ] && [ "${n}" != "${cmd}" ]; then
         violation "SOFT" "${f}" "contagem aproximada de comandos divergente da SSOT: '${n}+ comandos' (esperado ${cmd}+) — /meta:inventory"
@@ -1585,11 +2843,11 @@ check_inventory_total_drift() {
     while IFS= read -r line; do
       [ -z "${line}" ] && continue
       case "${line}" in [[:space:]]*\|*|\|*) continue ;; esac
-      if printf '%s' "${line}" | grep -qiE 'paralel|orquestração de workers|orquestração paralela|orchestrator-worker|frota|fan-out|simultân|supervision|trabalhando|criad'; then continue; fi
+      if grep -qiE 'paralel|orquestração de workers|orquestração paralela|orchestrator-worker|frota|fan-out|simultân|supervision|trabalhando|criad' <<< "${line}"; then continue; fi
       # '(N agentes)' parentético = contagem POR-CATEGORIA/breakdown (ex.: header
       # 'AGENTES ESPECIALIZADOS (3 agentes)'), não total — pula mesmo com marcador.
-      if printf '%s' "${line}" | grep -qE '\([0-9]+ agentes\)'; then continue; fi
-      printf '%s' "${line}" | grep -qiE 'agentes especializados|agentes\*{0,2} (de )?IA' || continue
+      if grep -qE '\([0-9]+ agentes\)' <<< "${line}"; then continue; fi
+      grep -qiE 'agentes especializados|agentes\*{0,2} (de )?IA' <<< "${line}" || continue
       n="$(printf '%s' "${line}" | grep -oiE '[0-9]+ agentes' | grep -oE '^[0-9]+' | head -1 || true)"
       if [ -n "${n}" ] && [ "${n}" != "${agent}" ]; then
         violation "SOFT" "${f}" "contagem-total de agentes divergente da SSOT: '${n} agentes (especializados/IA)' (esperado ${agent}) — /meta:inventory"
@@ -1610,7 +2868,7 @@ check_inventory_total_drift() {
     while IFS= read -r line; do
       [ -z "${line}" ] && continue
       case "${line}" in [[:space:]]*\|*|\|*) continue ;; esac
-      printf '%s' "${line}" | grep -qE '\.claude/skills/|skills de orquestração' || continue
+      grep -qE '\.claude/skills/|skills de orquestração' <<< "${line}" || continue
       n="$(printf '%s' "${line}" | grep -oiE '[0-9]+ skills' | grep -oE '^[0-9]+' | head -1 || true)"
       if [ -n "${n}" ] && [ "${n}" != "${skill}" ]; then
         violation "SOFT" "${f}" "contagem-total de skills divergente da SSOT: '${n} skills' (esperado ${skill}) — /meta:inventory"
@@ -1662,6 +2920,87 @@ check_inventory_total_drift() {
         kb)    [ "${n}" != "${kb}" ]    && violation "SOFT" "${f}" "contagem-total de KBs divergente da SSOT (forma tabela): '${n}' (esperado ${kb}) — /meta:inventory" ;;
       esac
     done < <(grep -E '^\|[[:space:]]*(Comandos invocáveis|Comandos|Agentes especializados|Agentes|Skills|Knowledge Bases)[[:space:]]*\|' "${f}" 2>/dev/null)
+
+    # ── FORMAS 2026-08-12 (achado /meta:context-freshness) ────────────────────────────────
+    # O `codebase-guide.md` afirmava 99 comandos (SSOT: 102) em TRÊS formas, e NENHUMA casava
+    # com os feeders acima. Os contextos SEMPRE estiveram no escopo do `_find` — a cegueira era
+    # de VOCABULÁRIO, não de alcance (hipótese "está fora do escopo" foi MEDIDA e caiu).
+    # Terceira vez que esta regra falha pela forma da frase (PR #517, 2026-08-03, agora).
+    # [[guarda-por-lista-falha-pelo-vocabulario]]
+
+    # (a) INVERTIDA COM 'invocáveis': 'Comandos — 99 invocáveis em 10 categorias'.
+    #     O separador (travessão/dois-pontos/hífen) põe o número DEPOIS do substantivo, e o
+    #     feeder canônico exige '[0-9]+ comandos invocáveis'. Âncora mantida em 'invocáveis',
+    #     que o cabeçalho desta regra já declara marcador de TOTAL (nunca por-categoria).
+    while IFS= read -r n; do
+      if [ -n "${n}" ] && [ "${n}" != "${cmd}" ]; then
+        violation "SOFT" "${f}" "contagem-total de comandos divergente da SSOT (forma invertida com separador): '${n} invocáveis' (esperado ${cmd}) — derive de inventory.md (/meta:inventory)"
+      fi
+    done < <(grep -oiE 'comandos[[:space:]]*(—|–|:|-)[[:space:]]*[0-9]+[[:space:]]+invocáveis' "${f}" 2>/dev/null | grep -oE '[0-9]+')
+
+    # (b) CONJUNTIVA: '51 agentes e 99 comandos' / '102 comandos e 51 agentes'.
+    #     Dois substantivos de inventário ligados por 'e' formam frase-de-total — é o que
+    #     distingue de 'N comandos' cru, que esta regra NÃO checa por gerar falso-positivo.
+    #
+    #     JUNTA POR PARÁGRAFO (awk RS=""), não o arquivo inteiro. As duas coisas importam:
+    #     (1) o sítio fundador atravessa a quebra de linha — `...51 agentes e 99` numa linha,
+    #         `comandos"` na seguinte —, e `grep` linha-a-linha NÃO o alcança;
+    #     (2) juntar o ARQUIVO todo (a 1ª versão usava `tr`) cola afirmações INDEPENDENTES e
+    #         distantes numa falsa frase-de-total: 'tinha 40 agentes' num parágrafo + 'e 12
+    #         comandos foram removidos' noutro viravam acusação. Medido pelo Elenxo, não suposto.
+    #     O parágrafo é a menor unidade que contém a frase real sem colar as alheias.
+    #
+    #     ALTERNATIVAS EXPLÍCITAS, sem cross-product: `(agentes…e…comandos)|(comandos…e…agentes)`.
+    #     O alternation ingênuo `(agentes|comandos) e (comandos|agentes)` casava também
+    #     'N comandos e M comandos' — e aí o grep do OUTRO substantivo não casava, a substituição
+    #     saía 1 e, sob `set -euo pipefail`, MATAVA O LINT INTEIRO em silêncio (sem sumário, sem
+    #     as regras seguintes). Disparável por prosa hard-wrapped comum. É a classe que o
+    #     cabeçalho desta função (linhas ~1669) já documenta como curada — reincidida aqui.
+    while IFS= read -r pair; do
+      [ -z "${pair}" ] && continue
+      # ANTI-DUPLICAÇÃO: se o par cabe INTEIRO numa linha, o feeder irmão (ordem canônica,
+      # ~linha 1729) já o acusa — sem isto a mesma frase gera 4 violações em vez de 2.
+      grep -qF "${pair}" "${f}" 2>/dev/null && continue
+      # GUARDAS DE VOCABULÁRIO dos irmãos: breakdown em tabela e métrica de frota não são total.
+      case "${pair}" in *'|'*) continue ;; esac
+      grep -qiE 'paralel|frota|fan-out|simultân' <<< "${pair}" && continue
+      an="$(printf '%s' "${pair}" | grep -oiE '[0-9]+[[:space:]]+agentes' | grep -oE '^[0-9]+' | head -1 || true)"
+      cn="$(printf '%s' "${pair}" | grep -oiE '[0-9]+[[:space:]]+comandos' | grep -oE '^[0-9]+' | head -1 || true)"
+      [ -n "${an}" ] && [ "${an}" != "${agent}" ] && \
+        violation "SOFT" "${f}" "contagem-total de agentes divergente da SSOT (forma conjuntiva): '${an} agentes' (esperado ${agent}) — /meta:inventory"
+      [ -n "${cn}" ] && [ "${cn}" != "${cmd}" ] && \
+        violation "SOFT" "${f}" "contagem-total de comandos divergente da SSOT (forma conjuntiva): '${cn} comandos' (esperado ${cmd}) — /meta:inventory"
+    done < <(awk 'BEGIN{RS="";ORS="\n"}{gsub(/\n/," ");print}' "${f}" 2>/dev/null \
+             | grep -oiE '[0-9]+[[:space:]]+agentes[[:space:]]+e[[:space:]]+[0-9]+[[:space:]]+comandos|[0-9]+[[:space:]]+comandos[[:space:]]+e[[:space:]]+[0-9]+[[:space:]]+agentes' || true)
+
+    # (c) LINHA 'Total' DE TABELA: '| **Total** | | **99** |'.
+    #     'Total' não diz de QUÊ, então não dá para escolher a SSOT certa — e por isso a
+    #     comparação é contra o CONJUNTO dos totais conhecidos: bate com algum ⇒ cala; não bate
+    #     com NENHUM ⇒ acusa. Conservador de propósito (um 'Total: 51' numa tabela de comandos
+    #     passa, porque 51 é o total de agentes) — falso-NEGATIVO é aceitável aqui, falso-POSITIVO
+    #     não, e uma guarda que pune quem obedece ensina a ignorar a guarda.
+    #     ⚠️ O `grep` abaixo é CASE-SENSITIVE e isso é LOAD-BEARING, não descuido — o pré-filtro
+    #     (linha ~1976) casa com `-i`, então `| TOTAL |` maiúsculo CHEGA aqui e morre no feeder.
+    #     Sem esta assimetria, DOIS sítios reais viram falso-positivo na hora:
+    #       · `.claude/validation/orchestration-smoke-test.md` → `| **TOTAL** | **49** |`
+    #       · `docs/evolution/research/kg-read-leg-2026-08/SYNTHESIS.md` → `| **TOTAL** | | **1/9** |`
+    #     O `49` não bate com nenhuma SSOT, e o `1/9` seria parseado como `1` pelo `head -1`.
+    #     Quem for "harmonizar o case entre pré-filtro e feeder" — movimento natural, já que o
+    #     cabeçalho declara o pré-filtro SUPERSET — dispara os dois. Harmonize só junto com uma
+    #     âncora de célula puramente numérica.
+    #     ⚠️ CORREÇÃO DE UMA MEDIÇÃO MINHA: a 1ª redação dizia "só 3 arquivos têm '| Total |' no
+    #     repo inteiro". FALSO — o grep original era case-sensitive e não viu os dois acima. A
+    #     frase justificava a regra com uma medição feita pela mesma régua enviesada que a regra
+    #     usa, dentro de um commit que abria com "medição antes da regra". O Elenxo pegou.
+    while IFS= read -r line; do
+      [ -z "${line}" ] && continue
+      n="$(printf '%s' "${line}" | sed 's/^|[^|]*|//' | grep -oE '[0-9]+' | head -1 || true)"
+      [ -z "${n}" ] && continue
+      case "${n}" in
+        "${cmd}"|"${agent}"|"${skill}"|"${kb}") : ;;
+        *) violation "SOFT" "${f}" "linha 'Total' de tabela com valor que não bate com nenhuma contagem da SSOT: '${n}' (comandos ${cmd} · agentes ${agent} · skills ${skill} · KBs ${kb}) — /meta:inventory" ;;
+      esac
+    done < <(grep -E '^\|[[:space:]]*\*{0,2}Total\*{0,2}[[:space:]]*\|' "${f}" 2>/dev/null)
   # PRÉ-FILTRO (perf, 2026-07-13): só varre .md que CONTÊM uma frase-de-contagem candidata.
   #   Antes: 750 arquivos × ~8 greps/arquivo (esta é ~50% do tempo total do lint); ~90% dos .md
   #   não têm número+substantivo-de-inventário → puro overhead. O pattern abaixo é SUPERSET de
@@ -1677,8 +3016,15 @@ check_inventory_total_drift() {
   #   arquivo tinha, por acaso, também uma frase em prosa (foi o caso do getting-started,
   #   que mascarou o furo). Duas fixtures BAD não dispararam e expuseram isto.
   #   O superset acima é PROMESSA VERIFICÁVEL: feeder novo exige alternativa nova aqui.
+  #   ⚠️ LIMITE DECLARADO (2026-08-12) — a promessa vale LINHA-A-LINHA, e o feeder conjuntivo
+  #   passou a ler por PARÁGRAFO (awk RS=""). Um par cuja metade não caiba em nenhuma linha
+  #   isolada (ex.: '…44\nagentes e 99\ncomandos') não casa nenhuma alternativa e o arquivo é
+  #   excluído antes do feeder. O sítio fundador escapa disso porque tem '51 agentes' inteiro
+  #   numa linha — verificado, não presumido. Dizer isto em voz alta é a alternativa honesta a
+  #   afirmar um superset que o `grep` linha-a-linha estruturalmente não pode entregar; fingir
+  #   cobertura seria a própria classe que esta regra veio curar.
   done < <(_find "${CLAUDE_DIR}" "${REPO_ROOT}/docs" -name "*.md" -print0 2>/dev/null \
-    | xargs -0 -r grep -lZ -iE '[0-9]+\+?[[:space:]]+(comandos|agentes|knowledge[[:space:]]+bases|categorias|skills)|\([0-9]+[[:space:]]+total|^\|[[:space:]]*(comandos|comandos[[:space:]]+invocáveis|agentes|agentes[[:space:]]+especializados|skills|knowledge[[:space:]]+bases)[[:space:]]*\||(comandos|agentes|skills|knowledge[[:space:]]+bases)[[:space:]]*\([0-9]' 2>/dev/null)
+    | xargs -0 -r grep -lZ -iE '[0-9]+\+?[[:space:]]+(comandos|agentes|knowledge[[:space:]]+bases|categorias|skills)|\([0-9]+[[:space:]]+total|^\|[[:space:]]*(comandos|comandos[[:space:]]+invocáveis|agentes|agentes[[:space:]]+especializados|skills|knowledge[[:space:]]+bases)[[:space:]]*\||(comandos|agentes|skills|knowledge[[:space:]]+bases)[[:space:]]*\([0-9]|comandos[[:space:]]*(—|–|:|-)[[:space:]]*[0-9]|^\|[[:space:]]*\*{0,2}total\*{0,2}[[:space:]]*\|' 2>/dev/null)
 }
 
 # ===========================================================================
@@ -1746,6 +3092,28 @@ _apply_fix_file() {            # $1=arquivo  $2=programa sed -E
       FIX_LOG+=("${file#${REPO_ROOT}/}: ${dline}")
     done < <(diff "${file}" "${tmp}" | grep -E '^[<>]' || true)
     cat "${tmp}" > "${file}"
+    FIXED_FILES=$(( FIXED_FILES + 1 ))
+  fi
+  rm -f "${tmp}"
+}
+
+# --fix da REGRA 62. FUNÇÃO PRÓPRIA, não um bloco dentro de run_inventory_fixes: lá o
+# `[ -n "${cmd}" ] || return 0` sai ANTES, então qualquer falha alheia do inventory.sh
+# fazia o autofix do backlog sumir sem aviso e a R62 virar HARD manual (achado adversarial).
+# E CONTABILIZA a escrita: mutar arquivo rastreado e o relatório dizer "nada a fazer" é
+# behavior-over-declaration invertido dentro da própria ferramenta que a prega.
+run_backlog_projection_fix() {
+  [ "${IS_DERIVED}" -eq 0 ] || return 0
+  local gen="${SCRIPT_DIR}/kg-backlog-project.sh" out="${REPO_ROOT}/docs/backlog.md"
+  [ -f "${gen}" ] && [ -f "${out}" ] || return 0
+  local tmp; tmp="$(mktemp)"
+  # o rc do gerador MANDA: ele agora recusa (exit 2) quando o radar falha, quando um grafo
+  # enumerado sumiu do worktree, ou sem iconv. `[ -s ]` sozinho NÃO basta — a saída
+  # destrutiva medida na revisão era PLAUSÍVEL (cabeçalho + "nada aberto"), não vazia.
+  if bash "${gen}" --markdown > "${tmp}" 2>/dev/null && [ -s "${tmp}" ] \
+     && ! diff -q "${out}" "${tmp}" >/dev/null 2>&1; then
+    cp "${tmp}" "${out}"
+    FIX_LOG+=("docs/backlog.md: projeção regenerada (REGRA 62)")
     FIXED_FILES=$(( FIXED_FILES + 1 ))
   fi
   rm -f "${tmp}"
@@ -1907,6 +3275,8 @@ check_knowledge_base_links() {
 #   quando migrar). Origem: 1a pesquisa nascida em KG (research/whatsapp-api-2026-07).
 # ===========================================================================
 check_research_kg() {
+  # GATE POR RELEVÂNCIA sob --only — ver o racional em check_plugins_sync (mesmo Elenxo).
+  if [ -n "${ONLY_PATH}" ]; then case "${ONLY_PATH}" in */docs/evolution/research/*) : ;; *) return 0 ;; esac; fi
   local base="${REPO_ROOT}/docs/evolution/research"
   [ -d "${base}" ] || return 0
   local legacy=" federation-2026 knowledge-centric-ssot-2026 spec-as-code-evolution-2026 "
@@ -1979,7 +3349,7 @@ check_kg_provenance_coverage() {
 #   testa a verdade é o worker do kg-freshness, contra o vivo.
 #   Toda a lógica (escopo, catraca, fail-closed) vive em kg-verification-coverage.sh.
 #   MEIA-VIDA POR CLASSE fica GATED (hoje 0 nós com carimbo vencido — regra sobre conjunto
-#   vazio é cerimônia): docs/analysis/onion-adr-kg-halflife-2026-08.md.
+#   vazio é cerimônia): `onion-adr-kg-halflife-2026-08` (core-only).
 # ===========================================================================
 check_kg_verification_coverage() {
   local helper="${SCRIPT_DIR}/kg-verification-coverage.sh"
@@ -2249,16 +3619,27 @@ check_kg_view_sync() {
   while IFS= read -r kg; do
     [ -n "${kg}" ] || continue
     lens="${kg%.kg.yaml}-radar.md"
-    [ -f "${lens}" ] || continue           # lente é opt-in: só cobra o que existe
     if [ -n "${ONLY_PATH}" ]; then
       case "${ONLY_PATH}" in "${kg}"|"${lens}") : ;; *) continue ;; esac
     fi
-    # (b) paridade de parser primeiro — se os parsers divergem, comparar o
-    # conteúdo da lente é comparar contra a projeção errada.
+    # (b) PARIDADE DE PARSER — em TODO grafo, tenha lente ou não.
+    #
+    # ⚠️ A separação das duas obrigações estava escrita AQUI EM CIMA desde sempre, e o código não a
+    # respeitava: o `[ -f "${lens}" ] || continue` vinha ANTES, então as duas dependiam da lente
+    # existir. Passada adversarial mediu a consequência e ela é o pior caso possível — o gate
+    # fiscalizava 1 de 58 grafos, e naquele 1 o defeito que este PR cura é INVISÍVEL: ele não tem
+    # NENHUM nó `drifted`/`unverifiable`, e o único do corpus que tem não tem lente. Reintroduzindo
+    # o defeito ORIGINAL inteiro na lente, o portão dizia `✅ paridade, 881 nós` e saía 0.
+    #
+    # A distinção real: (a) drift de CONTEÚDO compara a lente contra o grafo — sem lente não há o
+    # que comparar, e o opt-in está certo. (b) drift de PARSER compara DOIS MOTORES sobre o mesmo
+    # `.kg.yaml` — a lente não entra na conta, e exigir que ela exista era condição estranha à
+    # pergunta. Custo medido da extensão: 58/58 verdes, 13s, zero falso-positivo.
     if ! out="$(bash "${gen}" "${kg}" --assert-parity 2>&1)"; then
-      violation "HARD" "${lens}" "[lente/PARIDADE] kg-view.sh e kg-radar.sh discordam sobre o tamanho do grafo — a lente está mentindo (${out})"
+      violation "HARD" "${kg}" "[lente/PARIDADE] kg-view.sh e kg-radar.sh discordam sobre o grafo — a projeção está mentindo (${out})"
       continue
     fi
+    [ -f "${lens}" ] || continue           # (a) é opt-in: só cobra conteúdo de lente que existe
     # (a) drift de conteúdo
     tmp="$(mktemp)"
     if _gen_into "${tmp}" "${lens}" "${lens}" -- bash "${gen}" "${kg}" --markdown &&
@@ -2310,7 +3691,11 @@ check_projection_safety() {
   # repo DELE. `site/` FICA no escopo — um adotante pode publicar site, e aí a regra vale.
   local surfaces=("${REPO_ROOT}/site")
   if [ "${IS_LEAF}" -ne 1 ]; then
-    surfaces+=("${REPO_ROOT}/docs/onion/graph" "${REPO_ROOT}/docs/onion/federation-console.html")
+    # federation-map.md entrou em 2026-08-17: é projeção GERADA do members.yaml pelo MESMO graph.sh
+    # que alimenta o console, e estava fora da lista — o console é auditado desde 07-10 e o irmão
+    # dele nunca foi. Superfície enumerada erra pelo lado do que NINGUÉM acrescentou (P3).
+    surfaces+=("${REPO_ROOT}/docs/onion/graph" "${REPO_ROOT}/docs/onion/federation-console.html"
+               "${REPO_ROOT}/docs/onion/federation-map.md")
   fi
   out="$(bash "${helper}" --format tsv "${surfaces[@]}" 2>/dev/null || true)"
   [ -n "${out}" ] || return 0
@@ -2351,32 +3736,46 @@ check_federation_projection() {
 }
 
 # ===========================================================================
-# REGRA 34 — Migalhas: superfícies DERIVADAS da fonte, sem drift [HARD]
-# previne: migalha (superfície derivada) driftando da fonte
-#   ADR onion-adr-blog-publication-generator-2026-07 (D2). As 3 superfícies
-#   (index.html/provas/feed.xml) são PROJEÇÃO de site/historia/migalhas/posts/*.md
-#   pelo migalhas-generate.sh. Editar a região gerada à mão (entre os marcadores
-#   ONION:GEN) = fonte paralela = o drift que 12 de 41 posts já sofreram (feed≠provas,
-#   medido na migração 2026-07-22). Regenerou? verde. Editou à mão? HARD. É o litmus
-#   de source-vs-derivation.md ("edito em UM") virado ESTRUTURAL. Skip gracioso sem
-#   python3 (exit 3 do gerador). Chrome (fora dos marcadores) é livre.
+# REGRA 34 — Site: a derivação nunca vira fonte [HARD]
+# previne: o build do site (derivação) entrando no git como se fosse fonte
+#   HISTÓRIA: nasceu no ADR onion-adr-blog-publication-generator-2026-07 (D2) como
+#   guarda de drift do migalhas-generate.sh (marcadores ONION:GEN). No cutover Astro
+#   (F2 da reforma, 2026-08-25) o gerador foi aposentado — as superfícies viraram
+#   build (site/src/ → site/dist/, gitignored) e o drift fonte×vivo passou ao
+#   ops/deploy-site.sh --check (que builda por dentro; bancada própria). O que resta
+#   para o lint é o litmus de source-vs-derivation.md virado estrutural no novo
+#   pipeline: dist commitado = fonte paralela = HARD.
 # ===========================================================================
 check_migalhas_sync() {
-  local gen="${SCRIPT_DIR}/migalhas-generate.sh"
-  local mig="${REPO_ROOT}/site/historia/migalhas"
-  [ -f "${gen}" ] || return 0
-  [ -d "${mig}/posts" ] || return 0
-  if [ -n "${ONLY_PATH}" ]; then
-    case "${ONLY_PATH}" in "${mig}"/*|"${gen}") : ;; *) return 0 ;; esac
+  # CUTOVER 2026-08-25 (reforma do site, F2): o migalhas-generate.sh foi APOSENTADO —
+  # as superfícies agora são build Astro (site/src/ → site/dist/, deployado por
+  # ops/deploy-site.sh, que builda por dentro nos DOIS modos). A REGRA 34 muda de
+  # roupa mantendo o espírito (derivação nunca vira fonte): o que reprova agora é
+  # DERIVAÇÃO COMMITADA — dist/ (ou variação dist-*) tracked no git. O drift
+  # fonte×vivo é responsabilidade do ops/deploy-site.sh --check (bancada própria,
+  # run_deploy_site_selftests).
+  # Sandbox/arquivo (sem .git — a bancada copia com cp -a): sem índice não há "tracked";
+  # skip declarado, nunca abort — a 1ª versão rodava git aqui e MATAVA o lint inteiro
+  # dentro do sandbox, silenciando todo check subsequente (pego pela bancada, 3 fixtures).
+  [ -e "${REPO_ROOT}/.git" ] || return 0
+  # Captura SEM pipe: `git | head` sob pipefail tomava SIGPIPE quando a saída passava do
+  # buffer — e o veredito INVERTIA sob volume (quanto maior a derivação commitada, mais
+  # fraco o veredito). Medido pela revisão adversarial: N=800 → HARD, N=1500 → SOFT.
+  local tracked=""
+  if ! tracked="$(git -C "${REPO_ROOT}" ls-files 'site/dist*')"; then
+    violation "SOFT" "site/dist*" \
+      "[migalhas/NAO-VERIFICADO] não consegui ler o índice git — a REGRA 34 declara que NÃO SABE (em vez de verde mudo)"
+    return 0
   fi
-  local rc=0
-  bash "${gen}" --check >/dev/null 2>&1 || rc=$?
-  case "${rc}" in
-    0) : ;;                                  # em sincronia
-    3) : ;;                                  # python3 ausente — skip gracioso
-    *) violation "HARD" "site/historia/migalhas/" \
-         "[migalhas/DRIFT] superfícies divergem da fonte posts/*.md — regenere: bash .claude/validation/migalhas-generate.sh (NÃO edite a região entre os marcadores ONION:GEN à mão)" ;;
-  esac
+  # here-string, NÃO pipe: `printf | head` movia o SIGPIPE do git p/ o printf e o
+  # statement simples sob set -e MATAVA o lint inteiro com dist grande (rc=141 mudo,
+  # 10 regras silenciadas — medido pela re-revisão com 1500 arquivos). O here-string
+  # não tem processo escritor para levar SIGPIPE.
+  tracked="$(head -5 <<< "${tracked}")"
+  if [ -n "${tracked}" ]; then
+    violation "HARD" "site/dist*" \
+      "[migalhas/DERIVACAO-COMMITADA] o build do site (dist) está TRACKED no git — a derivação nunca vira fonte (fonte≠derivação). Remova do índice: git rm -r --cached site/dist* (primeiros: $(printf '%s' "${tracked}" | tr '\n' ' '))"
+  fi
 }
 
 # ===========================================================================
@@ -2406,7 +3805,48 @@ check_site_no_private_deeplinks() {
       [ -n "${h}" ] || continue
       violation "HARD" "${f#${REPO_ROOT}/}" "[site/404-privado] deep-link p/ repo PRIVADO dá 404 no público: ${h} — aponte para /historia/migalhas/provas/ (prova público-segura)"
     done <<< "${hits}"
-  done < <(find "${site}" -type f \( -name '*.html' -o -name '*.xml' -o -name '*.md' \) 2>/dev/null | sort)
+  done < <(find "${site}" -type f -not -path '*/dist*/*' -not -path '*/node_modules/*' \( -name '*.html' -o -name '*.xml' -o -name '*.md' -o -name '*.astro' \) 2>/dev/null | sort)
+}
+
+# ===========================================================================
+# REGRA 79 — Artefato de plugin não publica o repo-fonte PRIVADO como endereço [HARD]
+# previne: plugin/marketplace publicando a URL do source privado — 404 no instalador
+#   Irmã da REGRA 35, um degrau mais apertada e noutra superfície. A 35 protege `site/`
+#   e ISENTA a home crua do repo; aqui a home crua é justamente o defeito: até 2026-09-07
+#   `assemble-plugin.sh` derivava UMA variável (`git remote get-url origin`) e a usava em
+#   TRÊS papéis — proveniência, `homepage` e `repository` do manifesto —, publicando o
+#   source PRIVADO como casa e como canal de suporte do projeto. Medido no clone público
+#   vivo: 5 hyperlinks 404 nos READMEs de plugin (emitidos por plugin-readme.sh) e 10
+#   pares homepage/repository em .claude-plugin/marketplace.json.
+#   Superfície: plugins/** e .claude-plugin/marketplace.json. `provenance.json` é a ÚNICA
+#   isenção — lá o slug é marca de ORIGEM content-addressed, não endereço navegável, e
+#   nenhum consumidor resolve a URL (medido: lint-artifacts o exclui do diff; a poda o usa
+#   como marcador de existência).
+#   A face pública vive numa costura só: .claude/utils/marketplace/public-face.sh.
+#   O slug privado é DERIVADO do remote `origin`, não digitado — quem forkar herda a guarda.
+# ===========================================================================
+check_plugin_no_private_source_url() {
+  local root="${REPO_ROOT}"
+  local src_slug
+  src_slug="$(git -C "${root}" remote get-url origin 2>/dev/null | sed -E 's#(git@|https://)([^/:]+)[/:]##; s#\.git$##' || true)"
+  [ -n "${src_slug}" ] || return 0
+  # Só vale quando a origem é de fato privada; num fork público a guarda não tem sujeito.
+  case "${ONION_SOURCE_IS_PRIVATE:-1}" in 1) : ;; *) return 0 ;; esac
+  local f hits
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    case "${f}" in */provenance.json) continue ;; esac
+    if [ -n "${ONLY_PATH}" ]; then
+      case "${f}" in "${ONLY_PATH}"|"${ONLY_PATH}"/*) : ;; *) continue ;; esac
+    fi
+    hits="$(grep -oE "github\.com/${src_slug}[^\"'\'')* ]*" "${f}" 2>/dev/null | sort -u || true)"
+    [ -n "${hits}" ] || continue
+    while IFS= read -r h; do
+      [ -n "${h}" ] || continue
+      violation "HARD" "${f#${root}/}" "[plugin/404-privado] artefato público cita o repo-fonte PRIVADO como endereço: ${h} — a casa e o canal vêm de public-face.sh (ONION_PUBLIC_HOMEPAGE / ONION_PUBLIC_REPOSITORY); só provenance.json pode carregar o slug de origem"
+    done <<< "${hits}"
+  done < <( { find "${root}/plugins" -type f \( -name '*.md' -o -name '*.json' \) 2>/dev/null; \
+              [ -f "${root}/.claude-plugin/marketplace.json" ] && printf '%s\n' "${root}/.claude-plugin/marketplace.json"; } | LC_ALL=C sort )
 }
 
 # ===========================================================================
@@ -2439,8 +3879,19 @@ check_vendored_surface_clean() {
   # [[vendor-scrub-blind-spot]] · irmão do GAP3 (approx-count adopter-aware, dogfood de campo 2026-07-24).
   # (o crédito nominal do adotante fica no diário privado — esta guarda cobra isso, inclusive de mim)
   [ "${IS_LEAF}" -eq 1 ] && return 0
-  local roots=(.claude/agents .claude/commands .claude/skills .claude/utils .claude/validation .claude/hooks \
-               docs/meta-specs docs/knowledge-base docs/sdaal)
+  # RAÍZES DERIVADAS DO TRANSPORTE, não redigidas. Medido 2026-09-13: esta lista tinha 9 raízes e o
+  # `/meta:adopt` copiava 11 — `.claude/rules` e `.claude/workflows` VIAJAVAM e não eram varridos por
+  # nome comercial de cliente. Guarda que varre menos do que o transporte emite é fail-open com cara de
+  # cobertura. A SSOT é `.claude/utils/adopt/vendor-manifest.sh`; sem ela, FALHA FECHADA (lista vazia
+  # reprovaria tudo, então a ausência é HARD nomeada, nunca silêncio).
+  local _vm="${REPO_ROOT}/.claude/utils/adopt/vendor-manifest.sh" roots=()
+  if [ -x "${_vm}" ] || [ -f "${_vm}" ]; then
+    while IFS= read -r _r; do [ -n "${_r}" ] && roots+=("${_r}"); done < <(bash "${_vm}" --repo "${REPO_ROOT}" --emit-scrub-roots 2>/dev/null || true)
+  fi
+  if [ "${#roots[@]}" -eq 0 ]; then
+    violation "HARD" ".claude/utils/adopt/vendor-manifest.sh" "REGRA 36 nao pode julgar: a SSOT do manifesto de vendorizacao nao respondeu (ausente ou vazia) — sem saber O QUE VIAJA, varrer e teatro. Restaure o script ou rode: bash .claude/utils/adopt/vendor-manifest.sh --emit-scrub-roots"
+    return 0
+  fi
   local targets=() r
   if [ -n "${ONLY_PATH}" ]; then
     local under=0
@@ -2454,6 +3905,21 @@ check_vendored_surface_clean() {
   local terms term f
   # (1) nomes COMERCIAIS marcados (derivados, menos os marcadores que são vocabulário das guardas)
   terms="$(bash "${helper}" --emit-terms 2>/dev/null | grep -vE '^(CONFIDENCIAL|PRIVADO)$' || true)"
+  # (1b) TERMOS DECLARADOS que o registro NÃO conhece — a rede que faltava debaixo de (1) e (2).
+  # MEDIDO 2026-09-18, exposição PÚBLICA e ATIVA: as fixtures da guarda-irmã usavam nomes REAIS de
+  # cliente como exemplo, em `.claude/validation/` — que viaja —, logo no repo público `onion-core`.
+  # A guarda que impede nome de cliente de viajar CONTINHA nomes de cliente, e nada acusou: (1) e (2)
+  # derivam do `members.yaml`, e nenhum daqueles clientes está registrado. É [[vendor-scrub-blind-spot]]
+  # com dano consumado em vez de hipótese.
+  # POR QUE UM ARQUIVO À PARTE, e não registrar no members.yaml: o `name:` de um membro é PROJETADO
+  # para o console e o mapa públicos — registrar um cliente sob NDA ali trocaria um vazamento por
+  # outro. Aqui o nome entra para ser PROCURADO, nunca exibido. E o arquivo vive em
+  # `docs/evolution/`, que NÃO viaja: uma lista de nomes de cliente que viajasse seria o vazamento.
+  local _ct="${REPO_ROOT}/docs/evolution/federation/client-terms.txt"
+  if [ -f "${_ct}" ]; then
+    terms="${terms}
+$(grep -vE '^[[:space:]]*(#|$)' "${_ct}" || true)"
+  fi
   # (2) IDS de ADOTANTE — o id também identifica o cliente (um id pode ser nome de pessoa, ou mapear direto na marca).
   #     Derivados do members.yaml, EXCLUINDO os nomes do PRÓPRIO framework (onion-*) e do maestro (marcio*).
   #     Decisão do maestro 2026-07-22: a superfície portável não nomeia parceiros; o crédito nominal fica no
@@ -2481,11 +3947,58 @@ check_vendored_surface_clean() {
       violation "HARD" "${f#${REPO_ROOT}/}" "[vendor-scrub] identificador de adotante '${term}' na superfície vendorizada — viaja p/ todo adotante (cross-tenant por adoção); generalize (o crédito nominal fica no diário privado)"
     done < <(grep -rilF -- "${term}" "${targets[@]}" 2>/dev/null | sort -u)
   done <<< "${terms}"
+
 }
 
 # ===========================================================================
-# REGRA 23 — Frontmatter: model: em comandos e category: em agentes [HARD]
-# previne: comando sem model: ou agente sem category:
+# Segunda metade da REGRA 36 (Superfície VENDORIZADA sem nome comercial de cliente): por FORMA,
+# porque a primeira falha pelo VOCABULÁRIO.
+# (o cabeçalho NÃO usa a forma `# REGRA <n> — <título>`: esse é o padrão que o rules-registry.sh
+#  lê como DECLARAÇÃO de regra, e um segundo `# REGRA 36 —` faz o gerador abortar por duplicata)
+#
+# A derivação do `members.yaml` está certa (nome hardcoded num script é o próprio vazamento), mas
+# cliente NÃO REGISTRADO é invisível para ela. Medido 2026-09-14: o nome de um cliente de PoC
+# viajava em DOIS arquivos e a guarda nunca cobrou. Classe [[guarda-por-lista-falha-pelo-vocabulario]].
+#
+# ⚠️ POR QUE ESTA METADE É FUNÇÃO SEPARADA, e não um bloco no fim da irmã (defeito MEDIDO na
+# passada adversarial de 2026-09-14, e é a ironia exata da tese): escrita DENTRO de
+# `check_vendored_surface_clean`, ela ficava atrás de DOIS `return 0` que não são dela —
+#   · `[ "${IS_LEAF}" -eq 1 ] && return 0` — a isenção de adotante-folha existe por CIRCULARIDADE
+#     (no adotante o `members.yaml` é o vendorizado do core, então a derivação acusava o dono do
+#     próprio nome). A forma NÃO tem essa circularidade, e morria junto: em `role: adopted` — o
+#     destino da MAIORIA — o detector era código morto. Provado por mutante: nome de cliente
+#     injetado passa em `adopted` e é pego em `hub`.
+#   · `[ -n "${terms}" ] || return 0` — pior ainda: a guarda que existe PORQUE a lista não vê o
+#     não-registrado só rodava SE a lista produzisse vocabulário. Com `members.yaml` enxuto (um
+#     hub, um fork do core), `grep -c vendor-scrub/FORMA` dava 0 enquanto o detector, chamado
+#     direto no mesmo sandbox, achava os dois vazamentos. Em silêncio.
+# A cura é estrutural, não um `if` a mais: quem não compartilha a precondição não compartilha a
+# função. Esta roda para TODO papel e sem depender de registro nenhum.
+# ===========================================================================
+check_vendored_surface_form() {
+  local _form="${SCRIPT_DIR}/vendor-scrub-form-check.sh" _fbase="${SCRIPT_DIR}/vendor-scrub-form-baseline.txt"
+  [ -f "${_form}" ] || return 0
+  # REGRA DE REPO, NÃO DE ARQUIVO — sai cedo sob `--only`. O detector varre a superfície INTEIRA
+  # (é o ponto: candidato novo em qualquer lugar dela), então sob escopo de arquivo ele reportaria
+  # violação de arquivo ALHEIO e quebraria o contrato do `--only`. Mesmo padrão das irmãs de repo.
+  [ -n "${ONLY_PATH:-}" ] && return 0
+  local _fnow _fprev _fnew
+  _fnow="$(bash "${_form}" "${REPO_ROOT}" 2>/dev/null || true)"
+  _fprev="$(grep -v '^#' "${_fbase}" 2>/dev/null | grep -v '^[[:space:]]*$' || true)"
+  _fnew="$(comm -23 <(printf '%s\n' "${_fnow}" | grep -v '^[[:space:]]*$' | sort -u) \
+                    <(printf '%s\n' "${_fprev}" | sort -u) || true)"
+  [ -n "${_fnew//[[:space:]]/}" ] || return 0
+  while IFS='|' read -r _ff _ft; do
+    [ -n "${_ff}" ] || continue
+    violation "HARD" "${_ff}" "[vendor-scrub/FORMA] candidato a nome comercial '${_ft}' NOVO na superfície vendorizada — a derivação do members.yaml não o vê (cliente não registrado é invisível). Se for cliente REAL, remova do texto; se for legítimo (sigla, nome fictício, citação), regenere: bash .claude/validation/vendor-scrub-form-check.sh --emit-baseline > .claude/validation/vendor-scrub-form-baseline.txt"
+  done <<< "${_fnew}"
+}
+
+# ===========================================================================
+# REGRA 23 — Frontmatter: category: em agentes (a metade 'model: em comandos' foi REVOGADA pela REGRA 71) [HARD]
+# previne: agente sem category: — o roteamento/inventário dependem dele. Até 2026-09-03 esta regra também EXIGIA
+#   model: em comandos; a REGRA 71 inverteu (comando segue a escada da sessão; tiering é dos agentes) — Aufhebung:
+#   o número fica, a metade de comando sai, e a fixture r23 bad-command-no-model virou caso BOM.
 #   Origem: Q_LINT_FRONTMATTER do KG (achados D8-20/D8-21 da auditoria
 #   2026-07-04 — o gap deixou 7 artefatos divergirem em silêncio; a regra
 #   impede o 8º). Escopo DELIBERADAMENTE determinístico: granularidade de
@@ -2494,16 +4007,6 @@ check_vendored_surface_clean() {
 #   Mesmo molde/exclusões da R1 (agentes) e R2 (comandos: sem common/, sem README).
 # ===========================================================================
 check_frontmatter_model_category() {
-  while IFS= read -r -d '' cmd; do
-    if ! grep -q "^model:" "${cmd}"; then
-      violation "HARD" "${cmd}" "frontmatter de comando sem model: — todo comando invocável declara o tier (achado D8-20, auditoria 2026-07-04) — adicione 'model: sonnet|opus|haiku|fable' ao frontmatter"
-    fi
-  done < <(
-    _find "${CLAUDE_DIR}/commands" -name "*.md" \
-      ! -path "*/common/*"   \
-      ! -name "README.md"    \
-      -print0 2>/dev/null
-  )
   while IFS= read -r -d '' agent; do
     if ! grep -q "^category:" "${agent}"; then
       violation "HARD" "${agent}" "frontmatter de agente sem category: — exigido pelo inventário/roteamento (achado D8-21, auditoria 2026-07-04) — adicione 'category: <categoria>' ao frontmatter (ex.: o nome do subdiretório em .claude/agents/)"
@@ -2523,6 +4026,9 @@ check_frontmatter_model_category() {
 # ===========================================================================
 check_bundled_command_script_deps() {
   [ "${IS_DERIVED}" -eq 1 ] && return 0
+  # GATE POR RELEVÂNCIA sob --only — ver o racional em check_plugins_sync (mesmo Elenxo).
+  # Área inclui commands/ e validation/: o manifesto declara scripts que os comandos citam.
+  if [ -n "${ONLY_PATH}" ]; then case "${ONLY_PATH}" in */utils/marketplace/*|*/commands/*|*/validation/*.sh) : ;; *) return 0 ;; esac; fi
   local vdir="${SCRIPT_DIR}/../utils/marketplace/verticals"
   [ -d "${vdir}" ] || return 0
   # Harness sempre-presente num repo adotado (não precisa estar no VALIDATION[] do bundle).
@@ -2682,7 +4188,12 @@ check_kg_narration_valid() {
 check_onion_version_tracked() {
   local stamp="${REPO_ROOT}/.claude/.onion-version"
   [ -f "${stamp}" ] || return 0
-  grep -qE '^(role:[[:space:]]*(adopted|hub)|decoupled_from:)' "${stamp}" 2>/dev/null || return 0   # adotante, hub OU fonte-desacoplada (todos carregam stamp que o clone precisa trackear)
+  # ⚠️ LE O PORTEIRO, NAO RE-DERIVA: esta linha era a SEGUNDA FORMA do mesmo predicado, sem o
+  # `_ROLE_TAIL` — exatamente o rombo que o comentario de :84-92 declara ter fechado ("um predicado,
+  # um lugar"). Com `role: standaloneX` num stamp editado a mao, ela casava por prefixo e o
+  # `IS_DERIVED` nao. Reusar a variavel mata a divergencia e faz a bancada de vocabulario cobrir os
+  # dois de uma vez. Achado da passada adversarial deste PR.
+  [ "${IS_DERIVED}" -eq 1 ] || return 0   # adotante, hub OU fonte-desacoplada (todos carregam stamp que o clone precisa trackear)
   git -C "${REPO_ROOT}" rev-parse --git-dir >/dev/null 2>&1 || return 0     # precisa ser repo git
   if [ -n "${ONLY_PATH}" ]; then
     case "${ONLY_PATH}" in "${stamp}") : ;; *) return 0 ;; esac
@@ -2841,6 +4352,7 @@ echo "=== Onion Lint — iniciando validação em ${CLAUDE_DIR} ==="
 echo ""
 
 if [ "${FIX_MODE}" -eq 1 ]; then
+  run_backlog_projection_fix
   run_inventory_fixes
   if [ "${FIXED_FILES}" -gt 0 ]; then
     echo "=== --fix: ${FIXED_FILES} arquivo(s) realinhado(s) à SSOT ==="
@@ -2869,11 +4381,60 @@ check_no_worker_orchestrator_agent
 check_branch_agent_distinction
 check_rules_pathscoped
 check_inventory_sync
+
+# REGRA 64 — Compose sem bind local ou com segredo em fallback literal [HARD]
+# previne: porta publicada em todas as interfaces (o Docker ignora o firewall do HOST — ufw/iptables
+# do host não seguram a DOCKER-USER chain) e serviço subindo com senha conhecida quando o .env falta.
+#
+# Gatilho MEDIDO, e a classe tem DUAS instâncias (um caso é caso, dois é classe): dois adotantes
+# distintos, 2026-08 — compose commitado com porta sem prefixo e/ou segredo de fallback (achados
+# redigidos no core privado; run wf_2349bf29-ea0). Nomes ficam FORA desta superfície: ela vendoriza.
+# Nuance medida com o maestro (2026-08-31): em produção AWS, security groups ficam FORA do host e
+# não são furados pelo Docker — mas dev local/VPS/CI não têm SG, e o fallback de segredo viaja
+# INTACTO para qualquer ambiente. Por isso as duas metades são HARD.
+# Escopo: docker-compose*.yml RASTREADOS pelo git (untracked é rascunho local, não artefato).
+# Cura: prefixo de bind (`127.0.0.1:HOST:CONT`) e `${VAR:?mensagem}` no lugar de `${VAR:-literal}`
+# para variáveis *PASSWORD*/*SECRET*/*TOKEN*/*KEY*. Acesso externo legítimo → túnel, não bind 0.0.0.0.
+check_compose_exposure() {
+  # CATRACA (2026-08-31, dogfood do 1º update de adotante): a 1ª forma era HARD puro e acertou 38
+  # violações LEGADAS num adotante de uma vez — guarda sem catraca sobre dívida pré-existente pune
+  # quem obedece e ensina o --no-verify. Padrão das irmãs (R49/kb-vendored): baseline PASSIVO que
+  # SÓ ENCOLHE — chave nova = HARD; chave tolerada = conta no aviso SOFT; a métrica é diminuir.
+  local BASELINE="${REPO_ROOT}/.claude/validation/compose-exposure-baseline.txt"
+  local f line n key tolerated=0
+  _key() { printf '%s::%s' "$1" "$(printf '%s' "$2" | sed 's/[[:space:]]//g' | sha1sum | cut -c1-12)"; }
+  _hit() { # $1=arquivo $2=linha-conteudo $3=mensagem
+    key="$(_key "$1" "$2")"
+    if [ -f "${BASELINE}" ] && grep -qF "${key}" "${BASELINE}"; then
+      tolerated=$((tolerated+1)); return
+    fi
+    violation "HARD" "$1" "$3 [chave ${key} — legado pré-existente entra no baseline via regen-baselines; NOVO nunca]"
+  }
+  while IFS= read -r f; do
+    [ -f "${REPO_ROOT}/${f}" ] || continue
+    while IFS= read -r line; do
+      n="${line%%:*}"
+      _hit "${f}" "${line#*:}" "REGRA 64 (linha ${n}): porta publicada SEM prefixo de bind — o Docker abre em 0.0.0.0 e ignora o firewall do host. Use 127.0.0.1:HOST:CONTAINER"
+    done < <(grep -nE '^[[:space:]]*-[[:space:]]*"?[0-9]+:[0-9]+"?[[:space:]]*(#.*)?$' "${REPO_ROOT}/${f}" || true)
+    while IFS= read -r line; do
+      n="${line%%:*}"
+      _hit "${f}" "${line#*:}" "REGRA 64 (linha ${n}): variável de segredo com FALLBACK LITERAL — sem .env o serviço sobe com credencial conhecida. Troque \${VAR:-literal} por \${VAR:?defina no .env}"
+    done < <(grep -inE '(PASSWORD|SECRET|TOKEN|_KEY)[A-Z_]*[=:][^#]*\$\{[A-Z_]+:-[^}]+\}' "${REPO_ROOT}/${f}" || true)
+  done < <(git -C "${REPO_ROOT}" ls-files 'docker-compose*.yml' '*/docker-compose*.yml' 2>/dev/null)
+  if [ "${tolerated}" -gt 0 ]; then
+    violation "SOFT" "${REPO_ROOT}/.claude/validation/compose-exposure-baseline.txt" "REGRA 64: ${tolerated} exposição(ões) de compose LEGADAS toleradas pelo baseline — a métrica de saúde é este número DIMINUINDO (cure com bind 127.0.0.1: e \${VAR:?}; a chave sai do baseline junto)"
+  fi
+}
+
+check_generated_projection_sync
+check_harvest_names_removed_nodes
+check_compose_exposure
 check_claude_md_counts
 check_site_inventory_sync
 check_plugins_sync
 check_capability_conformance
 check_role_bundle_sync
+check_moat_boundary
 check_bundled_command_script_deps
 check_graph_sync
 check_federation_map_sync
@@ -2884,16 +4445,668 @@ check_no_direct_provider_calls
 check_abstraction_methods_exist
 check_context_freshness_stamp
 check_inventory_total_drift
+check_model_version_fora_da_ssot
+check_kg_read_index_sync
+check_kg_edit_saw_confirmed
+check_door_staleness
+check_workflows_parse
+check_workflow_job_needs_checkout
 check_frontmatter_scalar_colon
 check_no_claude_docs
 check_evolution_links
 check_knowledge_base_links
 check_research_kg
 check_kg_provenance_coverage
+
+# REGRA 65 — Radar de mundo com baseline DATADA por eixo [SOFT]
+# previne: decidir estratégia com percepção externa vencida SEM AVISO — o modo-de-falha medido no
+# programa MAESTRO-VIVO (2026-08-31): 7 instrumentos de introspecção, zero de percepção externa, e
+# o eixo mais velho (panorama de modelos) com 65 dias citando um lineup já superado. O desenho segue
+# o padrão da REGRA 62: a máquina DETECTA a idade no lint, o humano dispara a rodada (/meta:radar) —
+# nunca cron/auto-start (MOAT W7). Opt-in pela PRESENÇA de docs/onion/radar-baselines.yaml
+# (superfície do core; adotante sem o arquivo não recebe a regra PELO GATE — mas RECEBE a bancada:
+# o selftest sintetiza a própria fixture via ONION_RADAR_BASELINES, então a regra é exercitada em
+# todo adotante pelo caminho da bancada; por isso a degradação de ambiente é SOFT, nunca HARD).
+# Arquivo presente e ilegível é
+# HARD fail-loud: guarda que não sabe o que cobrar jamais afirma conformidade (P0 da REGRA 30).
+check_radar_staleness() {
+  local bl="${ONION_RADAR_BASELINES:-${REPO_ROOT}/docs/onion/radar-baselines.yaml}"
+  [ -f "${bl}" ] || return 0
+  local stale_days="${RADAR_STALE_DAYS:-45}"
+  local today_epoch; today_epoch=$(date +%s)
+  local axes=0 stale=0 axis="" lr=""
+  while IFS= read -r line; do
+    case "${line}" in
+      *"- id: "*) axis="${line#*- id: }"; lr="" ;;
+      *"last_run: "*)
+        lr="${line#*last_run: }"
+        axes=$((axes+1))
+        if ! grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' <<< "${lr}"; then
+          violation "HARD" "${bl}" "REGRA 65: eixo '${axis}' com last_run ilegível ('${lr}') — baseline datada é o contrato; corrija ou remova o eixo"
+          continue
+        fi
+        # Portabilidade (emenda do Elenxo 2026-08-31): GNU date -d → BSD date -j → awk/mktime.
+        # O formato JA foi provado por regex acima; se nenhum date/awk parseia, o defeito é do
+        # AMBIENTE, não do artefato — degrade SOFT declarando que a idade NÃO foi medida (P0 da
+        # REGRA 30: guarda que não sabe medir declara, nunca reprova o arquivo).
+        local lr_epoch
+        lr_epoch=$(LC_ALL=C date -d "${lr}" +%s 2>/dev/null \
+          || LC_ALL=C date -j -f '%Y-%m-%d' "${lr}" +%s 2>/dev/null \
+          || awk -v d="${lr}" 'BEGIN{split(d,a,"-"); print mktime(a[1]" "a[2]" "a[3]" 12 0 0)}' 2>/dev/null \
+          || echo 0)
+        if [ -z "${lr_epoch}" ] || [ "${lr_epoch}" -le 0 ]; then
+          violation "SOFT" "${bl}" "REGRA 65: idade do eixo '${axis}' NÃO MEDIDA neste ambiente (date sem -d/-j e awk sem mktime) — degradação declarada, não conformidade"
+          continue
+        fi
+        local age=$(( (today_epoch - lr_epoch) / 86400 ))
+        if [ "${age}" -gt "${stale_days}" ]; then
+          stale=$((stale+1))
+          violation "SOFT" "${bl}" "REGRA 65: eixo '${axis}' do radar de mundo está VELHO (${age}d > ${stale_days}d) — a percepção externa venceu; rode /meta:radar ${axis}"
+        fi
+        ;;
+    esac
+  done < "${bl}"
+  if [ "${axes}" -eq 0 ]; then
+    violation "HARD" "${bl}" "REGRA 65: arquivo de baselines presente mas SEM eixos legíveis — fail-loud, nunca conformidade por ausência"
+  fi
+  # Gatilho de VERSÃO (ordem do maestro, 2026-08-31: "sempre ver se as estratégias estão adequadas"
+  # a cada versão do Claude Code — mecanizado, não lembrado): se a baseline E3 declara cc_version e
+  # o binário instalado difere, a plataforma mudou desde a última rodada de estratégia → SOFT.
+  # Sem binário `claude` no ambiente (ex.: CI) não há o que comparar — silêncio deliberado.
+  # PROCESSO > DISCO (medido 2026-09-02): o auto-updater troca o binário com a sessão viva; a sessão
+  # do maestro rodou 2.1.247 por 6 dias com o disco em 2.1.258 e esta regra dizia "instalado=2.1.258".
+  # Picker, hooks e capacidades refletem o PROCESSO — quando o lint roda DENTRO de uma sessão
+  # (pre-commit), a versão que importa é a do processo (CLAUDE_CODE_EXECPATH); e processo ≠ disco
+  # é um 2º SOFT próprio, porque a cura é outra (reiniciar a sessão, não rodar o radar).
+  local pinned_cc installed_cc disk_cc proc_cc exec_path
+  pinned_cc=$(grep -oE 'cc_version:[[:space:]]*"[0-9][0-9.]*"' "${bl}" | head -1 | grep -oE '[0-9][0-9.]*')
+  exec_path="${ONION_CC_EXECPATH-${CLAUDE_CODE_EXECPATH:-}}"   # `-` e não `:-`: override DEFINIDO-vazio isola a bancada do vazamento da sessão
+  [ -n "${exec_path}" ] && proc_cc=$(printf '%s' "${exec_path##*/}" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)
+  if command -v "${ONION_CC_BIN:-claude}" >/dev/null 2>&1; then
+    disk_cc=$("${ONION_CC_BIN:-claude}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  fi
+  local src_label="instalado"
+  installed_cc="${disk_cc:-}"
+  if [ -n "${proc_cc:-}" ]; then installed_cc="${proc_cc}"; src_label="processo"; fi
+  if [ -n "${pinned_cc}" ] && [ -n "${installed_cc}" ] && [ "${installed_cc}" != "${pinned_cc}" ]; then
+    violation "SOFT" "${bl}" "REGRA 65: Claude Code mudou de versão desde a última rodada de estratégia (rodada=${pinned_cc}, ${src_label}=${installed_cc}) — adequação não re-medida; rode /meta:radar E3-claude-code-delta"
+  fi
+  if [ -n "${proc_cc:-}" ] && [ -n "${disk_cc:-}" ] && [ "${proc_cc}" != "${disk_cc}" ]; then
+    violation "SOFT" "${bl}" "REGRA 65: esta sessão roda o Claude Code ${proc_cc} mas o disco já tem ${disk_cc} — picker/hooks/capacidades refletem o PROCESSO; reinicie a sessão (/exit → claude --continue) antes de medir adequação"
+  fi
+}
+
+# REGRA 65b — baseline de modelo da SESSÃO legível (session_models no eixo E6) [HARD]
+# previne: a guarda PreModelSwitch (premodelswitch-guard.sh) se desarmar por OMISSÃO — sem a chave, a
+# guarda faz fail-loud no /model (veta tudo) e este gate acusa ANTES, no lint. Escopo: o arquivo REAL
+# do core (ONION_SESSION_MODELS_FILE só para a bancada) — os fixtures da REGRA 65 (ONION_RADAR_BASELINES)
+# não carregam a chave e não devem disparar isto. Sem o arquivo (adotante) = silêncio: a guarda desarma.
+check_session_models_baseline() {
+  local f="${ONION_SESSION_MODELS_FILE:-${REPO_ROOT}/docs/onion/radar-baselines.yaml}"
+  [ -f "${f}" ] || return 0
+  local n
+  n=$(awk '/^[[:space:]]*session_models:[[:space:]]*(#.*)?$/ {f=1; next} f && /^[[:space:]]*-[[:space:]]*/ {c++; next} f {f=0} END{print c+0}' "${f}")
+  if [ "${n}" -eq 0 ]; then
+    violation "HARD" "${f}" "REGRA 65: baseline presente mas SEM 'session_models:' legível (eixo E6) — a guarda PreModelSwitch não sabe o que cobrar e passa a vetar toda troca (fail-loud); declare o lineup admitido como modelo da sessão"
+  fi
+}
+
+
+# REGRA 67 — Grafo de pesquisa com REVISITA carimbada (meta.review_after) [SOFT]
+# previne: pesquisa que envelhece em silêncio — 27 grafos em docs/evolution/research/ sem nenhuma data de
+# revisita (medido 2026-09-02, meta-research-lens). Irmã da REGRA 65 (eixos do radar têm last_run; o diário
+# tem review_after; o grafo de pesquisa não tinha nada). CATRACA sem retro-ruído: exige a chave só em grafo
+# NOVO (meta.baseline >= 2026-09-02); nos antigos só acusa se a chave existir e estiver vencida. A máquina
+# detecta, o maestro roda /onion-research --revisit (F4) — nunca cron (MOAT W7). Dir sobrescrevível para a
+# bancada (ONION_RESEARCH_KG_DIR); sem o dir (adotante) = silêncio.
+check_research_kg_review_after() {
+  local dir="${ONION_RESEARCH_KG_DIR:-${REPO_ROOT}/docs/evolution/research}"
+  [ -d "${dir}" ] || return 0
+  local today; today=$(date +%F)
+  local f base ra
+  while IFS= read -r f; do
+    [ -f "${f}" ] || continue
+    base=$(grep -m1 -oE '^\s*baseline:\s*[0-9]{4}-[0-9]{2}-[0-9]{2}' "${f}" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' || true)
+    ra=$(grep -m1 -oE '^\s*review_after:\s*[0-9]{4}-[0-9]{2}-[0-9]{2}' "${f}" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' || true)
+    if [ -z "${ra}" ]; then
+      if [ -n "${base}" ] && [ "${base}" \> "2026-09-01" ]; then
+        violation "SOFT" "${f}" "REGRA 67: grafo de pesquisa NOVO (baseline ${base}) sem meta.review_after — carimbe a revisita (ferramenta 30d · modelos 45d · mercado 90d · benchmark 120d · doutrina 12m); doutrina: common/prompts/research-doctrine.md"
+      fi
+    elif [ "${ra}" \< "${today}" ]; then
+      violation "SOFT" "${f}" "REGRA 67: revisita VENCIDA (review_after ${ra} < hoje ${today}) — o conhecimento deste grafo pode estar caduco; re-meça (/meta:kg-freshness nos nós PROD; /onion-research --revisit no externo) e carimbe de novo"
+    fi
+  done < <(find "${dir}" -mindepth 2 -maxdepth 2 -name '*.kg.yaml' 2>/dev/null | sort)
+}
+
+# REGRA 68 — Confiança alta com fonte fraca [SOFT]
+# previne: evidência externa "confirmada" com confidence >= 0.8 apoiada em fonte de baixa autoridade
+# (source_tier <= 3 na escala DREAM 1-10) ou em blog de FORNECEDOR SOBRE CONCORRENTE (source_kind
+# vendor-on-competitor — toda comparação de ferramentas de busca lida em 2026-09-02 era de concorrente
+# direto). Opt-in pela PRESENÇA dos campos: nó sem source_tier/source_kind é silêncio (não retro-reprova
+# os 80+ grafos). Doutrina: common/prompts/research-doctrine.md cláusula 7.
+check_kg_source_tier_confidence() {
+  local dir="${ONION_RESEARCH_KG_DIR:-${REPO_ROOT}/docs/evolution/research}"
+  [ -d "${dir}" ] || return 0
+  local f
+  while IFS= read -r f; do
+    [ -f "${f}" ] || continue
+    awk -v F="${f}" '
+      function flush(){ if(id!="" && conf!="" && (tier!="" || kind!="")){
+          c=conf+0; t=(tier==""?99:tier+0);
+          if(c>=0.8 && (t<=3 || kind=="vendor-on-competitor")) printf "%s\t%s\t%s\t%s\t%s\n", F,id,conf,(tier==""?"-":tier),(kind==""?"-":kind) } }
+      /^[[:space:]]*-[[:space:]]+id:[[:space:]]*/ { flush(); id=$0; sub(/^[[:space:]]*-[[:space:]]+id:[[:space:]]*/,"",id); conf="";tier="";kind=""; next }
+      /^[[:space:]]*confidence:[[:space:]]*/ { conf=$0; sub(/^[[:space:]]*confidence:[[:space:]]*/,"",conf); sub(/[[:space:]]*#.*$/,"",conf) }
+      /^[[:space:]]*source_tier:[[:space:]]*/ { tier=$0; sub(/^[[:space:]]*source_tier:[[:space:]]*/,"",tier); sub(/[[:space:]]*#.*$/,"",tier) }
+      /^[[:space:]]*source_kind:[[:space:]]*/ { kind=$0; sub(/^[[:space:]]*source_kind:[[:space:]]*/,"",kind); sub(/[[:space:]]*#.*$/,"",kind); gsub(/["'"'"']/,"",kind) }
+      END{ flush() }' "${f}" | while IFS=$'\t' read -r file nid conf tier kind; do
+        violation "SOFT" "${file}" "REGRA 68: nó ${nid} tem confidence ${conf} com fonte fraca (source_tier ${tier}, source_kind ${kind}) — confiança alta exige fonte primária/alta autoridade ou corroboração cruzada; rebaixe a confiança ou cite a primária (doutrina: research-doctrine.md §7)"
+      done
+  done < <(find "${dir}" -mindepth 2 -maxdepth 2 -name '*.kg.yaml' 2>/dev/null | sort)
+}
+
+
+# REGRA 89 — Rodada de radar selada reconcilia o corpus que superou (Aufhebung), com catraca [SOFT]
+# previne: a UNICA divida deste corpus que piora sozinha — rodada de radar selada como baseline sem
+#   escrever o que DERRUBOU. Sem a reconciliacao, o corpus superado segue vencendo a revisita da
+#   REGRA 67 para sempre, e cada rodada nova adiciona mais um orfao. Medido 2026-09-23: 2 de 6.
+# A guarda vive em `radar-aufhebung-check.sh` (o POR QUE inteiro esta la, inclusive a razao de ela
+# aceitar `supersedes_none`/`supersedes_external`). Extraida em vez de inline por dois motivos: e o
+# molde da casa (door-staleness, identifier-language), e a bancada consegue exercita-la em segundos
+# em vez de rodar o lint INTEIRO quatro vezes — a 1a versao inline custava 12+ min numa familia so.
+_R89_BASE="${REPO_ROOT}/.claude/validation/radar-aufhebung-baseline.txt"
+check_radar_aufhebung() {
+  local sc="${SCRIPT_DIR}/radar-aufhebung-check.sh"
+  [ -f "${sc}" ] || return 0
+  local out rc=0
+  out="$(bash "${sc}" "${REPO_ROOT}" 2>&1)" || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    violation "HARD" ".claude/validation/radar-aufhebung-check.sh" "REGRA 89 (Rodada de radar selada reconcilia o corpus que superou (Aufhebung), com catraca): a guarda nao pode julgar — $(printf '%s' "${out}" | head -1)"
+    return 0
+  fi
+  # CHAVEADO, nao contagem: com teto numerico, uma rodada NOVA sem Aufhebung entrando junto com
+  # uma velha reconciliada mantinha o total igual e passava despercebida. A catraca compara
+  # CONJUNTOS — entrada nao-tolerada e HARD mesmo com o numero parado.
+  local tolerated=""
+  # `|| true` NAO e decoracao: com o baseline VAZIO (o caso da porta publica, medido 2026-09-23) o
+  # `grep -v` nao casa nada, devolve 1, a lista `&&` termina em falha e o `set -e` da linha 74 MATA
+  # o lint aqui — sem imprimir nada. O rc virava 1 e o CI o lia como "achou HARD": o gate morto
+  # disfarcado de veredito. Baseline vazio e MISSING agora sao o mesmo caminho (tolerated="").
+  # A7 (revisor independente, 2026-09-24): o `|| true` engolia tambem "existe e NAO e legivel", e o
+  # PRODUTOR irmao (radar-aufhebung-check.sh:108) trata esse caso como classe propria: `[ -r ] ||
+  # exit 2` com "nao pude julgar (≠ zero)". O efeito do `|| true` e fail-CLOSED (tolerated="" faz
+  # tudo virar HARD), entao nao havia falso-verde — mas o operador recebia enxurrada de HARD espurios
+  # em vez do rotulo certo, e a unica pista era um `Permission denied` no stderr que o
+  # `lint-summary.sh` nem le. Agora o consumidor fala a mesma lingua do produtor.
+  if [ -e "${_R89_BASE}" ] && [ ! -r "${_R89_BASE}" ]; then
+    violation "HARD" "${_R89_BASE#"${REPO_ROOT}/"}" "REGRA 89 (Rodada de radar selada reconcilia o corpus que superou (Aufhebung), com catraca): o baseline da catraca EXISTE e NAO e legivel — NAO PUDE JULGAR (≠ zero tolerado). Conserte a permissao; sem ler o baseline nao se sabe o que esta tolerado."
+    return 0
+  fi
+  [ -f "${_R89_BASE}" ] && tolerated="$(grep -vE '^[[:space:]]*(#|$)' "${_R89_BASE}" || true)"
+  local fresh=0 line tag val
+  while IFS=$'\t' read -r tag val; do
+    case "${tag}" in
+      PONTEIRO-QUEBRADO)
+        violation "HARD" "docs/onion/radar-baselines.yaml" "REGRA 89 (Rodada de radar selada reconcilia o corpus que superou (Aufhebung), com catraca): a baseline aponta 'kg: ${val}', que NAO EXISTE — a rodada sai da conta sem ninguem saber. Corrija o ponteiro ou remova o eixo"
+        ;;
+      SEM-AUFHEBUNG)
+        # here-string, nao pipe: `<produtor> | grep -q` sob pipefail e corrida (o leitor fecha
+        # cedo, o escritor toma EPIPE). A guarda shell-pipefail da casa pegou este sitio no CI.
+        if grep -qxF "${val}" <<< "${tolerated}"; then
+          : # passivo conhecido, contabilizado no resumo abaixo
+        else
+          fresh=$((fresh + 1))
+          violation "HARD" "${val}" "REGRA 89 (Rodada de radar selada reconcilia o corpus que superou (Aufhebung), com catraca): rodada selada SEM Aufhebung e FORA do baseline — a catraca SO ENCOLHE. Reconcilie (no novo + SUPERSEDES datado), ou declare no bloco meta 'supersedes_none: <razao>' se nao derrubou nada, ou 'supersedes_external: <grafo>#<no>' (a aresta do motor e INTRA-arquivo, entao rodada em grafo proprio registra a Aufhebung cross-file assim). Declaracao SEM VALOR nao conta"
+        fi
+        ;;
+    esac
+  done <<< "${out}"
+  local n_tol; n_tol="$(grep -c . <<< "${tolerated}" || true)"
+  if [ "${fresh}" -eq 0 ] && [ "${n_tol:-0}" -gt 0 ]; then
+    violation "SOFT" "${_R89_BASE#"${REPO_ROOT}/"}" "REGRA 89 (Rodada de radar selada reconcilia o corpus que superou (Aufhebung), com catraca): [radar-aufhebung/PASSIVO] ${n_tol} rodada(s) selada(s) sem Aufhebung toleradas pelo baseline — a metrica de saude e esta LISTA encolhendo (reconcilie uma e regenere: bash .claude/validation/radar-aufhebung-check.sh . --emit-baseline)"
+  fi
+}
+
+
+# REGRA 69 — Roster de fontes com revisita vencida (docs/onion/radar-sources.yaml) [SOFT]
+# previne: fonte de rotina (semanal/mensal/trimestral/anual) esquecida — o roster nasceu na F2 como DADO da
+# doutrina de fontes; sem cobrança de idade vira lista decorativa. Cobra só fonte que DECLARA last_checked
+# (opt-in por presença — o roster novo não nasce vermelho); a cadência vem do eixo (ou da própria fonte).
+# A máquina detecta, o maestro roda /onion-research --revisit (MOAT W7: sem cron). Arquivo ausente = silêncio.
+check_radar_sources_freshness() {
+  local f="${ONION_RADAR_SOURCES:-${REPO_ROOT}/docs/onion/radar-sources.yaml}"
+  [ -f "${f}" ] || return 0
+  local today; today=$(date +%s)
+  awk -v F="${f}" -v today="${today}" '
+    function days(c){ return c=="weekly"?7:c=="monthly"?30:c=="quarterly"?90:c=="yearly"?365:45 }
+    function epoch(d,  a){ split(d,a,"-"); return mktime(a[1]" "a[2]" "a[3]" 00 00 00") }
+    /^[[:space:]]*-[[:space:]]*id:[[:space:]]*/ { axis=$0; sub(/^[[:space:]]*-[[:space:]]*id:[[:space:]]*/,"",axis); acad="" }
+    /^[[:space:]]*cadence:[[:space:]]*/ && !/url:/ { acad=$0; sub(/^[[:space:]]*cadence:[[:space:]]*/,"",acad) }
+    /url:/ && /last_checked:/ {
+      url=$0; sub(/.*url:[[:space:]]*"?/,"",url); sub(/"?[[:space:]]*,.*/,"",url)
+      lc=$0; sub(/.*last_checked:[[:space:]]*"?/,"",lc); sub(/"?[[:space:]]*[,}].*/,"",lc)
+      cad=acad; if ($0 ~ /cadence:/) { cad=$0; sub(/.*cadence:[[:space:]]*/,"",cad); sub(/[[:space:]]*[,}].*/,"",cad) }
+      if (lc ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/) { age=int((today-epoch(lc))/86400); if (age>days(cad)) printf "%s\t%s\t%s\t%d\t%s\n", axis, url, cad, age, lc }
+    }' "${f}" | while IFS=$'\t' read -r axis url cad age lc; do
+      violation "SOFT" "${f}" "REGRA 69: fonte do roster VENCIDA — eixo ${axis}, ${url} (cadência ${cad}, last_checked ${lc}, ${age}d) — re-leia na próxima rodada (/onion-research --revisit ou /meta:radar --axis ${axis}) e carimbe last_checked"
+    done
+}
+
+# REGRA 90 — Prosa de comando conhece os papéis que o script aceita [SOFT]
+# previne: o par script×prosa dos comandos de co-evolução desencontrar — e ele JÁ desencontrou duas
+#   vezes, em sentidos OPOSTOS: 2026-09-17 o script era estreito e a prosa larga (o core entregava
+#   anúncio a uma porta que não podia responder; custou um sinal entregue à mão); 2026-09-25 o script
+#   era largo e a prosa estreita (`co-relay.md` lido ao pé da letra mandava um `hub` PARAR, e a 1ª
+#   sessão do adotante `hub` teve de inferir onde se encaixava — foi ELE quem reportou).
+#   A assimetria é o ponto: a sessão lê a PROSA primeiro e o script nunca. Script certo com prosa
+#   errada produz um agente que recusa o que a máquina permite, e isso não acende gate nenhum.
+# A guarda vive em `command-role-parity-check.sh` (o POR QUE inteiro está lá, inclusive a fronteira
+# declarada: ela mata o SILÊNCIO da prosa, não julga se a prosa descreve o papel corretamente).
+# ⚠️ NASCE SOFT DE PROPÓSITO, e o gatilho de promoção está escrito: a classe já reincidiu duas vezes,
+#    o que por doutrina desta casa bastaria para HARD — mas uma guarda que NUNCA rodou no CI nascer
+#    bloqueante é o erro de 2026-09-20 (dependência nova introduzida sem medir quase reprovou todo PR).
+#    PROMOVER A HARD quando ela tiver passado verde em ao menos uma leva de CI, ou na primeira vez que
+#    alguém reincidir na classe COM a guarda no lugar — o que vier primeiro.
+check_command_role_parity() {
+  local sc="${SCRIPT_DIR}/command-role-parity-check.sh"
+  [ -f "${sc}" ] || return 0
+  local out rc=0
+  out="$(bash "${sc}" "${REPO_ROOT}" 2>&1)" || rc=$?
+  # rc 3 = a guarda declara que NÃO PUDE JULGAR; isso é informação, não silêncio.
+  if [ "${rc}" -eq 3 ]; then
+    violation "SOFT" ".claude/validation/command-role-parity-check.sh" "REGRA 90 (Prosa de comando conhece os papéis que o script aceita): a guarda não pôde julgar — ${out}"
+    return 0
+  fi
+  [ "${rc}" -eq 0 ] && return 0
+  while IFS= read -r l; do
+    [ -n "${l}" ] || continue
+    violation "SOFT" ".claude/commands/meta/" "REGRA 90 (Prosa de comando conhece os papéis que o script aceita): ${l#REGRA 90: }"
+  done <<< "${out}"
+}
+
+
+check_radar_aufhebung
+check_radar_sources_freshness
+check_command_role_parity
+
+# REGRA 70 — fallbackModel do settings.json é PROJEÇÃO da escada de modelos (eixo E6) [HARD]
+# previne: a escada (session_models + session_floor em docs/onion/radar-baselines.yaml) e o fallback nativo do
+# Claude Code (settings.json:fallbackModel, lista ordenada, dispara em sobrecarga) divergirem — a plataforma cairia
+# num modelo que a guarda PreModelSwitch veta, ou fora do piso selado. A fonte é a escada; o settings é derivado
+# (mesma doutrina da REGRA 62). Baseline sem escada = silêncio (adotante não nasce vermelho).
+check_fallback_model_parity() {
+  local bl="${ONION_RADAR_BASELINES:-${REPO_ROOT}/docs/onion/radar-baselines.yaml}"
+  local st="${ONION_SETTINGS_JSON:-${REPO_ROOT}/.claude/settings.json}"
+  [ -f "${bl}" ] && [ -f "${st}" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  if [ -n "${ONLY_PATH}" ]; then case "${ONLY_PATH}" in "${bl}"|"${st}") : ;; *) return 0 ;; esac; fi
+  local expected actual
+  expected="$(awk '
+    /^[[:space:]]*session_models:[[:space:]]*(#.*)?$/ {f=1; next}
+    f && /^[[:space:]]*-[[:space:]]*/ { sub(/^[[:space:]]*-[[:space:]]*/,""); sub(/[[:space:]]*#.*$/,""); gsub(/"/,""); if ($0!="") print; next }
+    f { f=0 }
+    /^[[:space:]]*session_floor:[[:space:]]*/ { sub(/^[[:space:]]*session_floor:[[:space:]]*/,""); sub(/[[:space:]]*#.*$/,""); gsub(/"/,""); if ($0!="") print }' "${bl}" 2>/dev/null | tail -n +2 | paste -sd, -)"
+  [ -n "${expected}" ] || return 0
+  actual="$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); v=d.get("fallbackModel")
+print(",".join(v) if isinstance(v,list) else (v or ""))' "${st}" 2>/dev/null || echo "?")"
+  if [ "${expected}" != "${actual}" ]; then
+    violation "HARD" "${st}" "REGRA 70: settings.json:fallbackModel [${actual:-<ausente>}] diverge da escada do eixo E6 [${expected}] — o fallback nativo cairia fora da guarda; projete: fallbackModel = session_models[1:] + session_floor"
+  fi
+}
+check_fallback_model_parity
+
+# REGRA 71 — Comando não declara model: no frontmatter — segue a escada da sessão [HARD]
+# previne: o Claude Code 2.1.259 passou a HONRAR model: de comando em sessão interativa (radar E3 rodada 2, l.17):
+# 96 comandos com `sonnet` viravam pedido de downgrade a cada invocação, vetado pela guarda. Tiering é dos AGENTES
+# (worker), não do comando: o comando roda no modelo da sessão, que segue a escada do eixo E6. Opção A selada
+# pelo maestro em 2026-09-03 (D_COMANDOS_SEM_MODEL_OU_NO_LINEUP).
+check_commands_without_model() {
+  local dir="${REPO_ROOT}/.claude/commands" f
+  [ -d "${dir}" ] || return 0
+  while IFS= read -r f; do
+    if [ -n "${ONLY_PATH}" ] && [ "${ONLY_PATH}" != "${f}" ]; then continue; fi
+    if awk 'NR==1&&$0!="---"{exit 1} /^---$/{c++; if(c==2)exit 1; next} c==1&&/^model:[[:space:]]/{found=1; exit 0} END{exit (found?0:1)}' "${f}" 2>/dev/null; then
+      violation "HARD" "${f}" "REGRA 71: comando declara model: no frontmatter — comandos seguem a escada da sessão (E6); tiering é dos agentes. Remova a linha"
+    fi
+  done < <(find "${dir}" -name '*.md' -not -path '*/common/templates/*' 2>/dev/null | sort)
+}
+
+# ===========================================================================
+# REGRA 72 — Namespace de comando em plugin é /<plugin>:<cmd>, nunca o do core [HARD]
+# previne: comando empacotado citando `/engineer:pr` — ponteiro que não resolve no consumidor
+#   Um comando instalado por plugin é `/<plugin>:<cmd>`. Medido 2026-09-04: 531 referências ao
+#   namespace do core dentro de plugins/ (208 cross-plugin, 194 mesmo-plugin, 129 dangling p/ a
+#   meta-fábrica) e ZERO na forma do plugin — o lint era cego porque só varria .claude/ + docs/,
+#   onde `/engineer:pr` resolve. A CURA é determinística e vive no gerador (assemble-plugin.sh →
+#   NAMESPACE-PORTABILITY via plugin-namespace-check.sh --rewrite), por isso HARD sem baseline:
+#   catraca só faz sentido quando a cura é manual. Toda a lógica (mapa derivado de TODOS os
+#   manifestos, regex, classes) vive em plugin-namespace-check.sh — um só lugar.
+# ===========================================================================
+check_plugin_namespace() {
+  local helper="${SCRIPT_DIR}/plugin-namespace-check.sh"
+  [ "${IS_DERIVED}" -eq 1 ] && return 0
+  [ -f "${helper}" ] || return 0
+  [ -d "${REPO_ROOT}/plugins" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      "${REPO_ROOT}"/plugins/*|*/verticals/*.manifest.sh|*/assemble-plugin.sh|*/plugin-namespace-check.sh) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  local out sev cls path msg
+  out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>/dev/null || true)"
+  [ -n "${out}" ] || return 0
+  while IFS=$'\t' read -r sev cls path msg; do
+    [ -n "${sev}" ] || continue
+    violation "HARD" "${REPO_ROOT}/${path}" "[plugin-namespace/${cls}] ${msg} — regenere: bash .claude/utils/marketplace/assemble-plugin.sh <manifesto>"
+  done <<< "${out}"
+}
+
+# ===========================================================================
+# REGRA 73 — Hook empacotado resolve no plugin instalado [HARD]
+# previne: hook morto e silencioso no plugin (script ausente, motor não embarcado, caminho $REPO/${CLAUDE_PLUGIN_ROOT}, matcher perdido)
+#   Medido 2026-09-04: plugins/onion/hooks/aside-router-hook.sh montava ENGINE="$REPO/${CLAUDE_PLUGIN_ROOT}/…"
+#   (variável absoluta prefixada) e o motor aside-router.sh não viajava; `[ -f ] || exit 0` engolia os
+#   dois erros. E o hooks.json gerado descartava o matcher `Bash` do core (PostToolUse em TODA tool).
+#   Lógica em plugin-hooks-check.sh. HARD sem baseline: o hook do core resolve o motor pelo próprio
+#   diretório, o manifesto embarca o motor e o gerador carrega o matcher — cura no gerador + fonte.
+# ===========================================================================
+check_plugin_hooks_resolvable() {
+  local helper="${SCRIPT_DIR}/plugin-hooks-check.sh"
+  [ "${IS_DERIVED}" -eq 1 ] && return 0
+  [ -f "${helper}" ] || return 0
+  [ -d "${REPO_ROOT}/plugins" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      "${REPO_ROOT}"/plugins/*|*/verticals/*.manifest.sh|*/assemble-plugin.sh|*/plugin-hooks-check.sh|"${REPO_ROOT}"/.claude/hooks/*|"${REPO_ROOT}"/.claude/settings.json) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  local out sev cls path msg
+  out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>/dev/null || true)"
+  [ -n "${out}" ] || return 0
+  while IFS=$'\t' read -r sev cls path msg; do
+    [ -n "${sev}" ] || continue
+    violation "HARD" "${REPO_ROOT}/${path}" "[plugin-hook/${cls}] ${msg}"
+  done <<< "${out}"
+}
+
+# ===========================================================================
+# REGRA 74 — Caminho .claude/ NU dentro de plugin só resolve no core, com catraca [HARD + SOFT]
+# previne: comando/agente empacotado apontando .claude/{utils,commands,templates,…} que não viajou — ponteiro morto no consumidor
+#   Medido 2026-09-04: 124 refs nuas em 7/8 plugins (c4-templates, task-manager, templates de
+#   contexto, common:prompts:*), 7 delas em allowed-tools (o comando NASCE MORTO). O PATH-PORTABILITY
+#   só reescreve o que o manifesto embarca. A cura é de manifesto/fonte — manual — logo CATRACA:
+#   passivo no baseline = SOFT; novo = HARD; baseline só encolhe (CATRACA-VIOLADA vs origin/main).
+#   Lógica em plugin-bare-path-check.sh; baseline em plugin-bare-path-baseline.txt.
+# ===========================================================================
+check_plugin_bare_paths() {
+  local helper="${SCRIPT_DIR}/plugin-bare-path-check.sh"
+  [ "${IS_DERIVED}" -eq 1 ] && return 0
+  [ -f "${helper}" ] || return 0
+  [ -d "${REPO_ROOT}/plugins" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      "${REPO_ROOT}"/plugins/*|*/verticals/*.manifest.sh|*/assemble-plugin.sh|*/plugin-bare-path-check.sh|*/plugin-bare-path-baseline.txt) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  local out sev cls path msg
+  out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>/dev/null || true)"
+  [ -n "${out}" ] || return 0
+  while IFS=$'\t' read -r sev cls path msg; do
+    [ -n "${sev}" ] || continue
+    violation "${sev}" "${REPO_ROOT}/${path}" "[plugin-bare-path/${cls}] ${msg}"
+  done <<< "${out}"
+}
+
+# ===========================================================================
+# REGRA 75 — Link markdown relativo dentro de plugin resolve no plugin [HARD]
+# previne: `[irmã](../kb/x.md)` num plugin apontando para arquivo que não viajou — 404 no consumidor
+#   Medido 2026-09-04: 123 links relativos mortos em 5/8 plugins (o assembler só curava kb/ e irmãs no
+#   mesmo diretório). Cura generalizada no gerador (plugin-dead-link-check.sh --rewrite: link → texto do
+#   título; templates/ fora por desenho). HARD sem baseline: a cura vive no gerador.
+# ===========================================================================
+check_plugin_dead_links() {
+  local helper="${SCRIPT_DIR}/plugin-dead-link-check.sh"
+  [ "${IS_DERIVED}" -eq 1 ] && return 0
+  [ -f "${helper}" ] || return 0
+  [ -d "${REPO_ROOT}/plugins" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      "${REPO_ROOT}"/plugins/*|*/verticals/*.manifest.sh|*/assemble-plugin.sh|*/plugin-dead-link-check.sh) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  local out sev cls path msg
+  out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>/dev/null || true)"
+  [ -n "${out}" ] || return 0
+  while IFS=$'\t' read -r sev cls path msg; do
+    [ -n "${sev}" ] || continue
+    violation "HARD" "${REPO_ROOT}/${path}" "[plugin-link/${cls}] ${msg} — regenere: bash .claude/utils/marketplace/assemble-plugin.sh <manifesto>"
+  done <<< "${out}"
+}
+
+# ===========================================================================
+# REGRA 76 — marketplace.json da raiz é projeção do gerador [HARD]
+# previne: .claude-plugin/marketplace.json envelhecendo calado (o core também é marketplace instalável)
+#   Medido 2026-09-04: o arquivo estava no formato pré-2026-09-04 (version 0.1.0 em todas as entradas,
+#   sem displayName/category/tags) e nenhuma guarda o comparava ao gerador (a REGRA 37 só faz grep).
+#   Mesma classe da REGRA 62. Cura: o pre-commit regenera junto com os plugins (marketplace-root-check.sh
+#   --write, temp+mv — redirecionar direto TRUNCA o arquivo antes de o gerador ler o top-level).
+# ===========================================================================
+check_marketplace_root_sync() {
+  local helper="${SCRIPT_DIR}/marketplace-root-check.sh"
+  [ "${IS_DERIVED}" -eq 1 ] && return 0
+  [ -f "${helper}" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      "${REPO_ROOT}"/plugins/*|"${REPO_ROOT}"/.claude-plugin/marketplace.json|*/generate-marketplace.sh|*/marketplace-root-check.sh) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  local out sev cls path msg
+  out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>/dev/null || true)"
+  [ -n "${out}" ] || return 0
+  while IFS=$'\t' read -r sev cls path msg; do
+    [ -n "${sev}" ] || continue
+    violation "HARD" "${REPO_ROOT}/${path}" "[marketplace-raiz/${cls}] ${msg}"
+  done <<< "${out}"
+}
+
+# ===========================================================================
+# REGRA 78 — `.kg.yaml` versionado é YAML VÁLIDO, com catraca [HARD + SOFT]
+# previne: grafo que o kg-radar aceita (parser awk sobre TEXTO) e que qualquer consumidor com lib YAML rejeita
+#   Medido 2026-09-06: CINCO .kg.yaml versionados com `kg-radar --integrity --schema` exit 0 e
+#   `yaml.safe_load` estourando — aspas não escapadas em `label:`/`trace:`, barra invertida antes de
+#   cifrão. O quinto foi escrito no PR que DENUNCIAVA a classe, dentro do label que a descreve: radar
+#   verde, lint 0 HARD, CI verde, merge. Descrever a classe não protege contra ela.
+#   Dano além da estética: a verdade do corpus passa a ser a do awk, não a do YAML — e foi essa fresta
+#   que permitiu, na bancada do predicado de selo, forjar uma aresta REFUTES DENTRO de um `label: |`.
+#   Cura é edição manual arquivo a arquivo, logo CATRACA: passivo no baseline = SOFT; novo = HARD.
+#   Lógica em kg-yaml-validity-check.sh; baseline em kg-yaml-validity-baseline.txt.
+# ===========================================================================
+check_kg_yaml_validity() {
+  local helper="${SCRIPT_DIR}/kg-yaml-validity-check.sh"
+  [ -f "${helper}" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      *.kg.yaml|*/kg-yaml-validity-check.sh|*/kg-yaml-validity-baseline.txt) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  # ⚠️ A FIAÇÃO NÃO PODE ENGOLIR O `exit 2` DO HELPER. O padrão copiado dos irmãos
+  #    (`... 2>/dev/null || true`) descarta código de saída E stderr — e nos irmãos isso é inócuo
+  #    porque eles degradam para exit 0. Este helper NÃO: ele sai 2 dizendo NAO VERIFICADO quando
+  #    PyYAML/git faltam, e PyYAML ausente é condição real medida nesta máquina. Com o `|| true`, a
+  #    REGRA 78 simplesmente não rodava e o lint declarava gate limpo — zero violação, zero stderr.
+  #    O mesmo anti-padrão já está descrito neste arquivo em `_gen_into`. Aqui o rc é LIDO.
+  # ⚠️ rc capturado com `if cmd; then … else … fi`, não com atribuição solta — é o "Suspeito nº 1"
+  #    que a bancada desta casa nomeia para morte-sob-`set -e`.
+  #    ⚠️ CORREÇÃO DE UMA AFIRMAÇÃO MINHA: eu escrevi aqui que ESTA função derrubava o lint sem
+  #    PyYAML. FALSO, e a medição que me convenceu estava viciada — eu rodava uma CÓPIA do lint em
+  #    /tmp, o que muda `SCRIPT_DIR` e desvia o caminho inteiro. Medido in-tree nos dois lados:
+  #    `origin/main` e esta branch abortam IGUALMENTE logo após a REGRA 39 quando falta `python3`.
+  #    O defeito é PRÉ-EXISTENTE e maior que esta regra (o sumário nunca sai), e está registrado
+  #    como fio aberto. O rigor abaixo continua valendo por si.
+  local out err rc sev cls path msg
+  err="$(mktemp 2>/dev/null || echo /dev/null)"; rc=0; out=""
+  if out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>"${err}")"; then rc=0; else rc=$?; fi
+  if [ "${rc:-0}" -ge 2 ] 2>/dev/null; then
+    violation "SOFT" "${REPO_ROOT}/.claude/validation/kg-yaml-validity-check.sh" \
+      "[kg-yaml/NAO-VERIFICADO] a guarda de validade YAML NÃO RODOU (rc=${rc}: $(head -1 "${err}" 2>/dev/null)) — o corpus não foi verificado; isto não é aprovação"
+    rm -f "${err}"; return 0
+  fi
+  rm -f "${err}"
+  [ -n "${out}" ] || return 0
+  while IFS=$'\t' read -r sev cls path msg; do
+    [ -n "${sev}" ] || continue
+    case "${path}" in /*) : ;; *) path="${REPO_ROOT}/${path#./}" ;; esac
+    violation "${sev}" "${path}" "[kg-yaml/${cls}] ${msg}"
+  done <<< "${out}"
+  # ⚠️ `return 0` EXPLÍCITO: o último `read` de um `while … done <<< …` devolve 1 (EOF) e a função
+  #    herdaria rc=1. Os irmãos escapam por acidente (degradam para saída vazia e retornam antes do
+  #    laço), não por desenho — aqui é explícito.
+  return 0
+}
+
+# ===========================================================================
+# REGRA 82 — Os dois leitores do corpus CONCORDAM sobre quem é nó [HARD + SOFT]
+# previne: grafo válido em que o radar (awk sobre texto) e o PyYAML veem populações DIFERENTES
+#   Sinal de campo do venda-direta-pdi (pin 5dcc706b2233), REPRODUZIDO no core em 30 segundos: um
+#   `.kg.yaml` PERFEITAMENTE VÁLIDO com um nó `B_ESCONDIDO` escrito DENTRO do bloco `label: |` de
+#   outro. PyYAML vê 2 nós; o kg-radar — QUE É QUEM EMITE O VEREDITO — anuncia 3, e o nó forjado
+#   pesa na centralidade. Todos os gates verdes, inclusive a REGRA 78, que está CERTA: o arquivo é
+#   YAML válido. A 78 fecha a metade SINTÁTICA; esta fecha a do CENSO.
+#   Causa: o matcher do radar casa `- id:` com QUALQUER indentação dentro de `nodes:`, sem rastrear
+#   blocos literais — permissividade correta para um motor awk, e o preço declarado da economia de
+#   motores. Preço só é aceitável se alguém o cobrar.
+#   ⚠️ O motor REPLICA a máquina de estados do radar linha a linha (requisito que o adotante
+#   descobriu na pele: a 1ª guarda deles ancorava em dois espaços fixos e não via o nó forjado a
+#   seis — media, saía 0, e não replicava nada). Catraca igual à da 78.
+#   Lógica em kg-census-parity-check.sh; baseline em kg-census-parity-baseline.txt.
+# ===========================================================================
+check_kg_census_parity() {
+  local helper="${SCRIPT_DIR}/kg-census-parity-check.sh"
+  [ -f "${helper}" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      *.kg.yaml|*/kg-census-parity-check.sh|*/kg-census-parity-baseline.txt|*/kg-radar.sh) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  # ⚠️ O rc É LIDO, nunca engolido com `|| true` — este helper sai 2 dizendo NAO MEDIDO quando
+  #    PyYAML/git faltam, e PyYAML ausente é condição REAL medida nesta máquina. Engolir o 2
+  #    faria a regra não rodar e o lint declarar gate limpo: zero violação, zero stderr. É a
+  #    mesma cicatriz que a irmã 78 carrega documentada.
+  local out err rc sev cls path msg
+  # ESCOPO REAL sob `--only`. Antes o filtro barrava a ENTRADA mas o helper varria os 128 grafos:
+  # reportava violação de arquivo ALHEIO (que o chamador não pediu) e cobrava +22% por invocação,
+  # em cada uma das 33 fixtures .kg.yaml rastreadas. Medido: 16,1s → 0,22s com o escopo ligado.
+  local _scope=()
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      *.kg.yaml) _scope=(--file "${ONLY_PATH#"${REPO_ROOT}"/}") ;;
+    esac
+  fi
+  err="$(mktemp 2>/dev/null || echo /dev/null)"; rc=0; out=""
+  if out="$(bash "${helper}" "${REPO_ROOT}" --format tsv ${_scope+"${_scope[@]}"} 2>"${err}")"; then rc=0; else rc=$?; fi
+  if [ "${rc:-0}" -ge 2 ] 2>/dev/null; then
+    violation "SOFT" "${REPO_ROOT}/.claude/validation/kg-census-parity-check.sh" \
+      "[kg-parity/NAO-MEDIDO] a guarda de paridade de censo NÃO RODOU (rc=${rc}: $(head -1 "${err}" 2>/dev/null)) — o corpus não foi confrontado; isto não é aprovação"
+    rm -f "${err}"; return 0
+  fi
+  rm -f "${err}"
+  [ -n "${out}" ] || return 0
+  while IFS=$'\t' read -r sev cls path msg; do
+    [ -n "${sev}" ] || continue
+    case "${path}" in /*) : ;; *) path="${REPO_ROOT}/${path#./}" ;; esac
+    violation "${sev}" "${path}" "[kg-parity/${cls}] ${msg}"
+  done <<< "${out}"
+  # `return 0` explícito: o último `read` devolve 1 (EOF) e a função herdaria rc=1.
+  return 0
+}
+
+# ===========================================================================
+# REGRA 77 — Contrato de dependência entre plugins [HARD + SOFT]
+# previne: dois plugins embarcando a mesma skill/KB (cópias divergem) ou um plugin usando skill que só outro embarca sem declarar
+#   Medido 2026-09-04: onion e onion-work-tools embarcavam a mesma skill, o mesmo motor (3 md5) e a mesma
+#   KB; nenhum capability.json declarava outro PLUGIN. A consolidação 8→5 sumiu com a duplicação; esta
+#   regra impede que volte: (HARD) conhecimento duplicado (skills/, kb/), skill de outro plugin sem
+#   REQUIRES_PLUGINS, REQUIRES_PLUGINS sem reflexo em capability.json/README; (SOFT, 1 linha agregada)
+#   menções cruzadas de comando — informativas, o README lista em "Funciona melhor com". Motores em
+#   validation/utils viajam com quem os chama (um plugin só alcança a própria raiz) e não são duplicata.
+#   Lógica em plugin-deps-check.sh.
+# ===========================================================================
+check_plugin_deps_contract() {
+  local helper="${SCRIPT_DIR}/plugin-deps-check.sh"
+  [ "${IS_DERIVED}" -eq 1 ] && return 0
+  [ -f "${helper}" ] || return 0
+  [ -d "${REPO_ROOT}/plugins" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      "${REPO_ROOT}"/plugins/*|*/verticals/*.manifest.sh|*/assemble-plugin.sh|*/plugin-deps-check.sh|*/plugin-readme.sh) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  local out sev cls path msg soft=0
+  out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>/dev/null || true)"
+  [ -n "${out}" ] || return 0
+  while IFS=$'\t' read -r sev cls path msg; do
+    [ -n "${sev}" ] || continue
+    if [ "${sev}" = "SOFT" ]; then soft=$((soft+1)); continue; fi
+    violation "HARD" "${REPO_ROOT}/${path}" "[plugin-deps/${cls}] ${msg}"
+  done <<< "${out}"
+  [ "${soft}" -gt 0 ] && violation "SOFT" "${REPO_ROOT}/plugins" "[plugin-deps/MENCAO-CRUZADA] ${soft} par(es) de plugins com menção cruzada de comando — informativo (o README lista em 'Funciona melhor com'; detalhe: bash .claude/validation/plugin-deps-check.sh)"
+  return 0
+}
+check_commands_without_model
+check_research_kg_review_after
+check_kg_source_tier_confidence
+check_session_models_baseline
 check_kg_verification_coverage
+# REGRA 66 — Registro da federação validado no gate (members.yaml) [HARD]
+# previne: membro quebrado entrando calado no ledger — o M2 da spec m3-federation-admin
+# (Q_members_ci_gate): o validador existia desde o OP-1 (PR #697) mas só rodava por invocação
+# manual; registro que depende de disciplina degrada (behavior-over-declaration). CORE-only por
+# dado: o adotante não carrega docs/evolution/federation/members.yaml — ausência = silêncio.
+# Validador ilegível/ausente com o dado presente = HARD fail-loud (P0 da REGRA 30).
+check_members_registry() {
+  local mf="${ONION_MEMBERS_FILE:-${REPO_ROOT}/docs/evolution/federation/members.yaml}"
+  [ -f "${mf}" ] || return 0
+  # Escopo por MARCADOR do registro real (1ª linha do vivo): sandboxes de OUTRAS famílias da
+  # bancada fabricam members.yaml sintético e a 66 disparava dentro deles (medido 2026-09-01:
+  # a mensagem citou o id da fixture e reprovou a família outbox). Trade-off declarado: remover
+  # o marcador desliga o gate — evasão visível em diff; o CI de members segue como 2ª camada.
+  grep -q "Registro de membros da co-evolução" "${mf}" || return 0
+  # Core-only pelo PAPEL, não só pelo dado: quem carrega .claude/.onion-version é adotante (ou
+  # sandbox de bancada que se declara adotante) — o registro da federação é responsabilidade do
+  # CORE; fora dele, silêncio. Fecha o disparo dentro de sandboxes que APPENDAM fixtures ao
+  # members real copiado (2ª rodada do mesmo incidente de 2026-09-01).
+  [ -f "${REPO_ROOT}/.claude/.onion-version" ] && return 0
+  local mv="${SCRIPT_DIR}/members-validate.sh"
+  if [ ! -f "${mv}" ]; then
+    violation "HARD" "${mf}" "REGRA 66: members.yaml presente mas members-validate.sh AUSENTE — a guarda não sabe cobrar; fail-loud, nunca conformidade por ausência"
+    return 0
+  fi
+  local out rc=0
+  out=$(bash "${mv}" "${mf}" 2>&1) || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    violation "HARD" "${mf}" "REGRA 66: registro da federação INVÁLIDO (members-validate rc=${rc}): $(printf '%s' "${out}" | tail -2 | tr '\n' ' ' | cut -c1-160)"
+  fi
+}
+
+check_radar_staleness
+check_members_registry
 check_kg_radar_integrity
 check_kg_trace_resolve
 check_review_artifact
+check_kg_seal
+check_kg_backlog
+check_consumed_modes
+check_harness_inventory_drift
+check_testing_state_drift
+check_identifier_language
 check_doctrine_freshness
 check_kg_born_marker
 check_ladder_integrity
@@ -2904,7 +5117,9 @@ check_projection_safety
 check_federation_projection
 check_migalhas_sync
 check_site_no_private_deeplinks
+check_plugin_no_private_source_url
 check_vendored_surface_clean
+check_vendored_surface_form
 check_frontmatter_model_category
 check_rules_registry_sync
 check_onion_version_tracked
@@ -2912,10 +5127,19 @@ check_family_topology_sync
 check_federation_outbox_membership
 check_kg_narration_valid
 check_backtick_path_refs
+check_plugin_namespace
+check_plugin_hooks_resolvable
+check_plugin_bare_paths
+check_plugin_dead_links
+check_kg_yaml_validity
+check_kg_census_parity
+check_marketplace_root_sync
+check_plugin_deps_contract
 
 # ===========================================================================
 # SUMÁRIO FINAL
 # ===========================================================================
+_LINT_SUMMARY_REACHED=1   # daqui para baixo, a saida E veredito (ver o trap no topo)
 echo ""
 echo "=== Sumário ==="
 echo "  Violações HARD : ${HARD_COUNT}"

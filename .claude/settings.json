@@ -23,7 +23,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "test -f .env && p=$(grep -E \"^TASK_MANAGER_PROVIDER=\" .env | head -1 | cut -d= -f2 | tr -d \"[:space:]\") && printf '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"Onion: TASK_MANAGER_PROVIDER ativo = %s\"}}\\n' \"${p:-none}\" || true",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/task-manager-provider-hook.sh\"",
             "timeout": 5,
             "statusMessage": "Detectando Task Manager provider (Onion)"
           },
@@ -58,6 +58,34 @@
             "statusMessage": "Refrescando farol de sessão (Onion)"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/aside-router-hook.sh\"",
+            "timeout": 5,
+            "statusMessage": "Roteando aparte do maestro (Onion)"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-version-drift.sh\"",
+            "timeout": 5,
+            "statusMessage": "Conferindo versão do processo vs disco (Onion)"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-degraded-notice.sh\""
+          }
+        ]
       }
     ],
     "SessionEnd": [
@@ -83,6 +111,89 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/bash-empty-result-guard.sh\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pretooluse-protect-main.sh\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pretooluse-merge-gate.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/kg-read-leg.sh\""
+          }
+        ]
+      }
+    ],
+    "PreModelSwitch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/premodelswitch-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "Guarda de modelo da sessão (Onion): veta downgrade fora do lineup"
+          }
+        ]
+      }
+    ],
+    "PostModelSwitch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/premodelswitch-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "Registrando troca de modelo (Onion)"
+          }
+        ]
+      }
+    ],
+    "InstructionsLoaded": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/instructions-loaded-log.sh\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/rule-title-in-prose.sh\""
+          }
+        ]
+      }
     ]
-  }
+  },
+  "fallbackModel": [
+    "claude-opus-5",
+    "claude-sonnet-5"
+  ]
 }

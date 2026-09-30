@@ -7,7 +7,6 @@ description: |
   sub-comando review é o gatilho invariável de reflexão (⏰ migalha vencida → re-testar, nunca re-carimbar).
   O diário é autobiografia viva: não registra o passado, orienta o futuro. Relacionado: /meta:co-relay,
   /meta:personality-sync (Fase 2, gated), RFC-0003.
-model: sonnet
 allowed-tools: Read Write Edit Glob Grep Bash(git *) Bash(bash *) Bash(ls *) Bash(cat *) Bash(mkdir *) Bash(touch *) Bash(date *) Bash(find *) Bash(awk *) Bash(grep *) Bash(sort *)
 argument-hint: "create | list [--classification <c>] [--type <t>] [--sharable] | export-sharable [--dry-run] | index | review"
 category: meta
@@ -67,7 +66,7 @@ INSTANCE_ID="$(awk '/^instance:/{print $2}' "$REPO/.claude/.onion-version" 2>/de
 4. **Affects** — quais dimensões esta entrada afeta: `engineering`, `product`, `compliance`, `design`, `meta`
 5. **Slug** — nome curto para o arquivo (ex: `oauth-session-learning`)
 6. **Classe de conflito** — COMO esta migalha pode ser invalidada? (vocabulário
-   [MemConflict](../../../docs/analysis/onion-intelligent-breadcrumbs-research-2026-07.md) — a
+   MemConflict (`onion-intelligent-breadcrumbs-research-2026-07`, core-only) — a
    estrutura de decisão que dirige o re-teste; pesquisa 2026-07: o estado da arte reconhece só ~25%
    das contradições porque a memória não carrega estrutura de invalidação):
    - `dynamic` — o fato muda com o tempo/mundo (pin, versão, comportamento de script). Re-teste:
@@ -238,7 +237,7 @@ degrada para "—" quando ausente), review_after, conflict_class — ordenada po
 
 Quando o hook sinalizar **⏰** (entradas com `review_after` vencido), rodar o protocolo de re-teste —
 **nunca re-carimbar sem re-testar** (risco nº1 documentado: reflexão falsa persistida vira erro
-auto-reforçante — [ADR work-models §4](../../../docs/analysis/onion-adr-work-models-session-topologies-2026-07.md)):
+auto-reforçante — [ADR work-models §4](../../../docs/knowledge-base/decisions/onion-adr-work-models-session-topologies-2026-07.md)):
 
 1. **Listar vencidas:** entradas com `review_after < hoje` (o `index.md` já as marca ⏰).
 2. **Re-testar cada uma contra evidência ATUAL, dirigido pela `conflict_class`** (não contra a

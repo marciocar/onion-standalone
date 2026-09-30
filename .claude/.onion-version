@@ -1,8 +1,6 @@
-framework: onion-evolve
-source_commit: cd0f847bc39f
-source_commit_date: 2026-08-06
-role: adopted
-adopted_from: https://github.com/marciocar/onion-evolve.git
-adopted_at: 2026-07-19
-updated_at: 2026-08-06
-mode: greenfield
+# Carimbo de identidade da PORTA — escrito por ops/materialize-door.sh.
+# Sem ele o onion-version.sh cai no fallback 'source' e a porta se declara a FONTE.
+role: standalone
+adopted_from: onion-standalone
+onion_version: cfbeec5bf946
+materialized_at: 2026-09-30
