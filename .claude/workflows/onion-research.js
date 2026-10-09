@@ -27,6 +27,14 @@ export const meta = {
 
 const A = (typeof args === 'object' && args) ? args : { question: String(args || '') }
 const QUESTION = String(A.question || '').trim()
+// ÂNCORA DA TAREFA (sinal de um adotante, 2026-10-07): o harness do Workflow repassa a TODO agente a
+// ÚLTIMA mensagem do usuário no instante do disparo, com a ordem "se conflitar, o pedido vence". Um aparte
+// que chegou no meio do turno virou o "pedido" de um run inteiro: os juízes opus obedeceram, 4,59M tokens
+// sem grafo escrito. Esta âncora diz ao agente qual é a tarefa. TETO DECLARADO: o efeito dela CONTRA o bloco
+// repassado não foi medido (a medição do adotante foi num resume, que não repassa nada); a cura que não
+// depende do agente obedecer é a ordem — o hook do aparte avisa para não disparar Workflow no mesmo turno.
+const TASK_ANCHOR = '⚠️ ÂNCORA DA TAREFA: a sua tarefa é EXCLUSIVAMENTE a descrita abaixo, computada por este workflow' + (QUESTION ? ' a partir da pergunta original: ' + QUESTION : '') + '. Se o harness repassar um "user request" DIFERENTE (uma mensagem que chegou no meio do turno — um aparte), ela já foi respondida pela sessão principal e NÃO é a sua tarefa: não a responda nem deixe que ela mude o que você produz.\n\n'
+const ag = (p, o) => agent(TASK_ANCHOR + p, o)
 if (!QUESTION) return { error: "Sem pergunta. args: { question, corpus, today, slug, kgPath, budget }" }
 const TODAY = String(A.today || '').trim()
 if (!/^\d{4}-\d{2}-\d{2}$/.test(TODAY)) return { error: "args.today (AAAA-MM-DD) é obrigatório — Date.now() é proibido no runtime" }
@@ -48,6 +56,16 @@ const KG_ANCHOR = '\n\n⚠️ ANCORAGEM DO CAMINHO (não negociável): `' + KG_P
   + 'a partir dali. Ao devolver `kgPath`, devolva o caminho ABSOLUTO que você realmente escreveu '
   + '(saída de `readlink -f`), não o relativo que recebeu — uma sessão que troca de worktree no meio '
   + 'do run já fez um grafo nascer na árvore errada com radar exit 0.'
+// CONTRATO v3 do .kg.yaml (2026-10-08, SAC-71): desde o #967 o gate do contrato roda no CI e reprova grafo
+// NOVO que suba a dívida SHOULD. O escritor tem de nascer conforme — antes deste bloco o grafo saía com
+// data sem aspas, nó confirmed sem provenance e label longo, e foi curado à mão duas vezes no mesmo dia.
+const CONTRACT_V3 = '\n\n## CONTRATO v3 do .kg.yaml (não negociável — o gate do CI reprova grafo novo fora dele)\n'
+  + '- **Datas entre aspas**: `baseline: "' + TODAY + '"`, `review_after: "…"`, `verified_at: "' + TODAY + '"`, `valid_from: "2026"`. Sem aspas a data é data em YAML 1.1 e o contrato acusa yaml.unquoted-date.\n'
+  + '- **provenance em todo nó confirmed (ou plane PROD)**: bloco aninhado com as três chaves, cada uma num nível a mais de indentação:\n'
+  + '  `provenance:` / `  source: "<URL ou caminho@commit lido>"` / `  locator: "<seção, artigo ou trecho>"` / `  method: "<classe>: <detalhe>"`, com a classe em leitura, medição, juízes, derivado ou testemunho (contrato v4; ex.: `"juízes: votação 3/2 do run"`, `"leitura: WebFetch da seção 4"`).\n'
+  + '  A fonte tem de ser VERIFICÁVEL: a URL que o leitor abriu, o caminho@commit que foi medido. **Sem fonte real, o nó NÃO é confirmed** (deixe open) — nunca invente source para passar no contrato.\n'
+  + '- **label ≤ 280 caracteres**: só a afirmação curta. Contexto, porquê e detalhe vão em `narrative: "…"` no mesmo nó.\n'
+  + '- Depois do radar, rode `bash .claude/validation/kg-contract-check.sh ' + KG_PATH + '` e exija rc 0 — ele usa o leitor de referência do contrato vendorizado; rc 1 = CORRIJA e rode de novo (máx 3 tentativas); rc 2 = o contrato não está vendorizado neste repo: declare no summary e siga (não é reprovação).'
 let CORPUS = String(A.corpus || '')
 const MODE = String(A.mode || 'research')
 // ─── mode: 'primaries' — as lacunas JÁ TÊM NOME (F5) ───
@@ -198,12 +216,12 @@ if (MODE === 'primaries') {
   log('Modo PRIMÁRIAS: ' + SOURCES.length + ' fonte(s) NOMEADA(S), leitura integral — sem Scope/Search/Fetch/Verify. Medido 2026-09-13 na mesma pergunta: varredura 291k tokens/nó (19 de 25 claims refutadas, a maioria por fonte fraca) × primárias 42k tokens/nó.')
   const readings = await pipeline(
     SOURCES,
-    (s) => agent(READ_PROMPT(s), { label: 'ler:' + s.key, phase: 'Leitura', schema: READ_SCHEMA, model: TIER.collect.model, effort: TIER.collect.effort }),
+    (s) => ag(READ_PROMPT(s), { label: 'ler:' + s.key, phase: 'Leitura', schema: READ_SCHEMA, model: TIER.collect.model, effort: TIER.collect.effort }),
     // ANCORAGEM: agente SEPARADO e independente do leitor — reabre o documento e julga a citação.
     // Sem esta fase o modo vira "um agente afirma e ninguém confere" (14 de 76 claims caíram AQUI no dogfood).
     (r, s) => {
       if (!r || !r.reachable || !r.claims || !r.claims.length) return { source: s.key, gap: s.gap, reading: r, anchor: null }
-      return agent(ANCHOR_PROMPT(s, r), { label: 'ancorar:' + s.key, phase: 'Ancoragem', schema: ANCHOR_SCHEMA, model: TIER_ANCHOR.model, effort: TIER_ANCHOR.effort })
+      return ag(ANCHOR_PROMPT(s, r), { label: 'ancorar:' + s.key, phase: 'Ancoragem', schema: ANCHOR_SCHEMA, model: TIER_ANCHOR.model, effort: TIER_ANCHOR.effort })
         .then(a => ({ source: s.key, gap: s.gap, reading: r, anchor: a }))
     }
   )
@@ -244,7 +262,7 @@ if (MODE === 'primaries') {
   if (anchored.length === 0 && rejected.length === 0) return { error: 'modo primaries sem NENHUMA claim ancorada ou rejeitada — nenhuma fonte primária foi lida de fato (inalcançáveis: ' + (unreachable.join(', ') || 'nenhuma declarada') + '). Nada escrito; a rodada NÃO conta como feita.', unreachable, sources: SOURCES.map(s => s.key) }
 
   phase('Elenxo')
-  const pElenxo = await agent(
+  const pElenxo = await ag(
     '## Refutador (Elenxo) — mandato: REPROVAR. Default na dúvida: a objeção SOBREVIVE.\n\n' + WEB_NOTE +
     '\nHoje: ' + TODAY + '\n\n## Pergunta / lacunas desta rodada\n' + QUESTION +
     '\n\n## Lacunas NOMEADAS que as fontes deviam fechar\n' + SOURCES.map(s => '- [' + s.key + '] ' + (s.gap || '(não declarada)')).join('\n') +
@@ -263,7 +281,7 @@ if (MODE === 'primaries') {
   if (pElenxo) log('Elenxo: ' + pElenxo.objections.length + ' objeções (' + pElenxo.objections.filter(o => o.survives).length + ' sobrevivem) · lacunas fechadas: ' + pElenxo.gapsClosed.length + ' · abertas: ' + pElenxo.gapsOpen.length)
 
   phase('write(KG)')
-  const pKg = await agent(
+  const pKg = await ag(
     '## write(KG) — escreva o grafo desta rodada de primárias e prove que o radar o lê\n\n' +
     'Pergunta: "' + QUESTION + '"\nData de hoje (verified_at): ' + TODAY + '\nCaminho do grafo: ' + KG_PATH + '\n\n' +
     'Leia ANTES: `.claude/rules/kg-grammar.md`, `.claude/commands/common/prompts/research-doctrine.md` (cláusulas 7-8) e, **se o arquivo já existir, o grafo inteiro**.\n\n' +
@@ -272,7 +290,7 @@ if (MODE === 'primaries') {
     '- Se **não existe**: crie (com o diretório), meta com id, `schema_version "1"`, baseline ' + TODAY + ', `review_after` (cadência: ferramenta/preço 30d · modelos 45d · mercado 90d · benchmark 120d · doutrina 12m — escolha pelo tipo dominante e justifique em comentário), `# kg-backlog-guard: on` e `# ═══ TETO: N NÓS ═══`.\n' +
     '- Formato estrito: uma chave por linha; arestas em bloco (`- from:`/`to:`/`edge_type:`); id em inglês SEM acento, label em pt-BR.\n\n' +
     '## O que escrever\n' +
-    '1. 1 nó `evidence` por claim ANCORADA (plane DEV, status confirmed, `verified_at` ' + TODAY + ', `verified_against` = a citação + o locator + "ancorada por verificador independente", `source_tier` pelo que o leitor declarou (lei/tribunal/autoridade 9-10; fornecedor/agregador menor), `trace` = URL, `valid_from` quando houver).\n' +
+    '1. 1 nó `evidence` por claim ANCORADA (plane DEV, status confirmed, `verified_at` ' + TODAY + ', `verified_against` = a citação + o locator + "ancorada por verificador independente", `source_tier` pelo que o leitor declarou (lei/tribunal/autoridade 9-10; fornecedor/agregador menor), `trace` = URL, `valid_from` quando houver, SEMPRE entre aspas: "2026" ou "2026-10-01" — sem aspas o ano vira inteiro para leitor tipado e o radar avisa VALID-FROM-INTEIRO).\n' +
     '2. 1 nó `evidence` `E_LACUNAS_…` com a CONTABILIDADE desta rodada: fontes lidas × inalcançáveis, claims ancoradas × REJEITADAS na ancoragem (com o motivo), e as lacunas que CONTINUAM abertas (do Elenxo `gapsOpen`). Claim rejeitada na ancoragem **nunca** vira nó de evidência — entra aqui.\n' +
     '3. Onde a evidência nova CORRIGE um nó que já existe no grafo, escreva o nó novo + aresta `SUPERSEDES` para o antigo e mude o status do antigo para `superseded` (reconciliação; nunca apague).\n' +
     '4. Onde ela SUSTENTA um claim/opção existente, `SUPPORTS`; onde LIMITA, `CONSTRAINS`.\n' +
@@ -283,9 +301,9 @@ if (MODE === 'primaries') {
     (rejected.length ? rejected.map(c => '- [' + c.source + '] ' + webText(c.claim) + ' → ' + c.verdict + ': ' + webText(c.why)).join('\n') : '(nenhuma)') +
     '\n\n### Fontes inalcançáveis\n' + (unreachable.length ? unreachable.join(', ') : '(nenhuma)') +
     '\n\n### Corpus prévio\n' + (CORPUS || '(vazio)') +
-    '\n\n### Elenxo\n' + JSON.stringify(pElenxo || {}).slice(0, 7000) +
-    KG_ANCHOR +
-    '\n\n## Passos\n1. Read do arquivo (se existir). 2. Write/Edit. 3. `bash .claude/validation/kg-radar.sh ' + KG_PATH + ' --integrity --schema` — capture o exit code; se ≠ 0, CORRIJA e rode de novo (máx 3 tentativas). 4. Devolva kgPath, radarExit (o último), nodes (os ADICIONADOS nesta rodada), edges (idem), nodesTotal (o total do grafo ao fim) e summary (1 frase).\n\n' +
+    '\n\n### Elenxo (inteiro — NÃO corte: em 2026-10-07 um .slice(0, 7000) jogou fora 22 de 38 objeções, e 13 sobreviventes nunca viraram nó)\n' + JSON.stringify(pElenxo || {}) +
+    KG_ANCHOR + CONTRACT_V3 +
+    '\n\n## Passos\n1. Read do arquivo (se existir). 2. Write/Edit. 3. `bash .claude/validation/kg-radar.sh ' + KG_PATH + ' --integrity --schema` — capture o exit code; se ≠ 0, CORRIJA e rode de novo (máx 3 tentativas). 3b. `bash .claude/validation/kg-contract-check.sh ' + KG_PATH + '` — rc 1 = CORRIJA e rode de novo; rc 2 = contrato não vendorizado aqui, declare no summary. 4. Devolva kgPath, radarExit (o último), nodes (os ADICIONADOS nesta rodada), edges (idem), nodesTotal (o total do grafo ao fim) e summary (1 frase).\n\n' +
     'Somente saída estruturada.',
     { label: 'write-kg-primarias', phase: 'write(KG)', schema: KG_SCHEMA_PRIMARIES, model: TIER.judge.model, effort: TIER.judge.effort })
   if (!pKg) return { error: 'write(KG) não devolveu resultado — o grafo não foi escrito. Nada selado.', question: QUESTION, anchoredCount: anchored.length, elenxo: pElenxo }
@@ -310,7 +328,7 @@ const REVISIT_SCHEMA = { type: 'object', required: ['nodes', 'reviewAfter', 'cad
 let revisit = null
 if (REVISIT) {
   phase('Revisit')
-  revisit = await agent('## Revisita — selecione o que VENCEU\n\nLeia o grafo ' + REVISIT + ' (é .kg.yaml; leia .claude/rules/kg-grammar.md antes). Hoje: ' + TODAY + '.\n\nDevolva: reviewAfter (meta.review_after), cadenceDays (' + (CADENCE_OVERRIDE > 0 ? 'USE EXATAMENTE ' + CADENCE_OVERRIDE + ' dias — override do maestro' : '30 ferramenta/preço · 45 modelos · 90 mercado · 120 benchmark · 365 doutrina — pelo tipo dominante') + ') e a lista de nós evidence com trace/verified_against contendo URL cujo verified_at é anterior a (hoje − cadenceDays) — cada um com id, claim (o label em 1 frase), sourceUrl, verifiedAt, sourceTier, sourceKind. Nós sem URL não entram (re-medição deles é /meta:kg-freshness).\n\nSomente saída estruturada.',
+  revisit = await ag('## Revisita — selecione o que VENCEU\n\nLeia o grafo ' + REVISIT + ' (é .kg.yaml; leia .claude/rules/kg-grammar.md antes). Hoje: ' + TODAY + '.\n\nDevolva: reviewAfter (meta.review_after), cadenceDays (' + (CADENCE_OVERRIDE > 0 ? 'USE EXATAMENTE ' + CADENCE_OVERRIDE + ' dias — override do maestro' : '30 ferramenta/preço · 45 modelos · 90 mercado · 120 benchmark · 365 doutrina — pelo tipo dominante') + ') e a lista de nós evidence com trace/verified_against contendo URL cujo verified_at é anterior a (hoje − cadenceDays) — cada um com id, claim (o label em 1 frase), sourceUrl, verifiedAt, sourceTier, sourceKind. Nós sem URL não entram (re-medição deles é /meta:kg-freshness).\n\nSomente saída estruturada.',
     { label: 'revisit-select', phase: 'Revisit', schema: REVISIT_SCHEMA, model: TIER.collect.model, effort: TIER.collect.effort })
   if (!revisit) return { error: 'Revisit não devolveu resultado — nada re-medido.' }
   if (!CORPUS.trim()) CORPUS = '# corpus = o próprio grafo revisitado (' + REVISIT + ')\n' + revisit.nodes.map(n => n.id + '\t' + webText(n.claim) + '\t' + webText(n.sourceUrl) + '\tverified_at ' + webText(n.verifiedAt)).join('\n')
@@ -319,7 +337,7 @@ if (REVISIT) {
 
 // ─── Phase 1: Scope — ângulos do tema (LLM) + EIXOS FIXOS (JS, 0 tokens) ───
 phase('Scope')
-const scope = REVISIT ? { question: QUESTION, summary: 'revisita de ' + REVISIT, angles: [] } : await agent(
+const scope = REVISIT ? { question: QUESTION, summary: 'revisita de ' + REVISIT, angles: [] } : await ag(
   'Decomponha esta pergunta de pesquisa em ângulos de busca complementares.\n\n## Pergunta\n' + QUESTION +
   '\n\n## O que os grafos do Onion JÁ sabem (não repita; procure o que FALTA ou o que pode ter MUDADO)\n' + (CORPUS || '(corpus vazio)') +
   '\n\n## Tarefa\nGere 3-5 queries de busca distintas para o TEMA (o mercado, o Claude Code atual, repositórios por trajetória, analistas e comunidade JÁ são eixos fixos — não os repita). ' +
@@ -365,7 +383,7 @@ const relRank = { high: 0, medium: 1, low: 2 }
 const PRIMARY_HOSTS = /(^|\.)(code\.claude\.com|docs\.claude\.com|platform\.claude\.com|anthropic\.com|github\.com\/anthropics|arxiv\.org|thoughtworks\.com|dora\.dev|source\.android\.com)/i
 const hostRank = u => PRIMARY_HOSTS.test(String(u)) ? 0 : /github\.com\/[^/]+\/[^/]+\/blob|gist\.github\.com/i.test(String(u)) ? 2 : 1
 const searchResults = (await parallel(angles.map(angle => () =>
-  agent(SEARCH_PROMPT(angle), { label: 'search:' + angle.label, phase: 'Search', schema: SEARCH_SCHEMA, model: TIER.collect.model, effort: TIER.collect.effort })
+  ag(SEARCH_PROMPT(angle), { label: 'search:' + angle.label, phase: 'Search', schema: SEARCH_SCHEMA, model: TIER.collect.model, effort: TIER.collect.effort })
     .then(r => { if (!r) return null; log(angle.label + ': ' + r.results.length + ' resultados'); return { angle: angle.label, results: r.results } })))).filter(Boolean)
 const seen = new Map(); const dupes = []; const budgetDropped = []
 const perAngle = new Map()
@@ -395,7 +413,7 @@ const fetched = await parallel(picked.map(source => () => {
   const isCleanBareHost = cleanHost === host && host !== '' && Array.from(host).length <= LABEL_CAP && STRICT_HOST.test(host)
   const hostLabel = cleanHost === '' ? '' : isCleanBareHost ? host : quotedLabel(host)
   const sourceLabel = hostLabel || (stripLabelChars(source.title).trim() && quotedLabel(source.title)) || 'unknown'
-  return agent(FETCH_PROMPT(source, source.angle), { label: 'fetch:' + sourceLabel, phase: 'Fetch', schema: EXTRACT_SCHEMA, model: TIER.collect.model, effort: TIER.collect.effort })
+  return ag(FETCH_PROMPT(source, source.angle), { label: 'fetch:' + sourceLabel, phase: 'Fetch', schema: EXTRACT_SCHEMA, model: TIER.collect.model, effort: TIER.collect.effort })
     .then(ext => { if (!ext) return null
       return { url: source.url, title: source.title, angle: source.angle, sourceQuality: ext.sourceQuality, sourceKind: ext.sourceKind, sourceTier: ext.sourceTier, publishDate: ext.publishDate,
         claims: ext.claims.map(c => ({ ...c, sourceUrl: source.url, sourceQuality: ext.sourceQuality, sourceKind: ext.sourceKind, sourceTier: ext.sourceTier, angle: source.angle })) } })
@@ -416,7 +434,7 @@ if (rankedClaims.length === 0) {
 phase('Verify')
 const voted = (await parallel(rankedClaims.map(claim => () =>
   parallel(Array.from({ length: VOTES_PER_CLAIM }, (_, v) => () =>
-    agent(VERIFY_PROMPT(claim, v), { label: 'v' + v + ':' + quotedLabel(claim.claim), phase: 'Verify', schema: VERDICT_SCHEMA, model: TIER.judge.model, effort: TIER.judge.effort })))
+    ag(VERIFY_PROMPT(claim, v), { label: 'v' + v + ':' + quotedLabel(claim.claim), phase: 'Verify', schema: VERDICT_SCHEMA, model: TIER.judge.model, effort: TIER.judge.effort })))
     .then(verdicts => {
       const valid = verdicts.filter(Boolean); const refuted = valid.filter(x => x.refuted).length
       const survives = valid.length >= REFUTATIONS_REQUIRED && refuted < REFUTATIONS_REQUIRED
@@ -432,7 +450,7 @@ const notVerifiedByBudget = allClaims.filter(c => !rankedClaims.includes(c)).map
 
 // ─── Synthesize (opus/high): relatório citado + seção de MERCADO obrigatória ───
 phase('Synthesize')
-const report = confirmed.length === 0 ? null : await agent(
+const report = confirmed.length === 0 ? null : await ag(
   '## Sintetizador\n\nPergunta: "' + QUESTION + '"\nData: ' + TODAY + '\n\n## O que os grafos JÁ sabiam\n' + (CORPUS || '(vazio)') +
   '\n\n## Claims CONFIRMADAS (sobreviveram a ' + VOTES_PER_CLAIM + ' votos adversariais)\n' + confirmed.map((c, i) => (i + 1) + '. ' + WEB_NOTE + '"' + webText(c.claim) + '" — fonte ' + webText(c.sourceUrl) + ' (kind=' + webText(c.sourceKind) + ', tier=' + c.sourceTier + ', validFrom=' + webText(c.validFrom || '?') + ', ângulo=' + webText(c.angle) + '); votos ' + (c.verdicts.length - c.refutedVotes) + '-' + c.refutedVotes).join('\n') +
   '\n\n## Refutadas (' + killed.length + ') e não verificadas (' + unverified.length + ') — NÃO use como achado\n' + killed.slice(0, 10).map(c => '- ✗ ' + webText(c.claim)).join('\n') + '\n' + unverified.map(c => '- ? ' + webText(c.claim)).join('\n') +
@@ -447,7 +465,7 @@ const report = confirmed.length === 0 ? null : await agent(
 let elenxo = null
 if (MODE === 'decision') {
   phase('Elenxo')
-  elenxo = await agent(
+  elenxo = await ag(
     '## Refutador (Elenxo) — mandato: REPROVAR. Default na dúvida: a objeção SOBREVIVE.\n\nPergunta/decisão: "' + QUESTION + '"\nOpções e lacunas (do Scope): ' + webText(scope.summary) +
     '\n\n## Achados confirmados (tente derrubar cada um)\n' + confirmed.map((c, i) => (i + 1) + '. ' + WEB_NOTE + '"' + webText(c.claim) + '" — ' + webText(c.sourceUrl) + ' (tier=' + c.sourceTier + ', votos ' + (c.verdicts.length - c.refutedVotes) + '-' + c.refutedVotes + ')').join('\n') +
     '\n\n## Descartados nesta rodada (para cada um: foi por EVIDÊNCIA ou por COMODISMO/hype/orçamento?)\n' + killed.map(c => '- refutada: ' + webText(c.claim) + ' (tier ' + c.sourceTier + ')').join('\n') + '\n' + notVerifiedByBudget.slice(0, 15).map(c => '- cortada por orçamento: ' + webText(c.claim)).join('\n') + '\n' + budgetDropped.slice(0, 10).map(b => '- fonte não lida: ' + webText(b.url) + ' (' + webText(b.angle) + ')').join('\n') +
@@ -459,17 +477,17 @@ if (MODE === 'decision') {
 
 // ─── write(KG): um agente ESCREVE o grafo, roda o radar, devolve o exit ───
 phase('write(KG)')
-const kg = await agent(
+const kg = await ag(
   KG_ANCHOR +
   '## write(KG) — escreva o grafo da pesquisa e prove que o radar o lê\n\nPergunta: "' + QUESTION + '"\nData de hoje (verified_at): ' + TODAY + '\nCaminho do grafo: ' + KG_PATH + '\n\n' +
   'Leia ANTES: .claude/rules/kg-grammar.md e .claude/commands/common/prompts/research-doctrine.md (cláusulas 7-8). Formato estrito: uma chave por linha; arestas em bloco (- from:/to:/edge_type:); id em inglês, label em pt-BR; meta com id, schema_version "1", baseline ' + TODAY + ', review_after (cadência: ferramenta/preço 30d · modelos 45d · mercado 90d · benchmark 120d · doutrina 12m — escolha pelo tipo dominante e justifique em comentário), `# kg-backlog-guard: on` e `# ═══ TETO: N NÓS ═══`.\n\n' +
-  (MODE === 'decision' && elenxo ? '## MODO DECISÃO — LEIA PRIMEIRO. Este grafo é de DECISÃO. OBRIGATÓRIO (o schema de retorno exige; sem isto o run falha): (1) 1 nó decision `D_…` com status OPEN (o maestro sela — você NUNCA sela), label = a decisão + as opções nomeadas + a recomendação do Elenxo; (2) 1 nó claim por OPÇÃO (`C_OPCAO_…`, status open) — opções: ' + JSON.stringify(elenxo.options || []) + '; (3) para cada objeção SOBREVIVENTE do Elenxo, 1 nó evidence `E_OBJECAO_…` (plane DEV, confirmed, verified_at hoje, verified_against = a evidência da objeção) com aresta CONSTRAINS para a opção/decisão que ela limita (dissent que LIMITA é CONSTRAINS; REFUTES só para opção morta por evidência, e aí o status da opção vira refuted); (4) devolva decisionNodeId, optionNodeIds e constrainsEdges (contagem REAL das arestas escritas); (5) se o TETO de nós impedir modelar TODAS as objeções sobreviventes, o nó E_LACUNAS_… declara a contagem EXATA (N sobreviventes, M modeladas) e NOMEIA o alvo de cada uma não modelada — nunca um número menor que o real (1º dogfood 2026-09-13: 40 sobreviventes, 10 nós, e o grafo dizia "3 reabertos"); (6) objeção do Elenxo é afirmação de UM agente sem votação: confidence ≤ 0.6, e fonte primária que ele CITA sem ter sido lida na rodada entra no label como "primário citado, não lido" — nunca como tier alto confirmado. Objeções do Elenxo: ' + JSON.stringify(elenxo.objections).slice(0, 6000) + ' Recomendação: ' + webText(elenxo.recommendation).slice(0, 1500) + '\n\n' : '') +
-  '## Conteúdo\n- 1 nó question (Q_…, status open ou done se respondida) para a pergunta.\n- 1 nó evidence por claim CONFIRMADA (E_…, plane DEV, status confirmed, impact 2-5 pelo peso, confidence pelo tier+votos (tier ≤3 nunca acima de 0.7), verified_at ' + TODAY + ', verified_against = URL + votos, valid_from quando houver, source_tier, source_kind, label = a claim em pt-BR, trace = URL).\n- 1 nó evidence E_MERCADO_… com o eixo mercado/capital (mesmo que "sem sinal").\n- 1 nó evidence E_LACUNAS_… listando refutadas por fonte fraca, não verificadas (' + unverified.length + ') e cortadas por orçamento (' + budgetDropped.length + ' fontes, ' + notVerifiedByBudget.length + ' claims).\n- Se o corpus já tinha nós sobre o tema e a pesquisa os CONTRADIZ, modele SUPERSEDES/REFUTES citando o id e o grafo (não edite o grafo antigo).\n- Arestas SUPPORTS de cada evidência para a question.\n\n' +
+  (MODE === 'decision' && elenxo ? '## MODO DECISÃO — LEIA PRIMEIRO. Este grafo é de DECISÃO. OBRIGATÓRIO (o schema de retorno exige; sem isto o run falha): (1) 1 nó decision `D_…` com status OPEN (o maestro sela — você NUNCA sela), label = a decisão + as opções nomeadas + a recomendação do Elenxo; (2) 1 nó claim por OPÇÃO (`C_OPCAO_…`, status open) — opções: ' + JSON.stringify(elenxo.options || []) + '; (3) para cada objeção SOBREVIVENTE do Elenxo, 1 nó evidence `E_OBJECAO_…` (plane DEV, confirmed, verified_at hoje, verified_against = a evidência da objeção) com aresta CONSTRAINS para a opção/decisão que ela limita (dissent que LIMITA é CONSTRAINS; REFUTES só para opção morta por evidência, e aí o status da opção vira refuted); (4) devolva decisionNodeId, optionNodeIds e constrainsEdges (contagem REAL das arestas escritas); (5) se o TETO de nós impedir modelar TODAS as objeções sobreviventes, o nó E_LACUNAS_… declara a contagem EXATA (N sobreviventes, M modeladas) e NOMEIA o alvo de cada uma não modelada — nunca um número menor que o real (1º dogfood 2026-09-13: 40 sobreviventes, 10 nós, e o grafo dizia "3 reabertos"); (6) objeção do Elenxo é afirmação de UM agente sem votação: confidence ≤ 0.6, e fonte primária que ele CITA sem ter sido lida na rodada entra no label como "primário citado, não lido" — nunca como tier alto confirmado. Objeções do Elenxo: ' + JSON.stringify(elenxo.objections) + ' Recomendação: ' + webText(elenxo.recommendation).slice(0, 1500) + '\n\n' : '') +
+  '## Conteúdo\n- 1 nó question (Q_…, status open ou done se respondida) para a pergunta.\n- 1 nó evidence por claim CONFIRMADA (E_…, plane DEV, status confirmed, impact 2-5 pelo peso, confidence pelo tier+votos (tier ≤3 nunca acima de 0.7), verified_at ' + TODAY + ', verified_against = URL + votos, valid_from quando houver e SEMPRE entre aspas ("2026", "2026-10-01" — sem aspas o ano vira inteiro), source_tier, source_kind, label = a claim em pt-BR, trace = URL).\n- 1 nó evidence E_MERCADO_… com o eixo mercado/capital (mesmo que "sem sinal").\n- 1 nó evidence E_LACUNAS_… listando refutadas por fonte fraca, não verificadas (' + unverified.length + ') e cortadas por orçamento (' + budgetDropped.length + ' fontes, ' + notVerifiedByBudget.length + ' claims).\n- Se o corpus já tinha nós sobre o tema e a pesquisa os CONTRADIZ, modele SUPERSEDES/REFUTES citando o id e o grafo (não edite o grafo antigo).\n- Arestas SUPPORTS de cada evidência para a question.\n\n' +
   '## Dados\n### Confirmadas\n' + confirmed.map(c => '- ' + WEB_NOTE + '"' + webText(c.claim) + '" | ' + webText(c.sourceUrl) + ' | kind=' + webText(c.sourceKind) + ' tier=' + c.sourceTier + ' validFrom=' + webText(c.validFrom || '') + ' votos=' + (c.verdicts.length - c.refutedVotes) + '-' + c.refutedVotes).join('\n') +
   '\n### Mercado (do sintetizador)\n' + (report ? webText(report.market) : '(sem síntese: 0 confirmadas)') +
   '\n### Não verificadas / refutadas\n' + unverified.map(c => '- ? ' + webText(c.claim) + ' | ' + webText(c.sourceUrl)).join('\n') + '\n' + killed.map(c => '- ✗ ' + webText(c.claim) + ' | ' + webText(c.sourceUrl) + ' tier=' + c.sourceTier).join('\n') +
   '\n### Corpus prévio\n' + (CORPUS || '(vazio)') +
-  (REVISIT ? '\n\n## MODO REVISITA — o grafo JÁ EXISTE (' + REVISIT + '): NÃO reescreva. Para cada nó revisitado: se a claim SOBREVIVEU, edite só verified_at=' + TODAY + ' (+ verified_against com o voto); se foi REFUTADA, apende um nó evidence novo E_…_REVISITA_' + TODAY.replace(/-/g, '') + ' com a verdade atual e aresta SUPERSEDES para o nó antigo, e mude o status do antigo para superseded (Aufhebung — nunca apague). Atualize meta.review_after para hoje + cadência. Nós revisitados: ' + JSON.stringify(rankedClaims.map(c => ({ id: c.revisitId, verdict: confirmed.includes(c) ? 'CONFIRMED' : killed.includes(c) ? 'REFUTED' : 'UNVERIFIED' }))) : '') + '\n\n## Passos\n1. ' + (REVISIT ? 'Edit do arquivo ' + REVISIT : 'Write do arquivo em ' + KG_PATH + ' (crie o diretório)') + '.\n2. Rode: bash .claude/validation/kg-radar.sh ' + KG_PATH + ' --integrity --schema — capture o exit code. Se ≠ 0, CORRIJA e rode de novo (máx 3 tentativas).\n3. Devolva kgPath, radarExit (o último), nodes, edges, summary (1 frase).\n\nSomente saída estruturada.',
+  (REVISIT ? '\n\n## MODO REVISITA — o grafo JÁ EXISTE (' + REVISIT + '): NÃO reescreva. Para cada nó revisitado: se a claim SOBREVIVEU, edite só verified_at=' + TODAY + ' (+ verified_against com o voto); se foi REFUTADA, apende um nó evidence novo E_…_REVISITA_' + TODAY.replace(/-/g, '') + ' com a verdade atual e aresta SUPERSEDES para o nó antigo, e mude o status do antigo para superseded (Aufhebung — nunca apague). Atualize meta.review_after para hoje + cadência. Nós revisitados: ' + JSON.stringify(rankedClaims.map(c => ({ id: c.revisitId, verdict: confirmed.includes(c) ? 'CONFIRMED' : killed.includes(c) ? 'REFUTED' : 'UNVERIFIED' }))) : '') + '\n\n## Passos\n1. ' + (REVISIT ? 'Edit do arquivo ' + REVISIT : 'Write do arquivo em ' + KG_PATH + ' (crie o diretório)') + '.\n2. Rode: bash .claude/validation/kg-radar.sh ' + KG_PATH + ' --integrity --schema — capture o exit code. Se ≠ 0, CORRIJA e rode de novo (máx 3 tentativas).\n2b. Rode: bash .claude/validation/kg-contract-check.sh ' + KG_PATH + ' — contrato v3: rc 1 = CORRIJA e rode de novo; rc 2 = contrato não vendorizado aqui, declare no summary.' + CONTRACT_V3 + '\n3. Devolva kgPath, radarExit (o último), nodes, edges, summary (1 frase).\n\nSomente saída estruturada.',
   { label: 'write-kg', phase: 'write(KG)', schema: (MODE === 'decision' && elenxo) ? KG_SCHEMA_DECISION : KG_SCHEMA, model: TIER.judge.model, effort: TIER.judge.effort })
 if (!kg) return { error: 'write(KG) não devolveu resultado — o grafo não foi escrito. Nada selado.', question: QUESTION, findings: report ? report.findings : [] }
 if (MODE === 'decision' && elenxo && (!kg.decisionNodeId || !(kg.constrainsEdges >= 1))) return { error: 'modo decisão sem nó D_/CONSTRAINS no grafo — o write(KG) não cumpriu o contrato de decisão; nada selado.', question: QUESTION, kgPath: kg.kgPath, radarExit: kg.radarExit }

@@ -142,6 +142,7 @@ fi
 # `asorti never defined`, rc=2, saída zero. A razão da portabilidade era verdadeira sobre o awk e
 # FALSA sobre este script; ficou só a que o artefato sustenta.)
 awk -v mode="$MODE" -v radarSchema="$RADAR_SCHEMA" -v arq="$FILE" -v hoje="$(date -u +%Y-%m-%d)" "${STATUS_FACTOR}"'
+/^---[ \t]*$/ { docSeps++ }
 # ── DENYLIST, NÃO ALLOWLIST — a lição de 2026-08-07 ─────────────────────────────────────────
 # Quando `drifted`/`unverifiable` entraram (2026-08-06), os predicados escritos como ALLOWLIST
 # (`== "confirmed"`, `confirmed || open`) os deixaram de fora EM SILÊNCIO, enquanto os escritos
@@ -228,10 +229,27 @@ section == "nodes" && /^[[:space:]]+- id:/ {
   if (nid in nodeSeen) dup[nid] = 1
   nodeSeen[nid] = 1
   order[++nn] = nid
+  # Indentação dos CAMPOS deste nó = a do traço + 2 (é onde o `id:` vive). Só chave nesta coluna
+  # conta como chave do nó: texto de bloco (`>-`) e mapas aninhados ficam mais à direita.
+  match($0, /-/); fieldIndent = RSTART + 1
   next
 }
 section == "nodes" && nid != "" {
   line = $0; sub(/#.*$/, "", line)
+  # CHAVE REPETIDA, QUALQUER CHAVE (2026-10-08, sinal de campo de um adotante com leitor YAML 1.2):
+  # o YAML exige chave única num mapa. Um leitor tipado (PyYAML) fica com a ÚLTIMA em silêncio, e
+  # este radar lia as duas como texto — a proveniência sumia sem erro. A guarda abaixo de 2026-08-12
+  # só cobria 4 campos (verified_*, valid_from, source_tier) e só quando os valores DIFERIAM; o
+  # defeito medido foi `trace` repetido em 5 grafos do core. Agora vale para toda chave do nó,
+  # inclusive com valor igual (duas linhas iguais também são mapa inválido).
+  if (match($0, /^ +[A-Za-z_][A-Za-z0-9_]*:/) && RLENGTH > 0) {
+    _ind = match($0, /[^ ]/) - 1
+    if (_ind == fieldIndent) {
+      _k = substr($0, _ind + 1); sub(/:.*/, "", _k)
+      if ((nid "|" _k) in nodeKeySeen) { if (!((nid "|" _k) in dupKey)) dupKey[nid "|" _k] = "linhas " nodeKeySeen[nid "|" _k] " e " NR }
+      else nodeKeySeen[nid "|" _k] = NR
+    }
+  }
   # ── CAMPO SÓ EM POSIÇÃO DE CAMPO (âncora ^[[:space:]]*<campo>:) ──────────────────────────────
   # O parser é line-based: um match SOLTO (`line ~ /layer:/` + `sub(/.*layer:/…)`) lê CONTEÚDO como
   # CONFIGURAÇÃO — basta um label citar o token. Real, não hipotético:
@@ -286,6 +304,8 @@ section == "nodes" && nid != "" {
     v = line; sub(/^[[:space:]]*valid_from:/, "", v)
     if (nid in validFrom && validFrom[nid] != trim(v)) dupKey[nid "|valid_from"] = validFrom[nid] " -> " trim(v)
     validFrom[nid] = trim(v)
+    # A FORMA crua, antes do trim (que tira as aspas): só dígitos SEM aspas é inteiro para YAML.
+    validFromBare[nid] = (v ~ /^[[:space:]]*[0-9]+[[:space:]]*$/)
   }
   else if (line ~ /^[[:space:]]*source_tier:/) {
     v = line; sub(/^[[:space:]]*source_tier:/, "", v)
@@ -319,7 +339,13 @@ section == "edges" && /^[[:space:]]+- from:/ {
 # `edge_type:` não casa `^[[:space:]]*to:`.)
 section == "edges" && /^[[:space:]]*to:/ { v = $0; sub(/^[[:space:]]*to:/, "", v); eto[ne] = trim(v); next }
 section == "edges" && /^[[:space:]]*edge_type:/ { v = $0; sub(/^[[:space:]]*edge_type:/, "", v); etype[ne] = trim(v); next }
-section == "edges" && /^[[:space:]]*on:/ { v = $0; sub(/^[[:space:]]*on:/, "", v); eon[ne] = trim(v); next }
+# GATILHO DE TRANSITIONS: `trigger:` (2026-10-07). A chave antiga era `on:`, e YAML 1.1 lê `on` como o
+# BOOLEANO true — um leitor tipado via o evento órfão onde este radar (texto) via a ligação: dois
+# leitores discordando do mesmo byte. O contrato formal do .kg.yaml, em curso, fixa perfil YAML 1.2
+# restrito com `on` PROIBIDO. `on:` segue LIDO (grafo fora do corpus não quebra) e é ACUSADO como
+# legado no --integrity; `eon` guarda o gatilho venha de qual chave vier.
+section == "edges" && /^[[:space:]]*trigger:/ { v = $0; sub(/^[[:space:]]*trigger:/, "", v); eon[ne] = trim(v); next }
+section == "edges" && /^[[:space:]]*on:/ { v = $0; sub(/^[[:space:]]*on:/, "", v); eon[ne] = trim(v); eonLegacy[ne] = 1; next }
 
 # meta: campos de governança de frescor/schema (proposta #1/#2 — ADR kg-freshness-gate)
 section == "meta" && /^[[:space:]]*schema_version:/ { v = $0; sub(/^[[:space:]]*schema_version:/, "", v); metaSchema = trim(v); next }
@@ -444,14 +470,14 @@ END {
     if (etype[i] == "HAS_STATE")   ownedState[eto[i]]++
     if (etype[i] == "TRACES_TO")   traceOut[efrom[i]]++
     if (etype[i] == "READS")       readsOut[efrom[i]]++
-    if (eon[i] != "")              { onUsed[eon[i]] = 1; deg[eon[i]]++ }  # on: conecta o evento (não é órfão)
+    if (eon[i] != "")              { onUsed[eon[i]] = 1; deg[eon[i]]++ }  # trigger: (ou on: legado) conecta o evento (não é órfão)
     outDeg[efrom[i]]++
   }
 
   if (mode == "--triples") {
     for (i = 1; i <= ne; i++) {
       t = efrom[i] " " etype[i] " " eto[i]
-      if (eon[i] != "") t = t " on " eon[i]
+      if (eon[i] != "") t = t " trigger " eon[i]
       print t
     }
     exit 0
@@ -694,6 +720,21 @@ END {
       }
     }
     if (found && swarn == 0) print "  ✅ nenhum alvo de SUPERSEDES ficou por reconciliar"
+
+    # ⚠ DECISÃO `done` EM DEV (2026-10-06, sinal de campo onion-slm, operador MU-18): a gramática diz que
+    # `decision` só vira `done` verificada em PROD, e o motor só rebaixava a atenção (DEV/done = 0,5), sem
+    # aviso — 20 de 20 mutações passaram caladas. ⚠ AGREGADO, não um por nó: o corpus tem 95 casos em 36
+    # grafos, e 95 linhas por leitura ensinariam a ignorar o aviso. Não reprova (`problems` intocado).
+    ndd = 0; ddids = ""
+    for (i = 1; i <= nn; i++) {
+      id = order[i]
+      if (ntype[id] == "decision" && nstatus[id] == "done" && plane[id] == "DEV") {
+        ndd++
+        if (ndd <= 5) ddids = ddids (ddids == "" ? "" : ", ") id
+      }
+    }
+    if (ndd > 0)
+      printf "  ⚠ decision-done-em-DEV: %d decisão(ões) `done` com plane: DEV (%s%s) — a gramática pede `done` verificada em PROD: promova o plane com verified_at, ou volte a open\n", ndd, ddids, (ndd > 5 ? ", …" : "")
     print ""
   }
 
@@ -879,6 +920,12 @@ END {
     } else {
       print "  ✅ schema_version " metaSchema " (bate com o radar)"
     }
+    # MULTI-DOCUMENTO (2026-10-06, sinal de campo onion-slm): este radar lê linha a linha e aceita
+    # `---` no meio do arquivo; o kg-drive-project.sh e o kg-realign-project.sh usam parser YAML de
+    # documento ÚNICO e recusam (exit 2). Aviso, não reprova: o arquivo é legível AQUI.
+    if (docSeps >= 2) {
+      print "  ⚠ multi-documento: " docSeps " separadores `---` — o /meta:drive e o kg-realign recusam este arquivo (parser de documento único); tire os `---` (os campos viram chaves de topo, nenhum dado muda)"
+    }
     print ""
   }
 
@@ -1028,8 +1075,10 @@ END {
       }
       if (index(VE, etype[i]) == 0 || etype[i] == "") { print "  ✗ aresta " i ": edge_type inválido: [" etype[i] "]"; problems++ }
       if (eon[i] != "" && !(eon[i] in nodeSeen)) {
-        if (isProposal) { dangling++ } else { print "  ✗ aresta " i ": on aponta evento inexistente: " eon[i]; problems++ }
+        if (isProposal) { dangling++ } else { print "  ✗ aresta " i ": trigger aponta evento inexistente: " eon[i]; problems++ }
       }
+      # `on:` LEGADO: lido, nunca reprovado (grafo antigo fora do corpus não quebra), sempre dito.
+      if (eonLegacy[i]) print "  ⚠ ON-LEGADO aresta " i " (" efrom[i] " -> " eto[i] "): o gatilho usa a chave on:, que YAML 1.1 lê como booleano — renomeie para trigger: " eon[i]
     }
     for (i = 1; i <= nn; i++) {
       id = order[i]
@@ -1045,6 +1094,21 @@ END {
       if (refutedBy[id] > 0 && pendingTarget(nstatus[id], ntype[id])) {
         print "  ✗ CONTRADIÇÃO: " id " recebe REFUTES mas segue status=" nstatus[id] " (reconciliar: refuted ou superseded)"; problems++
       }
+      # ALFABETO DO ID (2026-10-07, sinal de campo de um adotante que escreveu um leitor tipado do
+      # corpus): 12 ids `SYNTHESIS.md_*` num grafo do core — o nome do documento-fonte virou prefixo
+      # SEM tirar a extensão. Este radar os aceitava (o `id` é só texto para o awk), mas um ponto no
+      # id quebra quem endereça nó por caminho (`grafo#nó`, `a.b`) e não passa em nenhum schema
+      # tipado. Medido antes de reprovar: 0 ids fora de [A-Za-z0-9_] no corpus do core (pós-cura),
+      # nas fixtures e em 16 clones de adotantes — nasce HARD sem baseline. Aspas duplas são aceitas
+      # (o programa awk vive entre aspas SIMPLES do shell: a aspa simples não pode aparecer aqui).
+      _idc = id; gsub(/^"|"$/, "", _idc)
+      if (_idc !~ /^[A-Za-z0-9_]+$/) { print "  ✗ " id ": id fora do alfabeto [A-Za-z0-9_] — renomeie o nó e TODAS as arestas que o citam"; problems++ }
+      # `valid_from: 2026` SEM ASPAS é um INTEIRO para todo leitor YAML tipado, não uma data parcial:
+      # este radar lê o texto e não vê diferença, um leitor tipado vê. Dois leitores discordando do
+      # mesmo byte é a classe; o motor não decide o tipo, só avisa. AVISO e não reprova porque os
+      # adotantes carregam o passivo (42 ocorrências em 7 grafos de 3 clones, medido no mesmo dia) —
+      # a REGRA 52 o repassa como SOFT para que seja visto no lint.
+      if (validFromBare[id]) { print "  ⚠ VALID-FROM-INTEIRO " id ": valid_from: " validFrom[id] " é número para leitor tipado — escreva entre aspas (\"" validFrom[id] "\")" }
     }
     # O QUE FOI RELAXADO SAI NUMERADO. Sem esta linha o modo proposta seria exatamente o defeito
     # que ele cura, uma camada acima: um ✅ que não conta o que deixou de cobrar.

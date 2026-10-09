@@ -46,6 +46,7 @@ O comando passa o **conteúdo** agnóstico para `taskManager.addComment(...)`; *
 | `clickup` | Unicode (`━━━`, `∟`, `▶`) | `adapters/clickup.md` · `common:prompts:clickup-patterns` |
 | `jira` | ADF (Atlassian Document Format) | `adapters/jira.md` |
 | `asana` | HTML/Markdown (story) | `adapters/asana.md` |
+| `zoho` | Markdown simples (campo `comment`; POST devolve array, GET devolve objeto) | `adapters/zoho.md` |
 | `linear` | Markdown | `adapters/linear.md` |
 | `none` | — (local, sem persistir) | — |
 
@@ -62,7 +63,7 @@ Os eventos do ciclo de engenharia disparam o mecanismo via adapter (transporte d
 
 | Evento | Ação (agnóstica via adapter) |
 |--------|------------------------------|
-| `/engineer:start` | `getTask(id, {subtasks:true})` → `updateStatus(id,'in_progress')` → `addComment(id, '🚀 …')` → criar mapeamento fase→subtask no `context.md` |
+| `/engineer:start` | `getTask(id)` → `updateStatus(id,'in_progress')` → `addComment(id, '🚀 …')` → criar mapeamento fase→subtask no `context.md` |
 | `/engineer:work` (fim de fase) | `updateStatus(subtaskId,'done')` → `addComment(mainTaskId, '🔧 progresso …')` → atualizar `plan.md` |
 | `/engineer:pr` | `updateStatus(id,'in_progress')` + tag `under-review` → `addComment(id, '🚀 PR …')` |
 | `/git:sync` (pós-merge) | `updateStatus(id,'done')` → `addComment(id, '✅ concluída/merged …')` |

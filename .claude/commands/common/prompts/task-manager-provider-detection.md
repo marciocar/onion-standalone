@@ -6,8 +6,9 @@
 
 **⚠️ CRÍTICO — EXECUTAR ANTES DE QUALQUER OUTRA AÇÃO. NUNCA assumir o provedor.**
 
-1. **Ler `.env`** (`Read .env`) e extrair `TASK_MANAGER_PROVIDER`
-   (valores: `jira` | `clickup` | `asana` | `linear` | `none`).
+1. **Obter o provider sem ler o `.env`**: `bash .claude/utils/task-manager/env-check.sh --provider` (e `--check` para a
+   presença das chaves) — **nunca** abrir o `.env` com a ferramenta de leitura de arquivo, que entrega os segredos ao modelo. Extrair `TASK_MANAGER_PROVIDER`
+   (valores: `jira` | `clickup` | `asana` | `linear` | `zoho` | `none`).
 2. **Validar a variável obrigatória do provedor ativo:**
 
    | Provedor | Variável obrigatória | Adapter (transporte: REST API default; MCP opcional) |
@@ -16,6 +17,7 @@
    | `clickup` | `CLICKUP_API_TOKEN` | `.claude/utils/task-manager/adapters/clickup.md` |
    | `asana` | `ASANA_ACCESS_TOKEN` | `.claude/utils/task-manager/adapters/asana.md` |
    | `linear` | `LINEAR_API_KEY` | `.claude/utils/task-manager/adapters/linear.md` |
+   | `zoho` | `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_PORTAL_ID` | `.claude/utils/task-manager/adapters/zoho.md` |
    | `none` / ausente | — | modo offline (sessões locais em `.claude/sessions/`) |
 
 3. **(Quando o comando recebe um `task-id`)** Validar compatibilidade do task-id

@@ -3,14 +3,14 @@ name: analyze
 description: |
   Analisa estratégias de teste existentes e sugere melhorias baseadas no Framework de Testes.
   Use para auditar conformidade, identificar gaps e otimizar estratégias de teste com base no framework.
-allowed-tools: Read Write Bash(find *) Bash(grep *) Bash(mkdir *)
+allowed-tools: Read Write Bash(find *) Bash(grep *) Bash(mkdir *) Bash(bash .claude/utils/task-manager/env-check.sh *)
 
 parameters:
   - name: feature-id
     description: 'ID da feature/epic no task manager (ex: PROJ-123, CU-456)'
     required: true
   - name: task-manager
-    description: Provedor do task manager (jira|clickup|asana). Se não fornecido, será inferido automaticamente do .env ou formato do feature-id
+    description: Provedor do task manager (jira|clickup|asana|zoho). Se não fornecido, será inferido automaticamente do .env ou formato do feature-id
     required: false
   - name: deep-scan
     description: Análise profunda incluindo código e cobertura
@@ -89,14 +89,15 @@ SE algum arquivo não encontrado:
 **CRÍTICO:** Detectar provedor automaticamente do `.env` primeiro, depois usar fallback.
 
 ```bash
-Read .env
+# o provider, sem ler o .env (Read entregaria os segredos ao modelo)
+bash .claude/utils/task-manager/env-check.sh --provider
 ```
 
 **Lógica de detecção (prioridade):**
 
 ```markdown
-1. SE {{task-manager}} fornecido → usar diretamente (validar: jira|clickup|asana)
-2. SENÃO, TASK_MANAGER_PROVIDER do .env (clickup|asana|linear; linear → jira por compatibilidade)
+1. SE {{task-manager}} fornecido → usar diretamente (validar: jira|clickup|asana|zoho)
+2. SENÃO, TASK_MANAGER_PROVIDER do .env (clickup|asana|linear|zoho; linear → jira por compatibilidade)
 3. SENÃO, inferir do formato do feature-id:
    - "CU-"/"cu-" → clickup
    - "PROJ-"/"JIRA-"/numérico → jira
@@ -104,7 +105,7 @@ Read .env
 4. SENÃO → ❌ ERRO: configure TASK_MANAGER_PROVIDER no .env ou forneça --task-manager
 ```
 
-**Validações:** feature-id não vazio; provedor detectado válido (jira|clickup|asana); abortar com erro claro se não detectado.
+**Validações:** feature-id não vazio; provedor detectado válido (jira|clickup|asana|zoho); abortar com erro claro se não detectado.
 
 ### Passo 3: Validar e Normalizar Parâmetros
 

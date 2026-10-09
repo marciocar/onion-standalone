@@ -11,12 +11,16 @@
 >
 > A coluna **O que previne** vem do campo `# previne:` no docstring de cada regra (o
 > modo-de-falha que ela evita). A REGRA 39 mantém este arquivo em paridade com as guardas,
-> e o gerador **falha (exit 2)** nas **5 catracas de clareza** — número duplicado · regra
+> e o gerador **falha (exit 2)** nas **6 catracas de clareza** — número duplicado · regra
 > sem categoria · regra sem `# previne:` · regra sem o tag `[SEV]` · severidade que não
-> resolve. Regra nova sem essas quatro declarações não entra: é anti-drift por construção.
+> resolve · **regra órfã** (header sem função própria). Regra nova sem essas declarações
+> não entra: é anti-drift por construção.
 >
-> **Limite conhecido da derivação** (medido 2026-08-03, `gated-until-trigger`: sem dano
-> observado, não vale reescrever o parser): o scan associa a cada regra o **primeiro**
+> **Limite conhecido da derivação** — e ele JÁ CAUSOU DANO (2026-09-30, duas vezes no
+> mesmo dia: a REGRA 85 saiu HARD em vez de HARD + SOFT porque um bloco novo entrou entre
+> o header dela e a sua função, e a projeção byte-a-byte aprovou o valor errado). Desde
+> então a **catraca nº6** reprova regra órfã, com isenções declaradas. O scan segue
+> associando a cada regra o **primeiro**
 > `nome() {` após o header, então em regras cujo header antecede um *helper* — ou que
 > **delegam** a um script externo com `violation "${sev}"` dinâmico — a severidade vem do
 > tag `[SEV]`, não do corpo. Hoje as duas fontes concordam em **todas** as regras (nenhuma
@@ -27,7 +31,7 @@ São as regras que o gate mecânico do Onion aplica a **todo repo da rede**: o m
 lint roda no core e em cada adotante. **HARD** bloqueia o merge; **SOFT** avisa, mas não
 bloqueia o CI.
 
-**90 regras** no total — **79 HARD**, **29 SOFT**.
+**95 regras** no total — **84 HARD**, **33 SOFT**.
 
 ## Frontmatter & conformidade de artefato
 
@@ -62,6 +66,7 @@ Tamanho saudável, nomes kebab-case, dialeto puro e links que resolvem.
 | 73 | Hook empacotado resolve no plugin instalado | HARD | hook morto e silencioso no plugin (script ausente, motor não embarcado, caminho $REPO/${CLAUDE_PLUGIN_ROOT}, matcher perdido) |
 | 74 | Caminho .claude/ NU dentro de plugin só resolve no core, com catraca | HARD + SOFT | comando/agente empacotado apontando .claude/{utils,commands,templates,…} que não viajou — ponteiro morto no consumidor |
 | 75 | Link markdown relativo dentro de plugin resolve no plugin | HARD | `[irmã](../kb/x.md)` num plugin apontando para arquivo que não viajou — 404 no consumidor |
+| 94 | MUTANTE esquecido na árvore | HARD + SOFT | teste de mutação que morre no meio e deixa o repo PIOR que antes |
 
 ## Fronteiras & contratos de arquitetura
 
@@ -113,6 +118,7 @@ Toda superfície DERIVADA fica em sincronia com a fonte única — contagens, ma
 | 85 | Porta pública espelha o core, com catraca | HARD + SOFT | a porta MENTIR sobre o que o core é, por falta de re-materialização |
 | 90 | Prosa de comando conhece os papéis que o script aceita | SOFT | o par script×prosa dos comandos de co-evolução desencontrar — e ele JÁ desencontrou duas |
 | 92 | Papel da porta no registro concorda com o CARIMBO dela | HARD + SOFT | o materializador ler o papel ERRADO e cortar maquinaria da porta pública |
+| 96 | Diretiva de contexto INJETADO não corta listagem em silêncio | HARD | a projeção que o harness injeta é lida pela sessão COMO SE FOSSE o conjunto — não há |
 
 ## KG & proveniência
 
@@ -139,6 +145,7 @@ Conhecimento nasce no grafo e não morre em prosa; proveniência com catraca (po
 | 82 | Os dois leitores do corpus CONCORDAM sobre quem é nó | HARD + SOFT | grafo válido em que o radar (awk sobre texto) e o PyYAML veem populações DIFERENTES |
 | 87 | PR que EDITA um `.kg.yaml` enxergou os `confirmed` dele | SOFT | propor contra o próprio corpus — o defeito medido em 2026-09-19 |
 | 89 | Rodada de radar selada reconcilia o corpus que superou (Aufhebung), com catraca | HARD + SOFT | a UNICA divida deste corpus que piora sozinha — rodada de radar selada como baseline sem |
+| 93 | KB de terceiro declara a QUE VERSÃO se aplica | HARD + SOFT | documentação que caduca sem dizer para qual versão ela valia |
 
 ## Automação Graduada
 
@@ -148,6 +155,7 @@ Classes de ação (HUMAN→MONITORED→DYNAMIC→AUTO) sobem de degrau com gate 
 |---:|-------|:----------:|---------------|
 | 44 | Integridade da escada de Automação Graduada | HARD | classe sobe de degrau sem gate de promoção alcançável (rung-jump forjado) |
 | 65 | Radar de mundo com baseline DATADA por eixo | HARD + SOFT | decidir estratégia com percepção externa vencida SEM AVISO — o modo-de-falha medido no |
+| 97 | A auto-auditoria do framework tem GATILHO | HARD + SOFT | o órgão de auto-evolução ficar parado sem ninguém ser avisado. DANO MEDIDO (2026-10-04): |
 
 ## Federação
 
@@ -161,6 +169,7 @@ Mapa, console, agent-card e canais de membro em sincronia com o SSOT da rede.
 | 38 | Mapa da federação (docs/onion/federation-map.md) sincronizado com members.yaml | HARD | mapa da federação driftando de members.yaml |
 | 46 | Canal da federação: diretório de outbox tem membro correspondente | SOFT | anúncio órfão — diretório de outbox cujo nome não é id de membro nunca é servido pelo pull, e some em silêncio |
 | 66 | Registro da federação validado no gate (members.yaml) | HARD | membro quebrado entrando calado no ledger — o M2 da spec m3-federation-admin |
+| 95 | Anúncio que afirma ZERO sobre classe verificável sem medição | HARD + SOFT | o ÚNICO documento que chega ANTES do merge desligar a ação do adotante com um zero em prosa |
 
 ## Projeção & privacidade
 

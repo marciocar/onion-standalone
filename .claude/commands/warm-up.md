@@ -25,7 +25,7 @@ Estabelecer contexto completo do projeto incluindo:
 ## 📋 Checklist de Preparação
 
 ### 0. KG-first — o `.kg.yaml` é o SSOT vivo do estado/domínio (antes da prosa)
-- ✅ **Se existir um `.kg.yaml` no repo, consulte-o PRIMEIRO** (`git ls-files '*.kg.yaml' | grep -v '/fixtures/'`
+- ✅ **Se existir um `.kg.yaml` no repo, consulte-o PRIMEIRO** (`git ls-files '*.kg.yaml' | grep -v -e '/fixtures/' -e '^docs/materials/'`
   — resolve AO VIVO; o glob hardcoded anterior enumerava só 31 de 49 grafos, **36% cegos**, e os invisíveis
   eram justamente os de `docs/evolution/research/<tema>/`) — ele é a fonte da verdade de estado/domínio, **acima**
   da prosa dos docs. Rode `bash .claude/validation/kg-radar.sh <arquivo>` e absorva o veredito (atenção,
@@ -40,7 +40,7 @@ Estabelecer contexto completo do projeto incluindo:
 - ✅ Revisar `README.md` na raiz do projeto
 - ✅ Entender estrutura do Sistema Onion v3.0
 - ✅ Identificar comandos e agentes principais
-- ✅ Mapear integrações disponíveis (ClickUp, Asana, Linear)
+- ✅ Mapear integrações disponíveis (ClickUp, Asana, Linear, Zoho Projects)
 
 ### 2. Estrutura de Documentação
 - ✅ Listar arquivos em `docs/` e manter no contexto
@@ -66,7 +66,7 @@ Estabelecer contexto completo do projeto incluindo:
 ### 4. Recursos Principais
 - ✅ Comando `/onion` - ponto de entrada inteligente
 - ✅ Agente `@onion` - orquestrador master
-- ✅ Task Manager Abstraction (ClickUp, Asana, Linear)
+- ✅ Task Manager Abstraction (ClickUp, Asana, Linear, Zoho Projects)
 - ✅ Framework EXTRACT para reuniões
 
 ### 4.5 Identidade e Ecossistema (quem o Onion É — não só o que tem)
