@@ -98,7 +98,18 @@ if isinstance(doc, dict):
     #    campo, 2026-10-07). O par dos dois campos é julgado pela REGRA 92 por COMPATIBILIDADE
     #    (hub→hub; standalone|consumer→adopted), não por igualdade — que valeria só para porta.
     #    Ninguém migra: a única entrada `adopted` virou `standalone` no mesmo commit.
-    ROLES = {"source", "hub", "standalone", "consumer"}
+    # `mini` e `plugins` entraram em 2026-10-09 (F1.5 das portas, SAC-90), e são PAPEL DE PORTA, não
+    # tier de rede: o nó D_MATRIZ_DE_PORTAS_2026_10 fixa onion-mini como porta didática gerada por
+    # allowlist e onion-plugins como o standalone empacotado. Na F0 este validador recusou os dois
+    # (E_REGISTRO_RECUSA_PAPEL_MINI_E_PLUGINS), e a matriz ficou sem como ser escrita. Por serem papel
+    # de porta, só valem com `kind: door` (regra abaixo): um adotante `role: mini` não tem sentido e
+    # passaria calado. Este é o vocabulário do REGISTRO; desde a F2 (2026-10-10, SAC-91) o corte de
+    # maquinaria também o conhece: `roles.yaml` tem os papéis plugins e mini, e `vendor-manifest.sh
+    # --role plugins|mini|source` corta (plugins = standalone) ou inclui por allowlist (mini). Nenhum
+    # leitor passa o `role:` do registro ao corte (materialize-door e resolve-role-bundle leem o
+    # carimbo e o roles.yaml); o `--diff` do vendor-manifest só LÊ o registro para achar o clone.
+    ROLES = {"source", "hub", "standalone", "consumer", "mini", "plugins"}
+    DOOR_ONLY_ROLES = {"mini", "plugins"}
     # `port` entrou em 2026-09-16 com o registro do onion-codex. Ele NÃO é `distillation`:
     # destilação é reescrita curada da MESMA doutrina no MESMO substrato; porte é TRADUÇÃO para
     # OUTRO substrato (aqui, `.codex/` + `.agents/skills/` no lugar de `.claude/`). Chamar porte
@@ -141,6 +152,9 @@ if isinstance(doc, dict):
         # NATUREZA (kind==source), não só pelo tier. Isentar só por role:source abria escape-hatch:
         # um adopter marcado role:source evadia o pin VERIFICADO (o false-green de pin que este
         # validador existe p/ matar). Exigir role:source ⇔ kind:source fecha o buraco.
+        if role in DOOR_ONLY_ROLES and kind != "door":
+            err(f"{tag}: 'role:{role}' é papel de PORTA e exige 'kind: door' (veio kind='{kind}')")
+
         is_source_role = role == "source"
         is_source_kind = kind == "source"
         if is_source_role != is_source_kind:
@@ -156,7 +170,13 @@ if isinstance(doc, dict):
         if ver in (None, ""):
             err(f"{tag}: 'onion_version' ausente (use 'n/a' só p/ distillation/method)")
         elif kind in VENDOR:
-            if str(ver) == "n/a":
+            # EXCEÇÃO ÚNICA E NOMEADA: a porta `mini` ainda não foi publicada pelo carimbo (o caminho da
+            # 1ª materialização existe desde a F5, SAC-94; publicar é do maestro). Até lá não existe pin, e escrever um seria
+            # inventar. Só `role: mini` com `kind: door` pode declarar `n/a`; o `plugins` não, porque o
+            # pin dele existe (o `ref` do provenance.json publicado).
+            if str(ver) == "n/a" and kind == "door" and role == "mini":
+                pass
+            elif str(ver) == "n/a":
                 err(f"{tag}: kind '{kind}' vendoriza — 'onion_version' não pode ser 'n/a' (pin VERIFICADO obrigatório)")
             elif not re.fullmatch(r"[0-9a-f]{7,40}", str(ver)):
                 err(f"{tag}: 'onion_version' não parece um commit curto ('{ver}')")
@@ -183,6 +203,22 @@ if isinstance(doc, dict):
     n_sources = sum(1 for m in members if isinstance(m, dict) and m.get("kind") == "source")
     if n_sources != 1:
         err(f"registro: esperado EXATAMENTE 1 membro fonte (kind:source), encontrado {n_sources} (fonte≠derivação: uma só fonte)")
+
+    # LINHAGEM HISTÓRICA (2026-10-09, selo do maestro sobre dois membros no mesmo remoto):
+    # `superseded_by: <id>` tira o membro do escopo do ops/registry-pins.sh. Por isso o campo é
+    # cobrado aqui: um id que não existe (ou que aponta para si, ou para outro histórico) esconderia
+    # uma divergência VIVA atrás de uma linhagem inventada.
+    by_id = {m.get("id"): m for m in members if isinstance(m, dict)}
+    for m in members:
+        if not isinstance(m, dict) or m.get("superseded_by") in (None, ""):
+            continue
+        sup, mid = m.get("superseded_by"), m.get("id")
+        if sup == mid:
+            err(f"membro '{mid}': 'superseded_by' aponta para o próprio membro")
+        elif sup not in by_id:
+            err(f"membro '{mid}': 'superseded_by' aponta para '{sup}', que não está no registro")
+        elif by_id[sup].get("superseded_by"):
+            err(f"membro '{mid}': 'superseded_by' aponta para '{sup}', que também é linhagem histórica (cadeia não permitida)")
 elif doc is not None:
     err("documento raiz não é um mapa (esperado: chaves version/trust_policy_version/members)")
 

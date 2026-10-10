@@ -34,12 +34,6 @@
           },
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/co-evolution-inbox-check.sh\"",
-            "timeout": 5,
-            "statusMessage": "Checando inbox de co-evolução (Onion)"
-          },
-          {
-            "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-beacon-hook.sh\" up",
             "timeout": 5,
             "statusMessage": "Acendendo farol de sessão (Onion)"

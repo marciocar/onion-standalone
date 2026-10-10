@@ -52,8 +52,8 @@
 #      categorias; categorias de AGENTE via ONION_AGENT_CATEGORIES (≠ COMMAND_CATEGORIES)
 #  17. Frontmatter: valor escalar com ': ' não-aspado [HARD] — quebra YAML no Claude Code
 #  18. Documentação versionada sob .claude/docs/ [HARD] — árvore proibida (usar docs/)
-#  19. Plugins de vertical (plugins/*) em sincronia com as fontes [HARD] — gerados por
-#      assemble-plugin.sh; drift (edição à mão OU fonte alterada sem regenerar) bloqueia merge
+#  19. (APOSENTADA na F4 das portas, 2026-10-10) Plugins de vertical sincronizados com as fontes — o
+#      `plugins/` saiu do core; o bundle é montado na publicação e julgado lá (plugin-bundle-check.sh)
 #  20. Capability Contract: tier de conformance reivindicado é cumprido [HARD] — Bronze (campos
 #      mínimos), Silver (requires resolvem), Gold (Silver + loads). Declarar acima do cumprido bloqueia.
 #  21. Grafo (docs/onion/graph.md) em sincronia com a spec-as-code [HARD] — gerado por graph.sh;
@@ -132,6 +132,12 @@ _ROLE_TAIL='[[:space:]]*(#.*)?$'
 # ausencia e de OBJETO e a isencao e correta. Aqui a pergunta e outra — "devo julgar este repo?" —
 # e a porta DEVE ser julgada: ela distribui a maquinaria completa.
 IS_DERIVED=0; _stamp_has "^([[:space:]]*role:[[:space:]]*(adopted|hub)${_ROLE_TAIL}|[[:space:]]*decoupled_from:)" && IS_DERIVED=1
+# ⚠️ A PORTA `source` (2026-10-10, F2 das portas) entra no porteiro, e não é a exceção que o aviso acima
+# proíbe: ela SUCEDE a porta onion-core, que hoje se carimba `hub` e já é IS_DERIVED=1. Trocar o carimbo
+# para `source` sem isto faria a mesma árvore passar de 0 HARD a 4 (medido: lentes sem objeto viram HARD
+# "na fonte", REGRAS 85/92 sem members.yaml) — a porta seria julgada como o core que ela não é. O que
+# a distingue do core é `kind: door`, escrito só pelo materializador.
+_stamp_has "^[[:space:]]*role:[[:space:]]*source${_ROLE_TAIL}" && _stamp_has '^[[:space:]]*kind:[[:space:]]*door([[:space:]]|$)' && IS_DERIVED=1
 IS_LEAF=0;    _stamp_has "^[[:space:]]*role:[[:space:]]*adopted${_ROLE_TAIL}" && IS_LEAF=1
 
 # ---------------------------------------------------------------------------
@@ -369,7 +375,29 @@ _role() {
     _ROLE_OF_THIS_REPO="$(awk '/^role:/{print $2; exit}' "${stamp}" 2>/dev/null)"
   fi
   [ -n "${_ROLE_OF_THIS_REPO}" ] || _ROLE_OF_THIS_REPO="source"
+  # a porta `source` (kind: door) não é a fonte: a ausência de objeto nela é legítima como em toda porta
+  # (grep direto no stamp, sem `_stamp_has`: a bancada role_scope extrai SÓ este bloco e o roda isolado)
+  if [ "${_ROLE_OF_THIS_REPO}" = "source" ] && grep -qE '^[[:space:]]*kind:[[:space:]]*door([[:space:]]|$)' "${stamp}" 2>/dev/null; then
+    _ROLE_OF_THIS_REPO="source-door"
+  fi
   printf '%s' "${_ROLE_OF_THIS_REPO}"
+}
+# ── QUEM PUBLICA O MARKETPLACE (2026-10-10, F2 das portas) ──────────────────────────────────────
+# As REGRAS 37 e 76 julgam o catálogo de publicação do core (.claude-plugin/marketplace.json; até a F4 das
+# portas, 2026-10-10, a REGRA 19 (Plugins de vertical sincronizados com as fontes) julgava também o plugins/ versionado, que saiu do core). Até
+# a F2 só o adotante e o hub as pulavam (IS_DERIVED); o standalone não levava utils/marketplace e elas
+# não tinham o que ler. Com a matriz, o standalone LEVA utils/marketplace (o /meta:create-vertical o usa)
+# e as duas regras passaram a reprovar a porta por não ter o marketplace que ela não publica — 21 HARD
+# medidos na materialização de 2026-10-10. A pergunta certa não é "este repo é derivado?" (IS_DERIVED,
+# que é porteiro de 17 guardas e o standalone NÃO pode entrar nele), é "este repo publica o marketplace?":
+# sim na fonte (`source`), e em qualquer papel que de fato tenha o catálogo na raiz. Fora disso, nada a
+# julgar. No core o catálogo existe e o papel é `source`, logo a cobrança ali não muda.
+# ⚠️ E A PORTA `source` NÃO É O CORE: a onion-core se carimba `role: source` com `kind: door` e não leva
+# o catálogo. Pelo papel ela seria cobrada pelo marketplace que não publica (12 HARD, medido pela passada
+# adversarial). Porta (`kind: door`) responde pelo catálogo, nunca pelo papel.
+_publishes_marketplace() {
+  if [ "$(_role)" = "source" ] && ! _stamp_has '^[[:space:]]*kind:[[:space:]]*door([[:space:]]|$)'; then return 0; fi
+  [ -f "${REPO_ROOT}/.claude-plugin/marketplace.json" ]
 }
 # A ausência só é LEGÍTIMA se o objeto de fato não existe E o papel não é a fonte. Existir-e-estar-
 # quebrado continua HARD em qualquer papel: o recorte é sobre NÃO RECEBER, nunca sobre "está ruim".
@@ -1558,76 +1586,6 @@ check_harvest_names_removed_nodes() {
 }
 
 # ===========================================================================
-# REGRA 19 — Plugins de vertical (plugins/*) sincronizados com as fontes [HARD]
-# previne: plugin de vertical driftando das fontes — bundle de adoção errado
-#           Cada plugins/<name> é GERADO por assemble-plugin.sh a partir de
-#           verticals/<name>.manifest.sh. Regenera p/ temp e compara: drift =
-#           alguém editou o plugin à mão OU mudou a fonte sem regenerar.
-#           IGNORA ref/commit_date do provenance.json (voláteis por commit);
-#           compara o resto + o tree_sha (sinal de conteúdo, worktree-based).
-# ===========================================================================
-check_plugins_sync() {
-  local asm="${SCRIPT_DIR}/../utils/marketplace/assemble-plugin.sh"
-  local vdir="${SCRIPT_DIR}/../utils/marketplace/verticals"
-  # consumidor (role: adopted) NÃO distribui plugins — marketplace é superfície do source; a fonte é
-  # vendorizada mas a SAÍDA gerada (plugins/ + marketplace.json) não. Guarda POR PAPEL (não só por
-  # ferramenta) — sinal de campo 2026-07-10 (12 HARD falsos bloqueavam todo commit do adotante).
-  [ "${IS_DERIVED}" -eq 1 ] && return 0
-  [ -f "${asm}" ] || return 0            # sem assembler → nada a checar (repo sem a feature)
-  [ -d "${vdir}" ] || return 0
-  command -v jq >/dev/null 2>&1 || return 0   # sem jq → pula gracioso (mesma graça dos outros)
-  # GATE sob --only (Elenxo 2026-08-13, KG: docs/onion/graph/elenxo-mecanismos-lint-2026-08-13.kg.yaml):
-  # guarda de estado GLOBAL que rodava inteira em toda invocação --only (8,9s para validar 1 arquivo
-  # alheio — 61% do custo somando as irmãs sem gate). A ÁREA desta guarda não é só marketplace/plugins:
-  # é também TODA FONTE BUNDLADA (108 paths declarados nos manifestos — agentes, comandos, skills, KBs).
-  # A 1ª versão do gate casava só o prefixo e ficou CEGA a drift de fonte via --only (2 HARD engolidas,
-  # provado pelo 2º Elenxo: probe em commands/meta/kg.md). Pertencimento se decide no MANIFESTO, que
-  # declara os paths LITERAIS — grep -qF custa ~ms contra os 8,9s da guarda.
-  if [ -n "${ONLY_PATH}" ]; then
-    case "${ONLY_PATH}" in
-      */utils/marketplace/*|*/plugins/*) : ;;
-      *)
-        local _rel="${ONLY_PATH#"${REPO_ROOT}"/}"
-        grep -qF -- "${_rel}" "${vdir}"/*.manifest.sh 2>/dev/null || return 0
-        ;;
-    esac
-  fi
-
-  local manifest name committed tmp
-  for manifest in "${vdir}"/*.manifest.sh; do
-    [ -f "${manifest}" ] || continue
-    name="$(. "${manifest}" >/dev/null 2>&1; printf '%s' "${PLUGIN_NAME:-}")"
-    [ -n "${name}" ] || continue
-    committed="${REPO_ROOT}/plugins/${name}"
-    if [ ! -d "${committed}" ]; then
-      violation "HARD" "plugins/${name}" "plugin ausente — gere com 'bash .claude/utils/marketplace/assemble-plugin.sh ${manifest#${REPO_ROOT}/}'"
-      continue
-    fi
-    tmp="$(mktemp -d)"
-    # ASSEMBLE FALHO É VIOLATION, NÃO MORTE (2º Elenxo 2026-08-13, achado adjacente pré-existente:
-    # apagar uma fonte bundlada não produzia 'fora de sincronia' — matava o lint em rc=2 SEM
-    # sumário, e os chamadores por ausência-de-mensagem liam a morte como PASS).
-    if ! bash "${asm}" "${manifest}" "${REPO_ROOT}" "${tmp}/${name}" >/dev/null 2>&1; then
-      violation "HARD" "plugins/${name}" "assemble FALHOU (fonte bundlada ausente/quebrada?) — rode 'bash .claude/utils/marketplace/assemble-plugin.sh ${manifest#${REPO_ROOT}/}' e leia o erro"
-      rm -rf "${tmp}"
-      continue
-    fi
-    # (a) tudo exceto provenance.json (ref/commit_date voláteis lá dentro)
-    if ! diff -r -x provenance.json "${committed}" "${tmp}/${name}" >/dev/null 2>&1; then
-      violation "HARD" "plugins/${name}" "plugin fora de sincronia com a fonte — regenere com 'bash .claude/utils/marketplace/assemble-plugin.sh ${manifest#${REPO_ROOT}/}'"
-    fi
-    # (b) tree_sha (sinal de conteúdo content-addressed)
-    local c_sha t_sha
-    c_sha="$(jq -r '.tree_sha' "${committed}/.claude-plugin/provenance.json" 2>/dev/null)"
-    t_sha="$(jq -r '.tree_sha' "${tmp}/${name}/.claude-plugin/provenance.json" 2>/dev/null)"
-    if [ "${c_sha}" != "${t_sha}" ]; then
-      violation "HARD" "plugins/${name}" "tree_sha divergente (fonte mudou sem regenerar) — rode assemble-plugin.sh"
-    fi
-    rm -rf "${tmp}"
-  done
-}
-
-# ===========================================================================
 # REGRA 20 — Capability Contract: tier de conformance cumprido [HARD]
 # previne: componente reivindica um tier de conformance que não cumpre
 #           Cada verticals/<name>.manifest.sh declara CONFORMANCE (bronze|silver|
@@ -1705,15 +1663,22 @@ check_capability_conformance() {
 #           Impede roles.yaml apontar p/ vertical inexistente. Pula gracioso sem python3/yaml.
 # ===========================================================================
 check_role_bundle_sync() {
-  # GATE sob --only — ver o racional em check_plugins_sync (mesmo Elenxo). Inclui commands/meta/:
+  # GATE sob --only (Elenxo 2026-08-13, KG: docs/onion/graph/elenxo-mecanismos-lint-2026-08-13.kg.yaml):
+  # guarda de estado GLOBAL que rodava inteira em toda invocação --only custava segundos para validar 1
+  # arquivo alheio. O gate decide pela ÁREA da guarda — e a área tem de incluir TODA fonte que ela lê,
+  # não só o prefixo óbvio (a 1ª versão do gate da antiga REGRA 19 (Plugins de vertical sincronizados com as fontes) casava só o prefixo e ficou cega a
+  # drift de fonte via --only: 2 HARD engolidas, provado pelo 2º Elenxo). Este é o racional que as
+  # outras guardas citam ("ver o racional em check_role_bundle_sync"); morava na check_plugins_sync,
+  # que saiu com a REGRA 19 (Plugins de vertical sincronizados com as fontes) na F4 das portas (2026-10-10). Inclui commands/meta/:
   # a REGRA valida work_tool -> comando EXISTENTE, então rename/delete de um comando meta tem de
   # disparar (2º Elenxo provou a cegueira com mv co-deliver.md: o PRE acusava, o gate estreito não).
   if [ -n "${ONLY_PATH}" ]; then case "${ONLY_PATH}" in */utils/marketplace/*|*/.claude-plugin/*|*/commands/meta/*) : ;; *) return 0 ;; esac; fi
   local roles="${SCRIPT_DIR}/../utils/marketplace/roles.yaml"
   local vdir="${SCRIPT_DIR}/../utils/marketplace/verticals"
   local mkt="${REPO_ROOT}/.claude-plugin/marketplace.json"
-  # consumidor não carrega marketplace.json — mesma guarda por papel de check_plugins_sync (sinal de campo)
+  # consumidor não carrega marketplace.json — guarda por PAPEL, não só por ferramenta (sinal de campo 2026-07-10: 12 HARD falsos bloqueavam todo commit do adotante)
   [ "${IS_DERIVED}" -eq 1 ] && return 0
+  _publishes_marketplace || return 0     # porta que não publica o catálogo — F2 das portas
   [ -f "${roles}" ] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
   python3 -c "import yaml" >/dev/null 2>&1 || return 0
@@ -1739,25 +1704,85 @@ PY
   #   (1) todo `work_tools:` de papel referencia um set válido (ou none/tbd);
   #   (2) todo tool nomeado em work_tool_sets resolve a um comando real .claude/commands/meta/<tool>.md;
   #   (3) o conjunto `full` está coberto pelo manifesto onion — o núcleo absorveu onion-work-tools em 2026-09-04 (roles.yaml <-> manifesto).
+  #   (4) PARTIÇÃO (2026-10-10, F2 das portas): todo comando de commands/meta/ (menos o README) mora em
+  #       EXATAMENTE um conjunto. Os conjuntos são à mão (meta_factory, federation, adoption...) e o corte
+  #       por papel os CONSOME; sem esta cobrança, comando novo não classificado viajaria ou sumiria por
+  #       default, e em silêncio — a lição "lista escrita à mão envelhece pelo que se acrescenta depois".
+  #   (5) a ALLOWLIST de papel (o mini) nomeia caminhos que existem: allowlist com caminho morto encolhe a
+  #       porta sem ninguém notar (o vendor-manifest só AVISA, porque a decisão é de quem escreveu a lista).
   local wt_out kind a b
-  wt_out="$(python3 - "${roles}" <<'PY'
-import sys, yaml
+  wt_out="$(python3 - "${roles}" "${REPO_ROOT}" "$(_role)" <<'PY'
+import sys, yaml, os
 d = yaml.safe_load(open(sys.argv[1])) or {}
+root, me = sys.argv[2], sys.argv[3]
 sets = d.get("work_tool_sets") or {}
+# O comando de um conjunto só é COBRADO no repo cujo papel o recebe (2026-10-10, passada adversarial da
+# F2): o roles.yaml viaja inteiro, e um standalone que publica o próprio catálogo levava 12 HARD por
+# "adopt/co-*/federation-* sem comando" — exatamente o que a matriz tira dele. Papel desconhecido ou
+# source: cobra tudo, como antes.
+mine = None
+spec_me = (d.get("roles") or {}).get(me)
+if me != "source" and spec_me is not None:
+    wt_me = spec_me.get("work_tools")
+    mine = set()
+    for n in (wt_me if isinstance(wt_me, list) else [wt_me]):
+        mine |= set(sets.get(n) or [])
 valid = set(sets.keys()) | {"none", "tbd"}
 for role, spec in (d.get("roles") or {}).items():
     wt = (spec or {}).get("work_tools")
-    if wt is not None and wt not in valid:
-        print("BADSET\t%s\t%s" % (role, wt))
+    for w in (wt if isinstance(wt, list) else [wt]):
+        if w is not None and w not in valid:
+            print("BADSET\t%s\t%s" % (role, w))
+    al = (spec or {}).get("allowlist") or {}
+    for key in ("commands", "agents", "skills", "support"):
+        for x in (al.get(key) or []):
+            if not os.path.exists(os.path.join(root, ".claude", x)):
+                print("ALLOWDEAD\t%s\t%s" % (role, x))
+    # OVERLAYS (F5 das portas): a fonte de cada um tem de existir — mas só onde portas se materializam
+    # (o motor está aqui). O roles.yaml viaja; as fontes, em ops/, não, e cobrá-las numa porta seria
+    # cobrar o que a matriz não lhe dá.
+    if os.path.isfile(os.path.join(root, "ops", "materialize-door.sh")):
+        for dst, src in sorted((al.get("overlays") or {}).items()):
+            if not os.path.isfile(os.path.join(root, str(src))):
+                print("OVERDEAD\t%s\t%s" % (role, src))
+owner = {}
 for name, lst in sets.items():
     for t in (lst or []):
-        print("TOOL\t%s\t" % t)
+        if mine is None or t in mine:
+            print("TOOL\t%s\t" % t)
+        owner.setdefault(t, []).append(name)
+for t, names in sorted(owner.items()):
+    if len(names) > 1:
+        print("DUPSET\t%s\t%s" % (t, ",".join(names)))
+mdir = os.path.join(root, ".claude", "commands", "meta")
+# A partição julga o que é RASTREADO (o que o transporte pode levar): a bancada planta sondas não
+# rastreadas em commands/meta/ para testar OUTRAS regras, e contá-las reprovava 3 casos alheios (medido
+# no gate). Fora de um repo git não há "rastreado" a julgar, e a partição NÃO roda: o sandbox da
+# bancada de fixtures é cópia sem git, e contar o diretório ali reprovava sondas de outras regras.
+import subprocess
+names = None
+try:
+    out = subprocess.run(["git", "-C", root, "rev-parse", "--show-toplevel"], capture_output=True, check=True).stdout.decode().strip()
+    if os.path.realpath(out) == os.path.realpath(root):
+        out = subprocess.run(["git", "-C", root, "ls-files", "-z", "--", ".claude/commands/meta"],
+                             capture_output=True, check=True).stdout.decode("utf-8", "replace")
+        names = sorted(os.path.basename(p) for p in out.split("\0") if p)
+except Exception:
+    names = None
+if sets and names:
+    for f in names:
+        if f.endswith(".md") and f != "README.md" and f[:-3] not in owner:
+            print("UNSET\t%s\t" % f[:-3])
 PY
 )"
   while IFS=$'\t' read -r kind a b; do
     case "${kind}" in
       BADSET) violation "HARD" "utils/marketplace/roles.yaml" "papel '${a}' referencia work_tools set '${b}' inexistente em work_tool_sets" ;;
       TOOL) [ -f "${REPO_ROOT}/.claude/commands/meta/${a}.md" ] || violation "HARD" "utils/marketplace/roles.yaml" "work_tool '${a}' sem comando em .claude/commands/meta/${a}.md — crie com /meta:create-command ${a} (ou corrija o nome em work_tool_sets se foi digitado errado)" ;;
+      DUPSET) violation "HARD" "utils/marketplace/roles.yaml" "work_tool '${a}' está em MAIS DE UM conjunto (${b}) — os conjuntos particionam commands/meta/: deixe o comando em um só" ;;
+      UNSET) violation "HARD" "utils/marketplace/roles.yaml" "comando /meta:${a} não está em NENHUM work_tool_set — classifique-o (full, meta_factory, federation, adoption ou pending) em roles.yaml; sem classificação o corte por papel decide por default, em silêncio" ;;
+      ALLOWDEAD) violation "HARD" "utils/marketplace/roles.yaml" "a allowlist do papel '${a}' nomeia '.claude/${b}', que não existe — corrija o caminho ou tire-o da lista" ;;
+      OVERDEAD) violation "HARD" "utils/marketplace/roles.yaml" "o overlay do papel '${a}' aponta a fonte '${b}', que não existe — a porta sairia sem o arquivo próprio dela (o materializador recusa); crie a fonte ou corrija o caminho" ;;
     esac
   done <<< "${wt_out}"
   local wtman="${vdir}/onion.manifest.sh" ft   # 2026-09-04: onion absorveu onion-work-tools (F2)
@@ -1769,24 +1794,36 @@ PY
 }
 
 # ===========================================================================
-# REGRA 61 — Fronteira de MOAT: manifesto de plugin publicável não vaza meta-fábrica nem grafo privado [HARD]
-# previne: publicar a AUTO-REPLICAÇÃO (create-*/adopt/marketplace/decouple) ou o SSOT PRIVADO do core
-#           (docs/onion/graph/*) num plugin distribuível. A doutrina L1-distribui/L2-L3-moat vira
+# REGRA 61 — Fronteira de MOAT: manifesto de plugin publicável não vaza adoção, federação nem grafo privado [HARD]
+# previne: publicar a ADOÇÃO e a FEDERAÇÃO (adopt/federation-*/co-*/marketplace/decouple) ou o SSOT PRIVADO
+#           do core (docs/onion/graph/*) num plugin distribuível. Até 2026-10-10 a regra também barrava a
+#           meta-fábrica (create-*/evolve/absorb-skill); a matriz das portas (D_MATRIZ_DE_PORTAS_2026_10,
+#           decisão do maestro de 2026-10-09) a libera para standalone e plugins. A doutrina L1-distribui/L2-L3-moat vira
 #           MECANISMO: vazar o moat é erro de lint, não questão de lembrar. Checa as FONTES DECLARADAS
 #           (arrays do manifesto), não a prosa — sourcia o manifesto (como o assemble-plugin.sh faz),
 #           então comentário/descrição que MENCIONE a meta-fábrica não dispara; só a lista real de fontes.
+#           F4 DAS PORTAS (2026-10-10): esta é a metade da DECLARAÇÃO. A metade do RESULTADO (nenhum arquivo
+#           de moat dentro do plugin MONTADO) roda na publicação, no plugin-bundle-check.sh, sobre o bundle.
 # ===========================================================================
 check_moat_boundary() {
   if [ -n "${ONLY_PATH}" ]; then case "${ONLY_PATH}" in */utils/marketplace/*) : ;; *) return 0 ;; esac; fi
   [ "${IS_DERIVED}" -eq 1 ] && return 0
   local vdir="${SCRIPT_DIR}/../utils/marketplace/verticals" root="${REPO_ROOT}" m src entry files ef bn bad abs
   [ -d "${vdir}" ] || return 0
-  # DENYLIST por BASENAME de meta-fábrica/federação-downstream (comandos achatam no plugin → basename é
-  # o que resta) + por PATH (utils/adopt|marketplace|federation, e QUALQUER *.kg.yaml — o SSOT é do
-  # adotante). co-evolve/co-relay (UPSTREAM) são permitidos por desenho; co-announce/co-deliver (DOWNSTREAM)
-  # e federation-* (ledger L3) não. absorb-skill e evolve são fábrica.
-  local moat_base='^(create-(abstraction|agent|agent-express|command|knowledge-base|skill|vertical)|absorb-skill|adopt|evolve|federation-.*|co-announce|co-deliver|decouple-source|assemble-plugin|generate-marketplace)\.(md|sh)$'
-  local moat_path='(/utils/adopt/|/utils/marketplace/|/utils/federation/|\.kg\.yaml$)'
+  # DENYLIST por BASENAME de ADOÇÃO e FEDERAÇÃO (comandos achatam no plugin → basename é o que resta) +
+  # por PATH (utils/adopt|marketplace|federation|federation-transport|co-evolution, a skill onion-publish
+  # e QUALQUER *.kg.yaml — o SSOT é do adotante).
+  # ⚠️ A FRONTEIRA MUDOU EM 2026-10-10 (F2 das portas, SAC-91), por decisão do maestro registrada em
+  # D_MATRIZ_DE_PORTAS_2026_10: "plugins = a mesma superfície do standalone", e o standalone LEVA a
+  # meta-fábrica. Até a F2 esta regra barrava create-*, absorb-skill e evolve como moat; agora eles
+  # PODEM entrar num manifesto publicável (o empacotamento é da F4, SAC-93), e o que a regra protege é
+  # o que a matriz tira do standalone: adoção (adopt, federation-*, onion-publish, decouple, o motor do
+  # marketplace) e federação. Por isso co-evolve e co-relay, que eram "upstream permitido por desenho",
+  # passaram a ser barrados: a matriz os nomeia entre o que sai. personality-sync entra pela mesma razão
+  # do roles.yaml (conjunto `pending`): a matriz não o classificou, e o lado seguro é não publicá-lo.
+  # O grafo (*.kg.yaml) segue moat em todo papel: é o SSOT privado, não fábrica.
+  local moat_base='^(adopt|federation-.*|co-(announce|deliver|evolve|relay)|co-evolution-inbox-check|personality-sync|decouple-source|assemble-plugin|generate-marketplace|materialize-marketplace-repo)\.(md|sh)$'
+  local moat_path='(/utils/adopt/|/utils/marketplace/|/utils/federation/|/utils/federation-transport/|/utils/co-evolution/|/skills/onion-publish/|\.kg\.yaml$)'
   for m in "${vdir}"/*.manifest.sh; do
     [ -f "${m}" ] || continue
     src="$( set +u; . "${m}" >/dev/null 2>&1; printf '%s\n' \
@@ -1812,7 +1849,7 @@ check_moat_boundary() {
       done <<< "${files}"
     done <<< "${src}"
     if [ -n "${bad}" ]; then
-      violation "HARD" "utils/marketplace/verticals/$(basename "${m}")" "manifesto de plugin PUBLICÁVEL arrasta fonte de MOAT (meta-fábrica/federação/grafo — checado pela EXPANSÃO do que o assembler copiaria, não só a string declarada): $(printf '%s' "${bad}" | cut -c1-240). Estreite a declaração — o plugin leva o MOTOR, nunca a fábrica nem o SSOT privado."
+      violation "HARD" "utils/marketplace/verticals/$(basename "${m}")" "manifesto de plugin PUBLICÁVEL arrasta fonte de MOAT (adoção/federação/motor do marketplace/grafo — checado pela EXPANSÃO do que o assembler copiaria, não só a string declarada): $(printf '%s' "${bad}" | cut -c1-240). Estreite a declaração — o plugin leva o MOTOR do método, nunca a adoção, a federação nem o SSOT privado."
     fi
   done
 }
@@ -1830,7 +1867,7 @@ check_graph_sync() {
   local gen="${SCRIPT_DIR}/graph.sh"
   local gfile="${REPO_ROOT}/docs/onion/graph.md"
   [ -f "${gen}" ] || return 0
-  command -v jq >/dev/null 2>&1 || return 0     # graph.sh usa jq p/ capability → pula gracioso sem jq
+  # (o gate por jq saiu na F4 das portas: graph.sh deixou de usar jq — a capability vem dos manifestos)
   have_py_yaml || return 0                        # graph.sh usa python+yaml p/ members.yaml → pula gracioso sem eles
   if [ ! -f "${gfile}" ]; then
     violation "HARD" "docs/onion/graph.md" "grafo ausente — rode 'bash .claude/validation/graph.sh --markdown > docs/onion/graph.md'"
@@ -1932,7 +1969,7 @@ check_agent_card_sync() {
 #   violava "membro nenhum", não "membro sem canal").
 # ===========================================================================
 check_outbox_channel_exists() {
-  # GATE POR RELEVÂNCIA sob --only — ver o racional em check_plugins_sync (mesmo Elenxo).
+  # GATE POR RELEVÂNCIA sob --only — ver o racional em check_role_bundle_sync (mesmo Elenxo).
   if [ -n "${ONLY_PATH}" ]; then case "${ONLY_PATH}" in */docs/evolution/federation/*) : ;; *) return 0 ;; esac; fi
   local outbox="${REPO_ROOT}/docs/evolution/federation/outbox"
   local members="${REPO_ROOT}/docs/evolution/federation/members.yaml"
@@ -2518,7 +2555,7 @@ check_kg_read_index_sync() {
 
 
 # ===========================================================================
-# REGRA 85 — Porta pública espelha o core, com catraca [HARD]
+# REGRA 85 — Porta pública espelha o core, com catraca [SOFT]
 # previne: a porta MENTIR sobre o que o core é, por falta de re-materialização
 #   O `materialize-door.sh` resolve o COMO se publica. O QUANDO era uma frase —
 #   "toda leva mergeada em main que toque a superfície que viaja" — e frase não
@@ -2558,12 +2595,19 @@ check_door_staleness() {
       # — o único instante em que re-materializar é possível — e falha lá, alto, com a porta nomeada.
       # SEM-BASELINE e PIN-DESCONHECIDO seguem HARD: não são questão de momento, são registro quebrado.
       *ANDOU-PARA-TRAS*)
-        violation "SOFT" "docs/evolution/federation/members.yaml" "REGRA 85 (Porta pública espelha o core, com catraca): [porta/DEFASADA-COBRADA-POS-MERGE] ${line} — re-materialize (bash ops/materialize-door.sh <clone>), publique e avance o pin. NÃO bloqueia este PR de propósito: a cura só existe depois do merge, e a cobrança bloqueante mora no workflow \`onion-door-staleness\` (push para main). Porta defasada MENTE sobre o core — mas o PR não é o lugar de consertar."
+        violation "SOFT" "docs/evolution/federation/members.yaml" "REGRA 85 (Porta pública espelha o core, com catraca): [porta/DEFASADA-COBRADA-POS-MERGE] ${line} — medida pelo CACHE do registro; a defasagem real, lida do remoto: bash ops/publish-door.sh --status. A cura é /meta:publish <porta>, sob demanda. NÃO bloqueia este PR nem a main: o workflow \`onion-door-staleness\` é relatório desde a F3 das portas."
         ;;
+      # ⚠️ INFORMATIVA POR INTEIRO DESDE A F3 DAS PORTAS (2026-10-10, SAC-92, D_MATRIZ_DE_PORTAS_2026_10:
+      # "publicar é sob demanda e nunca trava o desenvolvimento"). SEM-BASELINE e PIN-DESCONHECIDO eram
+      # HARD por serem "registro quebrado, não questão de momento" — e o argumento valia enquanto o pin do
+      # registro era a verdade sobre a porta. Com o /meta:publish o selo é o CARIMBO da porta, lido do
+      # remoto (`ops/publish-door.sh --status`), e o `onion_version` do members.yaml virou CACHE: ninguém
+      # mais o avança por PR. Cobrar HARD sobre um cache faria todo PR comum depender de manter um campo
+      # que não é mais a fonte — o deadlock que a matriz decidiu desfazer. O sinal FICA, rotulado.
       *SEM-BASELINE*|*PIN-DESCONHECIDO*)
-        violation "HARD" "docs/evolution/federation/members.yaml" "REGRA 85 (Porta pública espelha o core, com catraca): ${line} — isto NÃO é questão de momento: é registro quebrado (pin que não existe na história, ou porta sem teto declarado). Corrija no members.yaml / door-staleness-baseline.txt antes do merge."
+        violation "SOFT" "docs/evolution/federation/members.yaml" "REGRA 85 (Porta pública espelha o core, com catraca): [registro/CACHE-QUEBRADO] ${line} — o pin do registro é cache desde a F3; o fato é o carimbo publicado: bash ops/publish-door.sh --status. Informativo, não bloqueia."
         ;;
-      ERRO*) violation "HARD" ".claude/validation/door-staleness-check.sh" "REGRA 85 (Porta pública espelha o core, com catraca): a guarda não pôde julgar — ${line}" ;;
+      ERRO*) violation "SOFT" ".claude/validation/door-staleness-check.sh" "REGRA 85 (Porta pública espelha o core, com catraca): [porta/NAO-MEDIDO] a guarda não pôde julgar — ${line}. Isto NÃO é 'portas em dia'; a medida que vale é bash ops/publish-door.sh --status." ;;
     esac
   done <<< "${out}"
 }
@@ -3549,7 +3593,7 @@ check_knowledge_base_links() {
 #   quando migrar). Origem: 1a pesquisa nascida em KG (research/whatsapp-api-2026-07).
 # ===========================================================================
 check_research_kg() {
-  # GATE POR RELEVÂNCIA sob --only — ver o racional em check_plugins_sync (mesmo Elenxo).
+  # GATE POR RELEVÂNCIA sob --only — ver o racional em check_role_bundle_sync (mesmo Elenxo).
   if [ -n "${ONLY_PATH}" ]; then case "${ONLY_PATH}" in */docs/evolution/research/*) : ;; *) return 0 ;; esac; fi
   local base="${REPO_ROOT}/docs/evolution/research"
   [ -d "${base}" ] || return 0
@@ -4083,47 +4127,6 @@ check_site_no_private_deeplinks() {
 }
 
 # ===========================================================================
-# REGRA 79 — Artefato de plugin não publica o repo-fonte PRIVADO como endereço [HARD]
-# previne: plugin/marketplace publicando a URL do source privado — 404 no instalador
-#   Irmã da REGRA 35, um degrau mais apertada e noutra superfície. A 35 protege `site/`
-#   e ISENTA a home crua do repo; aqui a home crua é justamente o defeito: até 2026-09-07
-#   `assemble-plugin.sh` derivava UMA variável (`git remote get-url origin`) e a usava em
-#   TRÊS papéis — proveniência, `homepage` e `repository` do manifesto —, publicando o
-#   source PRIVADO como casa e como canal de suporte do projeto. Medido no clone público
-#   vivo: 5 hyperlinks 404 nos READMEs de plugin (emitidos por plugin-readme.sh) e 10
-#   pares homepage/repository em .claude-plugin/marketplace.json.
-#   Superfície: plugins/** e .claude-plugin/marketplace.json. `provenance.json` é a ÚNICA
-#   isenção — lá o slug é marca de ORIGEM content-addressed, não endereço navegável, e
-#   nenhum consumidor resolve a URL (medido: lint-artifacts o exclui do diff; a poda o usa
-#   como marcador de existência).
-#   A face pública vive numa costura só: .claude/utils/marketplace/public-face.sh.
-#   O slug privado é DERIVADO do remote `origin`, não digitado — quem forkar herda a guarda.
-# ===========================================================================
-check_plugin_no_private_source_url() {
-  local root="${REPO_ROOT}"
-  local src_slug
-  src_slug="$(git -C "${root}" remote get-url origin 2>/dev/null | sed -E 's#(git@|https://)([^/:]+)[/:]##; s#\.git$##' || true)"
-  [ -n "${src_slug}" ] || return 0
-  # Só vale quando a origem é de fato privada; num fork público a guarda não tem sujeito.
-  case "${ONION_SOURCE_IS_PRIVATE:-1}" in 1) : ;; *) return 0 ;; esac
-  local f hits
-  while IFS= read -r f; do
-    [ -n "${f}" ] || continue
-    case "${f}" in */provenance.json) continue ;; esac
-    if [ -n "${ONLY_PATH}" ]; then
-      case "${f}" in "${ONLY_PATH}"|"${ONLY_PATH}"/*) : ;; *) continue ;; esac
-    fi
-    hits="$(grep -oE "github\.com/${src_slug}[^\"'\'')* ]*" "${f}" 2>/dev/null | sort -u || true)"
-    [ -n "${hits}" ] || continue
-    while IFS= read -r h; do
-      [ -n "${h}" ] || continue
-      violation "HARD" "${f#${root}/}" "[plugin/404-privado] artefato público cita o repo-fonte PRIVADO como endereço: ${h} — a casa e o canal vêm de public-face.sh (ONION_PUBLIC_HOMEPAGE / ONION_PUBLIC_REPOSITORY); só provenance.json pode carregar o slug de origem"
-    done <<< "${hits}"
-  done < <( { find "${root}/plugins" -type f \( -name '*.md' -o -name '*.json' \) 2>/dev/null; \
-              [ -f "${root}/.claude-plugin/marketplace.json" ] && printf '%s\n' "${root}/.claude-plugin/marketplace.json"; } | LC_ALL=C sort )
-}
-
-# ===========================================================================
 # REGRA 36 — Superfície VENDORIZADA sem nome comercial de cliente [HARD]
 # previne: nome comercial de cliente vazando em superfície vendorizada
 #   O que /meta:adopt copia (.claude/{agents,commands,skills,utils,validation,
@@ -4300,7 +4303,7 @@ check_frontmatter_model_category() {
 # ===========================================================================
 check_bundled_command_script_deps() {
   [ "${IS_DERIVED}" -eq 1 ] && return 0
-  # GATE POR RELEVÂNCIA sob --only — ver o racional em check_plugins_sync (mesmo Elenxo).
+  # GATE POR RELEVÂNCIA sob --only — ver o racional em check_role_bundle_sync (mesmo Elenxo).
   # Área inclui commands/ e validation/: o manifesto declara scripts que os comandos citam.
   if [ -n "${ONLY_PATH}" ]; then case "${ONLY_PATH}" in */utils/marketplace/*|*/commands/*|*/validation/*.sh) : ;; *) return 0 ;; esac; fi
   local vdir="${SCRIPT_DIR}/../utils/marketplace/verticals"
@@ -4705,7 +4708,6 @@ check_harvest_names_removed_nodes
 check_compose_exposure
 check_claude_md_counts
 check_site_inventory_sync
-check_plugins_sync
 check_capability_conformance
 check_role_bundle_sync
 check_moat_boundary
@@ -4888,7 +4890,7 @@ check_kg_source_tier_confidence() {
 #   escrever o que DERRUBOU. Sem a reconciliacao, o corpus superado segue vencendo a revisita da
 #   REGRA 67 para sempre, e cada rodada nova adiciona mais um orfao. Medido 2026-09-23: 2 de 6.
 # A guarda vive em `radar-aufhebung-check.sh` (o POR QUE inteiro esta la, inclusive a razao de ela
-# aceitar `supersedes_none`/`supersedes_external`). Extraida em vez de inline por dois motivos: e o
+# aceitar `supersedes_none` e `external_edges` com SUPERSEDES, contrato v4.3). Extraida em vez de inline por dois motivos: e o
 # molde da casa (door-staleness, identifier-language), e a bancada consegue exercita-la em segundos
 # em vez de rodar o lint INTEIRO quatro vezes — a 1a versao inline custava 12+ min numa familia so.
 _R89_BASE="${REPO_ROOT}/.claude/validation/radar-aufhebung-baseline.txt"
@@ -4933,7 +4935,7 @@ check_radar_aufhebung() {
           : # passivo conhecido, contabilizado no resumo abaixo
         else
           fresh=$((fresh + 1))
-          violation "HARD" "${val}" "REGRA 89 (Rodada de radar selada reconcilia o corpus que superou (Aufhebung), com catraca): rodada selada SEM Aufhebung e FORA do baseline — a catraca SO ENCOLHE. Reconcilie (no novo + SUPERSEDES datado), ou declare no bloco meta 'supersedes_none: <razao>' se nao derrubou nada, ou 'supersedes_external: <grafo>#<no>' (a aresta do motor e INTRA-arquivo, entao rodada em grafo proprio registra a Aufhebung cross-file assim). Declaracao SEM VALOR nao conta"
+          violation "HARD" "${val}" "REGRA 89 (Rodada de radar selada reconcilia o corpus que superou (Aufhebung), com catraca): rodada selada SEM Aufhebung e FORA do baseline — a catraca SO ENCOLHE. Reconcilie (no novo + SUPERSEDES datado), ou declare no bloco meta 'supersedes_none: <razao>' se nao derrubou nada, ou, se a Aufhebung e cross-file, 'external_edges:' no topo com '- to: <grafo>#<no>' e 'edge_type: SUPERSEDES' (contrato v4.3; a chave velha supersedes_external nao conta mais: migre com kg-migrate-v3.py --external-edges). Declaracao SEM VALOR nao conta"
         fi
         ;;
     esac
@@ -5050,136 +5052,27 @@ check_commands_without_model() {
 }
 
 # ===========================================================================
-# REGRA 72 — Namespace de comando em plugin é /<plugin>:<cmd>, nunca o do core [HARD]
-# previne: comando empacotado citando `/engineer:pr` — ponteiro que não resolve no consumidor
-#   Um comando instalado por plugin é `/<plugin>:<cmd>`. Medido 2026-09-04: 531 referências ao
-#   namespace do core dentro de plugins/ (208 cross-plugin, 194 mesmo-plugin, 129 dangling p/ a
-#   meta-fábrica) e ZERO na forma do plugin — o lint era cego porque só varria .claude/ + docs/,
-#   onde `/engineer:pr` resolve. A CURA é determinística e vive no gerador (assemble-plugin.sh →
-#   NAMESPACE-PORTABILITY via plugin-namespace-check.sh --rewrite), por isso HARD sem baseline:
-#   catraca só faz sentido quando a cura é manual. Toda a lógica (mapa derivado de TODOS os
-#   manifestos, regex, classes) vive em plugin-namespace-check.sh — um só lugar.
-# ===========================================================================
-check_plugin_namespace() {
-  local helper="${SCRIPT_DIR}/plugin-namespace-check.sh"
-  [ "${IS_DERIVED}" -eq 1 ] && return 0
-  [ -f "${helper}" ] || return 0
-  [ -d "${REPO_ROOT}/plugins" ] || return 0
-  if [ -n "${ONLY_PATH}" ]; then
-    case "${ONLY_PATH}" in
-      "${REPO_ROOT}"/plugins/*|*/verticals/*.manifest.sh|*/assemble-plugin.sh|*/plugin-namespace-check.sh) : ;;
-      *) return 0 ;;
-    esac
-  fi
-  local out sev cls path msg
-  out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>/dev/null || true)"
-  [ -n "${out}" ] || return 0
-  while IFS=$'\t' read -r sev cls path msg; do
-    [ -n "${sev}" ] || continue
-    violation "HARD" "${REPO_ROOT}/${path}" "[plugin-namespace/${cls}] ${msg} — regenere: bash .claude/utils/marketplace/assemble-plugin.sh <manifesto>"
-  done <<< "${out}"
-}
-
-# ===========================================================================
-# REGRA 73 — Hook empacotado resolve no plugin instalado [HARD]
-# previne: hook morto e silencioso no plugin (script ausente, motor não embarcado, caminho $REPO/${CLAUDE_PLUGIN_ROOT}, matcher perdido)
-#   Medido 2026-09-04: plugins/onion/hooks/aside-router-hook.sh montava ENGINE="$REPO/${CLAUDE_PLUGIN_ROOT}/…"
-#   (variável absoluta prefixada) e o motor aside-router.sh não viajava; `[ -f ] || exit 0` engolia os
-#   dois erros. E o hooks.json gerado descartava o matcher `Bash` do core (PostToolUse em TODA tool).
-#   Lógica em plugin-hooks-check.sh. HARD sem baseline: o hook do core resolve o motor pelo próprio
-#   diretório, o manifesto embarca o motor e o gerador carrega o matcher — cura no gerador + fonte.
-# ===========================================================================
-check_plugin_hooks_resolvable() {
-  local helper="${SCRIPT_DIR}/plugin-hooks-check.sh"
-  [ "${IS_DERIVED}" -eq 1 ] && return 0
-  [ -f "${helper}" ] || return 0
-  [ -d "${REPO_ROOT}/plugins" ] || return 0
-  if [ -n "${ONLY_PATH}" ]; then
-    case "${ONLY_PATH}" in
-      "${REPO_ROOT}"/plugins/*|*/verticals/*.manifest.sh|*/assemble-plugin.sh|*/plugin-hooks-check.sh|"${REPO_ROOT}"/.claude/hooks/*|"${REPO_ROOT}"/.claude/settings.json) : ;;
-      *) return 0 ;;
-    esac
-  fi
-  local out sev cls path msg
-  out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>/dev/null || true)"
-  [ -n "${out}" ] || return 0
-  while IFS=$'\t' read -r sev cls path msg; do
-    [ -n "${sev}" ] || continue
-    violation "HARD" "${REPO_ROOT}/${path}" "[plugin-hook/${cls}] ${msg}"
-  done <<< "${out}"
-}
-
-# ===========================================================================
-# REGRA 74 — Caminho .claude/ NU dentro de plugin só resolve no core, com catraca [HARD + SOFT]
-# previne: comando/agente empacotado apontando .claude/{utils,commands,templates,…} que não viajou — ponteiro morto no consumidor
-#   Medido 2026-09-04: 124 refs nuas em 7/8 plugins (c4-templates, task-manager, templates de
-#   contexto, common:prompts:*), 7 delas em allowed-tools (o comando NASCE MORTO). O PATH-PORTABILITY
-#   só reescreve o que o manifesto embarca. A cura é de manifesto/fonte — manual — logo CATRACA:
-#   passivo no baseline = SOFT; novo = HARD; baseline só encolhe (CATRACA-VIOLADA vs origin/main).
-#   Lógica em plugin-bare-path-check.sh; baseline em plugin-bare-path-baseline.txt.
-# ===========================================================================
-check_plugin_bare_paths() {
-  local helper="${SCRIPT_DIR}/plugin-bare-path-check.sh"
-  [ "${IS_DERIVED}" -eq 1 ] && return 0
-  [ -f "${helper}" ] || return 0
-  [ -d "${REPO_ROOT}/plugins" ] || return 0
-  if [ -n "${ONLY_PATH}" ]; then
-    case "${ONLY_PATH}" in
-      "${REPO_ROOT}"/plugins/*|*/verticals/*.manifest.sh|*/assemble-plugin.sh|*/plugin-bare-path-check.sh|*/plugin-bare-path-baseline.txt) : ;;
-      *) return 0 ;;
-    esac
-  fi
-  local out sev cls path msg
-  out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>/dev/null || true)"
-  [ -n "${out}" ] || return 0
-  while IFS=$'\t' read -r sev cls path msg; do
-    [ -n "${sev}" ] || continue
-    violation "${sev}" "${REPO_ROOT}/${path}" "[plugin-bare-path/${cls}] ${msg}"
-  done <<< "${out}"
-}
-
-# ===========================================================================
-# REGRA 75 — Link markdown relativo dentro de plugin resolve no plugin [HARD]
-# previne: `[irmã](../kb/x.md)` num plugin apontando para arquivo que não viajou — 404 no consumidor
-#   Medido 2026-09-04: 123 links relativos mortos em 5/8 plugins (o assembler só curava kb/ e irmãs no
-#   mesmo diretório). Cura generalizada no gerador (plugin-dead-link-check.sh --rewrite: link → texto do
-#   título; templates/ fora por desenho). HARD sem baseline: a cura vive no gerador.
-# ===========================================================================
-check_plugin_dead_links() {
-  local helper="${SCRIPT_DIR}/plugin-dead-link-check.sh"
-  [ "${IS_DERIVED}" -eq 1 ] && return 0
-  [ -f "${helper}" ] || return 0
-  [ -d "${REPO_ROOT}/plugins" ] || return 0
-  if [ -n "${ONLY_PATH}" ]; then
-    case "${ONLY_PATH}" in
-      "${REPO_ROOT}"/plugins/*|*/verticals/*.manifest.sh|*/assemble-plugin.sh|*/plugin-dead-link-check.sh) : ;;
-      *) return 0 ;;
-    esac
-  fi
-  local out sev cls path msg
-  out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>/dev/null || true)"
-  [ -n "${out}" ] || return 0
-  while IFS=$'\t' read -r sev cls path msg; do
-    [ -n "${sev}" ] || continue
-    violation "HARD" "${REPO_ROOT}/${path}" "[plugin-link/${cls}] ${msg} — regenere: bash .claude/utils/marketplace/assemble-plugin.sh <manifesto>"
-  done <<< "${out}"
-}
-
-# ===========================================================================
-# REGRA 76 — marketplace.json da raiz é projeção do gerador [HARD]
-# previne: .claude-plugin/marketplace.json envelhecendo calado (o core também é marketplace instalável)
+# REGRA 76 — marketplace.json da raiz aponta o repo PÚBLICO e é projeção dos manifestos [HARD]
+# previne: .claude-plugin/marketplace.json envelhecendo calado ou apontando um plugins/ local que o core não guarda mais
 #   Medido 2026-09-04: o arquivo estava no formato pré-2026-09-04 (version 0.1.0 em todas as entradas,
-#   sem displayName/category/tags) e nenhuma guarda o comparava ao gerador (a REGRA 37 só faz grep).
-#   Mesma classe da REGRA 62. Cura: o pre-commit regenera junto com os plugins (marketplace-root-check.sh
-#   --write, temp+mv — redirecionar direto TRUNCA o arquivo antes de o gerador ler o top-level).
+#   sem displayName/category/tags) e nenhuma guarda o comparava ao gerador (a REGRA 37 (Mapa role→bundle (roles.yaml) consistente com os verticais) só faz grep).
+#   Mesma classe da REGRA 62 (Projeção GERADA em sincronia com a fonte (docs/backlog.md)). REPENSADA na F4 das portas (2026-10-10, SAC-93): o `plugins/` versionado
+#   saiu do core, e a raiz deixou de listar `./plugins/<nome>`. Agora ela é a projeção dos MANIFESTOS
+#   (`generate-marketplace.sh --from-manifests`), com `source` apontando o subdiretório do plugin no repo
+#   público — instalar pela raiz instala o PUBLICADO. Depende só de manifesto + face pública, então um PR
+#   que muda o corpo de uma fonte bundlada não a toca. A metade da PUBLICAÇÃO (o catálogo do bundle bate
+#   com a raiz) roda no /meta:publish onion-plugins (plugin-bundle-check.sh). Cura:
+#   marketplace-root-check.sh --write (temp+mv — redirecionar direto TRUNCA o arquivo antes de o gerador
+#   ler o top-level); o pre-commit regenera quando um manifesto entra no commit.
 # ===========================================================================
 check_marketplace_root_sync() {
   local helper="${SCRIPT_DIR}/marketplace-root-check.sh"
   [ "${IS_DERIVED}" -eq 1 ] && return 0
+  _publishes_marketplace || return 0     # porta que não publica o catálogo (standalone/mini) — F2 das portas
   [ -f "${helper}" ] || return 0
   if [ -n "${ONLY_PATH}" ]; then
     case "${ONLY_PATH}" in
-      "${REPO_ROOT}"/plugins/*|"${REPO_ROOT}"/.claude-plugin/marketplace.json|*/generate-marketplace.sh|*/marketplace-root-check.sh) : ;;
+      "${REPO_ROOT}"/.claude-plugin/marketplace.json|*/verticals/*.manifest.sh|*/generate-marketplace.sh|*/public-face.sh|*/marketplace-root-check.sh) : ;;
       *) return 0 ;;
     esac
   fi
@@ -5190,6 +5083,33 @@ check_marketplace_root_sync() {
     [ -n "${sev}" ] || continue
     violation "HARD" "${REPO_ROOT}/${path}" "[marketplace-raiz/${cls}] ${msg}"
   done <<< "${out}"
+}
+
+# ===========================================================================
+# REGRA 74 — Caminho .claude/ NU dentro de plugin só resolve no core, com catraca [HARD + SOFT]
+# previne: baseline de passivo crescendo calado — um PR transformava ref NOVA (HARD) em PASSIVO (SOFT) acrescentando linha
+#   F4 das portas (2026-10-10): a varredura dos plugins MONTADOS saiu para a publicação (plugin-bundle-check.sh,
+#   passo 5d do /meta:publish), porque o core não versiona mais plugins/. A CATRACA ficou aqui — a passada
+#   adversarial da F4 mediu que ela tinha sumido de todo gate (achado I2): a raiz temporária da publicação não
+#   é repo git, e nada mais comparava o baseline com origin/main. A catraca não precisa de bundle: compara
+#   `plugin-bare-path-baseline.txt` com o de origin/main e reprova se CRESCEU. Só ela é julgada aqui.
+# ===========================================================================
+check_plugin_bare_path_ratchet() {
+  local helper="${SCRIPT_DIR}/plugin-bare-path-check.sh"
+  [ "${IS_DERIVED}" -eq 1 ] && return 0
+  _publishes_marketplace || return 0
+  [ -f "${helper}" ] || return 0
+  [ -f "${SCRIPT_DIR}/plugin-bare-path-baseline.txt" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in */plugin-bare-path-baseline.txt|*/plugin-bare-path-check.sh) : ;; *) return 0 ;; esac
+  fi
+  local out sev cls path msg
+  out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>/dev/null || true)"
+  while IFS=$'\t' read -r sev cls path msg; do
+    [ "${cls}" = "CATRACA-VIOLADA" ] || continue
+    violation "HARD" "${REPO_ROOT}/${path}" "[plugin-bare-path/${cls}] ${msg}"
+  done <<< "${out}"
+  return 0
 }
 
 # ===========================================================================
@@ -5305,39 +5225,6 @@ check_kg_census_parity() {
   return 0
 }
 
-# ===========================================================================
-# REGRA 77 — Contrato de dependência entre plugins [HARD + SOFT]
-# previne: dois plugins embarcando a mesma skill/KB (cópias divergem) ou um plugin usando skill que só outro embarca sem declarar
-#   Medido 2026-09-04: onion e onion-work-tools embarcavam a mesma skill, o mesmo motor (3 md5) e a mesma
-#   KB; nenhum capability.json declarava outro PLUGIN. A consolidação 8→5 sumiu com a duplicação; esta
-#   regra impede que volte: (HARD) conhecimento duplicado (skills/, kb/), skill de outro plugin sem
-#   REQUIRES_PLUGINS, REQUIRES_PLUGINS sem reflexo em capability.json/README; (SOFT, 1 linha agregada)
-#   menções cruzadas de comando — informativas, o README lista em "Funciona melhor com". Motores em
-#   validation/utils viajam com quem os chama (um plugin só alcança a própria raiz) e não são duplicata.
-#   Lógica em plugin-deps-check.sh.
-# ===========================================================================
-check_plugin_deps_contract() {
-  local helper="${SCRIPT_DIR}/plugin-deps-check.sh"
-  [ "${IS_DERIVED}" -eq 1 ] && return 0
-  [ -f "${helper}" ] || return 0
-  [ -d "${REPO_ROOT}/plugins" ] || return 0
-  if [ -n "${ONLY_PATH}" ]; then
-    case "${ONLY_PATH}" in
-      "${REPO_ROOT}"/plugins/*|*/verticals/*.manifest.sh|*/assemble-plugin.sh|*/plugin-deps-check.sh|*/plugin-readme.sh) : ;;
-      *) return 0 ;;
-    esac
-  fi
-  local out sev cls path msg soft=0
-  out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>/dev/null || true)"
-  [ -n "${out}" ] || return 0
-  while IFS=$'\t' read -r sev cls path msg; do
-    [ -n "${sev}" ] || continue
-    if [ "${sev}" = "SOFT" ]; then soft=$((soft+1)); continue; fi
-    violation "HARD" "${REPO_ROOT}/${path}" "[plugin-deps/${cls}] ${msg}"
-  done <<< "${out}"
-  [ "${soft}" -gt 0 ] && violation "SOFT" "${REPO_ROOT}/plugins" "[plugin-deps/MENCAO-CRUZADA] ${soft} par(es) de plugins com menção cruzada de comando — informativo (o README lista em 'Funciona melhor com'; detalhe: bash .claude/validation/plugin-deps-check.sh)"
-  return 0
-}
 check_commands_without_model
 check_research_kg_review_after
 check_kg_source_tier_confidence
@@ -5395,7 +5282,6 @@ check_projection_safety
 check_federation_projection
 check_migalhas_sync
 check_site_no_private_deeplinks
-check_plugin_no_private_source_url
 check_vendored_surface_clean
 check_vendored_surface_form
 check_frontmatter_model_category
@@ -5405,14 +5291,10 @@ check_family_topology_sync
 check_federation_outbox_membership
 check_kg_narration_valid
 check_backtick_path_refs
-check_plugin_namespace
-check_plugin_hooks_resolvable
-check_plugin_bare_paths
-check_plugin_dead_links
 check_kg_yaml_validity
 check_kg_census_parity
 check_marketplace_root_sync
-check_plugin_deps_contract
+check_plugin_bare_path_ratchet
 
 # REGRA 96 — Diretiva de contexto INJETADO não corta listagem em silêncio [HARD]
 # previne: a projeção que o harness injeta é lida pela sessão COMO SE FOSSE o conjunto — não há
@@ -5538,6 +5420,40 @@ check_cited_directive_live() {
   fi
 }
 check_cited_directive_live
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGRA 99 (Nó de .kg.yaml sem caminho de máquina, julgado pela classe) — HARD, com catraca
+#   DANO MEDIDO (SAC-103): as ondas O4 a O7 da migração de provenance (SAC-73, 2026-10-09/10) tiraram do
+#   corpus o caminho de máquina — 247 ocorrências em 180 nós no corpus de 2026-10-08, medidas pela classe
+#   desta regra — e nada impedia que ele voltasse. A régua das ondas era uma LISTA de diretórios, que errou
+#   pelo vocabulário dos dois lados. A classe e as isenções seladas (P3, P4, A4, A6) moram em
+#   .claude/utils/kg/machine_path.py; a catraca, em kg-machine-path-check.sh (passivo hoje: ZERO; 3 nós
+#   isentos por x_path_is_content). O kg-contract-check.sh cobra o mesmo no grafo NOVO, antes do commit.
+check_kg_machine_path() {
+  local helper="${SCRIPT_DIR}/kg-machine-path-check.sh"
+  [ -f "${helper}" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      *.kg.yaml|*/kg-machine-path-check.sh|*/kg-machine-path-baseline.txt|*/utils/kg/machine_path.py|*/lint-artifacts.sh) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  local _out _hrc=0 _err
+  _err="$(mktemp 2>/dev/null || echo /dev/null)"
+  if _out="$(bash "${helper}" "${REPO_ROOT}" --tsv 2>"${_err}")"; then _hrc=0; else _hrc=$?; fi
+  while IFS=$'\t' read -r _sev _code _path _msg; do
+    [ -n "${_path:-}" ] || continue
+    case "${_path}" in /*) : ;; *) _path="${REPO_ROOT}/${_path#./}" ;; esac
+    violation "${_sev:-SOFT}" "${_path}" "REGRA 99 (Nó de .kg.yaml sem caminho de máquina, julgado pela classe): [${_code}] ${_msg}"
+  done <<< "${_out}"
+  # helper >=2 ⇒ declarou que NAO pode julgar; rc!=0 sem linha também (morte calada). Nunca aprovação.
+  if [ "${_hrc}" -ge 2 ] || { [ "${_hrc}" -ne 0 ] && [ -z "${_out}" ]; }; then
+    violation "HARD" "${REPO_ROOT}/.claude/validation/kg-machine-path-check.sh" "REGRA 99 (Nó de .kg.yaml sem caminho de máquina, julgado pela classe): a guarda NÃO RODOU (rc=${_hrc}: $(head -1 "${_err}" 2>/dev/null)) — o corpus não foi verificado; isto não é aprovação"
+  fi
+  [ "${_err}" = /dev/null ] || rm -f "${_err}"
+  return 0
+}
+check_kg_machine_path
 
 # ===========================================================================
 # SUMÁRIO FINAL
