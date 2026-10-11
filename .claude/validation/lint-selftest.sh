@@ -182,7 +182,7 @@ SELFTEST_QUEUE="${ONION_SELFTEST_QUEUE:-}"; SELFTEST_SHARD="${ONION_SELFTEST_SHA
 SELFTEST_FIXTURES_LANE="${ONION_SELFTEST_FIXTURES_LANE:-}"
 # papel do repo (core | adopted): lido do stamp; ausente = core. Famílias/fixtures core-only pulam com ⊘ no adotante.
 SELFTEST_ROLE="$(awk -F': *' '/^role:/{print $2; exit}' "${REPO_ROOT}/.claude/.onion-version" 2>/dev/null || true)"
-SELFTEST_CORE_ONLY_FAMILIES="testing_state,ci_evidence,selftest_series,harness_inventory,resolve_target,kg_coverage,backlog_projection,radar_staleness,members_registry,research_lens,research_workflow,reconcile_inputs,regen_baselines,capability,role_bundle,outbox_channel,moat_boundary,materialize_repo,rules_registry"
+SELFTEST_CORE_ONLY_FAMILIES="testing_state,ci_evidence,selftest_series,harness_inventory,resolve_target,kg_coverage,backlog_projection,radar_staleness,members_registry,research_lens,research_workflow,reconcile_inputs,regen_baselines,capability,role_bundle,outbox_channel,moat_boundary,materialize_repo,rules_registry,ops_citation_travel"
 # HERMÉTICA POR CONSTRUÇÃO (mesma doutrina do unset de GIT_DIR acima): as variáveis de worker foram CONSUMIDAS;
 # se ficassem exportadas, uma família que invoca a bancada (selftest_lanes) herdaria fila/shard/child do pai e a
 # bancada aninhada viraria um worker mudo — foi o que matou o worker 4 no 3º dogfood (2026-09-03).
@@ -1051,6 +1051,60 @@ run_kg_freshness_selftests() {
     else record_fail "kg-freshness: (t) (MUT)" "a restrição por tipo não mudou o veredito; out=${mmis}"; fi
   else
     record_fail "kg-freshness: (t) (MUT)" "a mutação NÃO foi aplicada — o teste não prova nada"
+  fi
+
+  # ── sentido da palavra `commit` (sinal de campo de um adotante, 2026-10-11) ──
+  # O DETERMINISTIC_GATE dele carimbava "commit-sonda que o gate barrou" (execução ao vivo) e
+  # levava MISPLANED. As duas polaridades: execução cala; `commit <sha>` segue acusando, inclusive
+  # na frase MISTA e com verbo de execução logo antes do sha.
+  # (u) execução cala.
+  if ! grep -qE 'MISPLANED: (E_PROD_COMMIT_SONDA_BARRADO|E_PROD_HOOK_BLOQUEIA_O_COMMIT)' <<<"${out}"; then
+    record_pass "kg-freshness: (u) commit-sonda barrado e hook que bloqueia o commit NÃO disparam (execução, não leitura)"
+  else record_fail "kg-freshness: (u) falso-positivo do commit de execução" "out=${out}"; fi
+
+  # (v) `commit <sha>` acusa sempre — a cura é por ocorrência, não por nó.
+  if grep -q 'MISPLANED: C_PROD_SONDA_MAS_LEU_COMMIT_SHA' <<<"${out}" \
+     && grep -q 'MISPLANED: C_PROD_REPROVADO_NO_COMMIT_SHA' <<<"${out}" \
+     && grep -q 'MISPLANED: C_PROD_REVISOR_REPROVOU_LENDO_O_DIFF' <<<"${out}" \
+     && grep -q 'MISPLANED: C_PROD_DESBLOQUEADO_O_COMMIT' <<<"${out}"; then
+    record_pass "kg-freshness: (v) commit <sha> (até entre crases), revisor que reprova lendo o diff e desbloqueado seguem acusando"
+  else record_fail "kg-freshness: (v) a cura escondeu leitura de fonte" "out=${out}"; fi
+
+  # (w) (MUT) sem o filtro de sentido, o commit-sonda VOLTA a disparar — reproduz o sinal.
+  cp "${radar}" "${mut}/mut-sense.sh"; _lib_beside "${mut}"
+  sed -i 's/ \&\& misplanedSourceRead(verifiedAgainst\[id\])) {/) {/' "${mut}/mut-sense.sh"
+  if ! grep -q '&& misplanedSourceRead(verifiedAgainst' "${mut}/mut-sense.sh"; then
+    local msen; msen="$(bash "${mut}/mut-sense.sh" "${fxm}" --freshness 2>&1 || true)"
+    if grep -q 'MISPLANED: E_PROD_COMMIT_SONDA_BARRADO' <<< "${msen}"; then
+      record_pass "kg-freshness: (w) (MUT) sem o filtro de sentido o commit-sonda volta a disparar — reproduz o sinal"
+    else record_fail "kg-freshness: (w) (MUT)" "remover o filtro não mudou o veredito; out=${msen}"; fi
+  else
+    record_fail "kg-freshness: (w) (MUT)" "a mutação NÃO foi aplicada — o teste não prova nada"
+  fi
+
+  # (x) (MUT) sem o atalho do `commit <sha>`, a limpeza de sentido apaga "reprovou o commit <sha>"
+  # e o nó CALA — prova que o atalho é o que impede a cura de esconder leitura de fonte.
+  cp "${radar}" "${mut}/mut-sha.sh"; _lib_beside "${mut}"
+  sed -i 's/  if (w ~ \/(^|\[^a-z\])commit\[^0-9a-z\]{1,3}\[0-9a-f\]{7,40}(\[^0-9a-z\]|\$)\/) return 1/  if (0) return 1/' "${mut}/mut-sha.sh"
+  if grep -q '  if (0) return 1' "${mut}/mut-sha.sh"; then
+    local msha; msha="$(bash "${mut}/mut-sha.sh" "${fxm}" --freshness 2>&1 || true)"
+    if ! grep -q 'MISPLANED: C_PROD_REPROVADO_NO_COMMIT_SHA' <<< "${msha}"; then
+      record_pass "kg-freshness: (x) (MUT) sem o atalho do commit <sha> a leitura de fonte some — o atalho é load-bearing"
+    else record_fail "kg-freshness: (x) (MUT)" "remover o atalho não mudou o veredito; out=${msha}"; fi
+  else
+    record_fail "kg-freshness: (x) (MUT)" "a mutação NÃO foi aplicada — o teste não prova nada"
+  fi
+
+  # (y) (MUT) sem a âncora à esquerda do radical, `desbloqueado o commit` vira commit barrado e CALA.
+  cp "${radar}" "${mut}/mut-anchor.sh"; _lib_beside "${mut}"
+  sed -i 's/gsub(\/(^|\[^a-z\])(barr|recus|bloque)/gsub(\/(barr|recus|bloque)/' "${mut}/mut-anchor.sh"
+  if grep -q 'gsub(/(barr|recus|bloque)' "${mut}/mut-anchor.sh"; then
+    local manc; manc="$(bash "${mut}/mut-anchor.sh" "${fxm}" --freshness 2>&1 || true)"
+    if ! grep -q 'MISPLANED: C_PROD_DESBLOQUEADO_O_COMMIT' <<< "${manc}"; then
+      record_pass "kg-freshness: (y) (MUT) sem a âncora do radical, desbloqueado cala — a âncora é load-bearing"
+    else record_fail "kg-freshness: (y) (MUT)" "remover a âncora não mudou o veredito; out=${manc}"; fi
+  else
+    record_fail "kg-freshness: (y) (MUT)" "a mutação NÃO foi aplicada — o teste não prova nada"
   fi
 }
 
@@ -2755,6 +2809,107 @@ MEOF
   if ! bash "${helper}" --terms "${tmp}/nao-existe.txt" "${tmp}/surface" >/dev/null 2>&1; then
     record_pass "projection-safety: (T3) --terms ausente → HARD (P0, mesma disciplina do members)"
   else record_fail "projection-safety: (T3)" "sem lista de termos a guarda passou verde — proteção fantasma"; fi
+
+  # ── P7 (SAC-99, 2026-10-11) — IDS DE NÓ e CAMINHOS DE GRAFO (`--kg-identifiers`) ──────────────
+  # O defeito VERBATIM na forma (onda O4): um id `Q_<pasta>_MAIN_DIVERGIU` e um grafo
+  # `<pasta>-update-547-2026-10/` com o nome da pasta privada de um hub cujo id é slug neutro — e o nome
+  # só constava do client-terms.txt, que esta guarda não lia. Termos INVENTADOS (Fantasia, Beta Co).
+  # Roda como o lint roda: `--kg-identifiers --format tsv <raiz>`, contando as linhas HARD.
+  mkdir -p "${tmp}/kg/fantasia-update-547-2026-10" "${tmp}/kg/limpo"
+  printf '# lista declarada (fixture)\nFantasia\nopenly-public\nBeta Co\n' > "${tmp}/client-terms.txt"
+  _p7_graph() {  # $1 = id de um nó · $2 = label (o resto é fixo)
+    printf 'meta:\n  id: limpo\n  schema_version: "1"\nnodes:\n  - id: %s\n    node_type: question\n    status: open\n    label: "%s"\n' "$1" "$2"
+  }
+  _p7() {  # → imprime a saída tsv do helper sobre ${tmp}/kg
+    bash "${helper}" --kg-identifiers --format tsv --members "${tmp}/members.yaml" "${tmp}/kg" 2>/dev/null || true
+  }
+  local p7o
+  # (P7a) id de nó com o nome DECLARADO só no client-terms → HARD ID-NO, pela LINHA, sem ecoar o id no log
+  _p7_graph Q_FANTASIA_MAIN_DIVERGIU "pergunta" > "${tmp}/kg/limpo/limpo.kg.yaml"
+  p7o="$(_p7)"
+  if LC_ALL=C grep -q $'^HARD\tID-NO\t.*limpo.kg.yaml\tid na linha 5 ' <<< "${p7o}" && ! grep -qi 'fantasia_main' <<< "${p7o}"; then
+    record_pass "projection-safety: (P7a) id de nó com nome declarado no client-terms → HARD ID-NO pela linha (o id não vaza no log)"
+  else record_fail "projection-safety: (P7a)" "esperava HARD ID-NO na linha 5 sem ecoar o id: ${p7o:0:300}"; fi
+  # (P7b) CAMINHO do grafo com o nome declarado → HARD NOME-GRAFO
+  _p7_graph Q_NEUTRO "pergunta" > "${tmp}/kg/limpo/limpo.kg.yaml"
+  _p7_graph Q_NEUTRO "pergunta" > "${tmp}/kg/fantasia-update-547-2026-10/fantasia-update-547-2026-10.kg.yaml"
+  p7o="$(_p7)"
+  if LC_ALL=C grep -q $'^HARD\tNOME-GRAFO\t.*fantasia-update-547-2026-10.kg.yaml' <<< "${p7o}" \
+     && ! LC_ALL=C grep -q $'\t.*limpo.kg.yaml\t' <<< "${p7o}"; then
+    record_pass "projection-safety: (P7b) caminho de grafo com nome declarado → HARD NOME-GRAFO (o grafo limpo cala)"
+  else record_fail "projection-safety: (P7b)" "esperava NOME-GRAFO só no grafo do caminho sujo: ${p7o:0:300}"; fi
+  rm -rf "${tmp}/kg/fantasia-update-547-2026-10"
+  # (P7c) POLARIDADE HONESTA — o termo declarado que É id público de membro (openly-public) no id de nó, e o
+  #       nome declarado DENTRO DO LABEL (o selo da O7 mantém domínio e arquivo de deploy verbatim) → cala
+  _p7_graph Q_OPENLY_PUBLIC_ATUALIZOU "rota fantasia.exemplo.com no vhost fantasia.caddy" > "${tmp}/kg/limpo/limpo.kg.yaml"
+  p7o="$(_p7)"
+  if ! LC_ALL=C grep -q '^HARD' <<< "${p7o}"; then
+    record_pass "projection-safety: (P7c) id público de membro no id e nome declarado só no label → cala (sem falso positivo)"
+  else record_fail "projection-safety: (P7c)" "falso positivo no id público ou no label: ${p7o:0:300}"; fi
+  # (P7d) termo DERIVADO do members.yaml (a anotação CONFIDENCIAL) também alimenta o P7
+  _p7_graph E_ACMECORP_VEREDITO "evidência" > "${tmp}/kg/limpo/limpo.kg.yaml"
+  p7o="$(_p7)"
+  if LC_ALL=C grep -q $'^HARD\tID-NO\t' <<< "${p7o}"; then
+    record_pass "projection-safety: (P7d) nome derivado do members.yaml num id de nó → HARD ID-NO"
+  else record_fail "projection-safety: (P7d)" "o termo derivado não chegou ao P7: ${p7o:0:300}"; fi
+  # (P7e) NORMALIZAÇÃO — termo com espaço (Beta Co) acha o id com `_` (E_BETA_CO_X)
+  _p7_graph E_BETA_CO_X "evidência" > "${tmp}/kg/limpo/limpo.kg.yaml"
+  p7o="$(_p7)"
+  if LC_ALL=C grep -q $'^HARD\tID-NO\t' <<< "${p7o}"; then
+    record_pass "projection-safety: (P7e) termo com espaço acha o id com sublinhado (normalização)"
+  else record_fail "projection-safety: (P7e)" "a normalização não casou Beta Co com E_BETA_CO_X: ${p7o:0:300}"; fi
+  # (P7g) termo CURTO (<=4) só casa como token inteiro: `Qux` acusa E_QUX_X e cala em E_QUXE_ORDER
+  #       (o falso positivo de sigla dentro de palavra alheia, medido pelo refutador de 2026-10-11)
+  printf '# lista (fixture)\nQux\nFooBar\n' > "${tmp}/client-terms.txt"
+  _p7_graph E_QUXE_ORDER "evidência" > "${tmp}/kg/limpo/limpo.kg.yaml"
+  p7o="$(_p7)"
+  local p7o2
+  _p7_graph E_QUX_X "evidência" > "${tmp}/kg/limpo/limpo.kg.yaml"
+  p7o2="$(_p7)"
+  if ! LC_ALL=C grep -q '^HARD' <<< "${p7o}" && LC_ALL=C grep -q $'^HARD\tID-NO\t' <<< "${p7o2}"; then
+    record_pass "projection-safety: (P7g) termo curto casa só como token (E_QUX_X acusa, E_QUXE_ORDER cala)"
+  else record_fail "projection-safety: (P7g)" "termo curto: esperava calar em E_QUXE_ORDER e acusar E_QUX_X: [${p7o:0:150}] [${p7o2:0:150}]"; fi
+  # (P7j) termo CURTO no CAMINHO (qux-relay-2026-10/) acusa: a normalização faz de `-` e `/` borda de token.
+  #       Sem ela o termo curto nunca casaria em caminho (é o caso que prova a normalização, já que a forma
+  #       espremida cobre o termo longo sozinha).
+  _p7_graph E_QUXE_ORDER "evidência" > "${tmp}/kg/limpo/limpo.kg.yaml"
+  mkdir -p "${tmp}/kg/qux-relay-2026-10"
+  _p7_graph Q_NEUTRO "pergunta" > "${tmp}/kg/qux-relay-2026-10/qux-relay-2026-10.kg.yaml"
+  p7o="$(_p7)"
+  if LC_ALL=C grep -q $'^HARD\tNOME-GRAFO\t.*qux-relay-2026-10.kg.yaml' <<< "${p7o}"; then
+    record_pass "projection-safety: (P7j) termo curto no caminho do grafo → NOME-GRAFO (- e / são borda de token)"
+  else record_fail "projection-safety: (P7j)" "termo curto no caminho escapou: ${p7o:0:200}"; fi
+  rm -rf "${tmp}/kg/qux-relay-2026-10"
+  # (P7h) nome comercial em camelCase partido em tokens (FooBar → E_FOO_BAR_X) acusa pela forma espremida
+  _p7_graph E_FOO_BAR_X "evidência" > "${tmp}/kg/limpo/limpo.kg.yaml"
+  p7o="$(_p7)"
+  if LC_ALL=C grep -q $'^HARD\tID-NO\t' <<< "${p7o}"; then
+    record_pass "projection-safety: (P7h) nome partido em tokens (FooBar em E_FOO_BAR_X) → HARD pela forma espremida"
+  else record_fail "projection-safety: (P7h)" "o nome partido em tokens escapou: ${p7o:0:200}"; fi
+  # (P7i) `id:` citado DENTRO de bloco escalar (narrative: |) é texto, não id → cala
+  { _p7_graph Q_NEUTRO "pergunta"; printf '    narrative: |\n      id: E_FOOBAR_CITADO\n'; } > "${tmp}/kg/limpo/limpo.kg.yaml"
+  p7o="$(_p7)"
+  if ! LC_ALL=C grep -q '^HARD' <<< "${p7o}"; then
+    record_pass "projection-safety: (P7i) id citado dentro de bloco escalar cala (é texto, não chave)"
+  else record_fail "projection-safety: (P7i)" "falso positivo em bloco escalar: ${p7o:0:200}"; fi
+  # (P7f) o DISPATCHER, como o runner o invoca: o lint-artifacts.sh de verdade num repo-sandbox (members,
+  #       client-terms e um grafo de pesquisa sujo em docs/) → [projeção/ID-NO]; o grafo limpo → silêncio.
+  #       Exercita o caminho inteiro (IS_LEAF, o --only, a chamada, a leitura do tsv), não a string no fonte.
+  local sbx; sbx="$(mktemp -d)"; sbx="$(cd "${sbx}" && pwd -P)"
+  mkdir -p "${sbx}/.claude/validation" "${sbx}/docs/evolution/federation" "${sbx}/docs/evolution/research/caso"
+  cp "${SCRIPT_DIR}/lint-artifacts.sh" "${SCRIPT_DIR}/projection-safety.sh" "${sbx}/.claude/validation/"
+  cp "${tmp}/members.yaml" "${sbx}/docs/evolution/federation/members.yaml"
+  printf '# lista (fixture)\nFantasia\n' > "${sbx}/docs/evolution/federation/client-terms.txt"
+  local kgx="${sbx}/docs/evolution/research/caso/caso.kg.yaml" lo1 lo2
+  _p7_graph Q_FANTASIA_MAIN_DIVERGIU "pergunta" > "${kgx}"
+  lo1="$(cd "${sbx}" && LC_ALL=C bash .claude/validation/lint-artifacts.sh --only="${kgx}" 2>&1 || true)"
+  _p7_graph Q_HUB_NEUTRO_MAIN_DIVERGIU "pergunta" > "${kgx}"
+  lo2="$(cd "${sbx}" && LC_ALL=C bash .claude/validation/lint-artifacts.sh --only="${kgx}" 2>&1 || true)"
+  if grep -q 'projeção/ID-NO' <<< "${lo1}" && ! grep -q 'projeção/ID-NO' <<< "${lo2}"; then
+    record_pass "projection-safety: (P7f) o lint-artifacts.sh de verdade acusa [projeção/ID-NO] no grafo sujo e cala no limpo"
+  else record_fail "projection-safety: (P7f)" "o dispatcher não levou o P7 ao veredito: sujo=[$(grep -c 'projeção/' <<< "${lo1}" || true)] limpo=[$(grep -c 'projeção/ID-NO' <<< "${lo2}" || true)] ${lo1:0:300}"; fi
+  rm -rf "${sbx}"
+  rm -f "${tmp}/client-terms.txt"
 }
 
 # Guardas do modo --state (a fila de abertos) — irmão do --radar.
@@ -7029,6 +7184,20 @@ run_write_stamp_selftests() {
   if ! bash "${helper}" "${wsb}/h" --framework x --commit c --commit-date 2026-07-23 --role banana >/dev/null 2>&1; then
     record_pass "write-stamp: --role inválido → rejeitado (exit 2)"
   else record_fail "write-stamp: role inválido" "aceitou role fora de adopted|hub"; fi
+  # 6. --release (rótulo de release da família, D_VERSIONAR_AS_PORTAS_POR_RELEASE): só com --kind door e
+  #    só X.Y.Z; sai como `release:`; sem a flag o campo NÃO sai (a materialização não é release)
+  mkdir -p "${wsb}/r"
+  local _rl_ok=1
+  bash "${helper}" "${wsb}/r" --kind door --role hub --framework p --commit c0ffee --commit-date 2026-10-11 --release 1.2.3 >/dev/null 2>&1 || _rl_ok=0
+  grep -q '^release: 1\.2\.3$' "${wsb}/r/.claude/.onion-version" 2>/dev/null || _rl_ok=0
+  bash "${helper}" "${wsb}/r" --kind door --role hub --framework p --commit c0ffee --commit-date 2026-10-11 >/dev/null 2>&1 || _rl_ok=0
+  ! grep -q '^release:' "${wsb}/r/.claude/.onion-version" 2>/dev/null || _rl_ok=0
+  ! bash "${helper}" "${wsb}/r" --kind door --role hub --framework p --commit c0ffee --commit-date 2026-10-11 --release v1.2 >/dev/null 2>&1 || _rl_ok=0
+  ! bash "${helper}" "${wsb}/r" --kind door --role hub --framework p --commit c0ffee --commit-date 2026-10-11 --release "" >/dev/null 2>&1 || _rl_ok=0
+  ! bash "${helper}" "${wsb}/h" --framework x --commit c --commit-date 2026-07-23 --release 1.0.0 >/dev/null 2>&1 || _rl_ok=0
+  if [ "${_rl_ok}" -eq 1 ]; then
+    record_pass "write-stamp: --release X.Y.Z só com --kind door ⇒ release:; sem a flag o campo não sai; v1.2, vazio e adotado ⇒ rc 2"
+  else record_fail "write-stamp: --release" "$(cat "${wsb}/r/.claude/.onion-version" 2>/dev/null)"; fi
   rm -rf "${wsb}"
 }
 
@@ -7318,6 +7487,7 @@ run_a2a_verify_selftests() {
 members:
   - id: onion-evolve
     role: source
+    kind: source
     remote: github.com/marciocar/onion-evolve
     a2a: { keys: [k1] }
   - id: acme
@@ -7439,6 +7609,7 @@ run_agent_card_selftests() {
 members:
   - id: onion-evolve
     role: source
+    kind: source
     remote: github.com/marciocar/onion-evolve
   - id: acme-secret
     role: standalone
@@ -12390,6 +12561,14 @@ case "$args" in
       fi
       exit 0 ;;
   *"pr view"*headRefOid*)
+      # SAC-85: a API do PR ATRASA o push. As chamadas de nº GH_HEAD_STALE_FIRST..GH_HEAD_STALE_LAST
+      # devolvem o head de ANTES do rebase (o pai do HEAD da worktree), como o GitHub fez no #985.
+      if [ -n "${GH_HEAD_STALE_FIRST:-}" ]; then
+        hk=$(cat "${STUB_HK}" 2>/dev/null || echo 0); hk=$((hk+1)); echo "$hk" > "${STUB_HK}"
+        if [ "$hk" -ge "${GH_HEAD_STALE_FIRST}" ] && [ "$hk" -le "${GH_HEAD_STALE_LAST:-${GH_HEAD_STALE_FIRST}}" ]; then
+          git -C "${STUB_HEAD_FROM}" rev-parse HEAD~1; exit 0
+        fi
+      fi
       if [ -n "${STUB_HEAD_SHA:-}" ]; then echo "${STUB_HEAD_SHA}"
       elif [ -n "${STUB_HEAD_FROM:-}" ]; then git -C "${STUB_HEAD_FROM}" rev-parse HEAD; else echo "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"; fi
       exit 0 ;;
@@ -12682,14 +12861,16 @@ echo "$*" >> "${PF_LOG}"
 if [ "${PF_MODE:-ok}" = fail ]; then
   echo "PR-FINALIZE: conflito REAL em src/x.sh — rebase abortado, nada mudou; resolva à mão" >&2; exit 1
 fi
-echo "r$(wc -l < "${PF_LOG}")" > r; git add r; git -c user.email=t@t -c user.name=t commit -qm rebase
+# --allow-empty: o conteúdo de `r` repete entre casos (o PF_LOG é zerado a cada um), e sem a flag o
+# "rebase" não andava o HEAD — os casos SAC-85 (w3-w6) mediam um rebase que não aconteceu.
+echo "r$(wc -l < "${PF_LOG}")" > r; git add r; git -c user.email=t@t -c user.name=t commit -q --allow-empty -m rebase
 echo "PR-FINALIZE: enviado feat/alguma-coisa @ $(git rev-parse --short HEAD)"
 PFSTUB
   _mva() { # $1=sequência de mergeable  $2=PF_MODE  $3=headRefName ; o SUT roda a partir do repo principal
-    echo 0 > "${d}/n"; echo 0 > "${d}/mk"; : > "${d}/pflog"; : > "${d}/margs"
-    _mv_out="$(cd "${r2}" && PATH="${d}:${PATH}" STUB_N="${d}/n" STUB_MK="${d}/mk" GH_MERGEABLE_SEQ="$1" \
+    echo 0 > "${d}/n"; echo 0 > "${d}/mk"; echo 0 > "${d}/hk"; : > "${d}/pflog"; : > "${d}/margs"
+    _mv_out="$(cd "${r2}" && PATH="${d}:${PATH}" STUB_N="${d}/n" STUB_MK="${d}/mk" STUB_HK="${d}/hk" GH_MERGEABLE_SEQ="$1" \
                PF_MODE="$2" PF_LOG="${d}/pflog" GH_HEAD_REF="$3" STUB_HEAD_FROM="${w2}" STUB_MERGE_ARGS="${d}/margs" \
-               ONION_MERGE_POLL_SECS=0 ONION_MERGE_WAIT_SECS=5 \
+               ONION_MERGE_POLL_SECS=0 ONION_MERGE_WAIT_SECS=5 ONION_MERGE_HEAD_SYNC_TRIES=3 ONION_MERGE_HEAD_SYNC_POLL=0 \
                GH_STATE_BEFORE="OPEN|null" GH_STATE_AFTER="${M}" GH_MERGE_RC=0 GH_MERGE_OUT=merged \
                bash "${_sut_a:-${sut}}" 999 2>&1)"; _mv_rc=$?
   }
@@ -12719,6 +12900,40 @@ PFSTUB
   if [ "${_mv_rc}" -ne 0 ] && grep -q "depois de 2 rebase" <<< "${_mv_out}" && [ "$(grep -c -- '--rebase' "${d}/pflog")" -eq 2 ]; then
     record_pass "pr-merge-verified: (z) conflito recorrente ⇒ limite de 2 rebases, sem laço"
   else record_fail "pr-merge-verified: (z) laço/limite" "rc=${_mv_rc} pf=[$(cat "${d}/pflog")] out=${_mv_out}"; fi
+
+  # ── (w3)-(w6) A API DO PR ATRASA O PUSH (SAC-85, medido no merge do #985) ──────────────────────
+  # O push da branch rebaseada chegou, e o `headRefOid` lido logo depois ainda era o VELHO; o script
+  # parou dizendo que a branch não era a do PR. O FATO é o ref remoto (`git ls-remote`); a API do PR
+  # é esperada com teto. MUTANTES (ops/mutate-and-restore.sh): teto fixo em 1 leitura (a forma
+  # antiga) → (w3) · sem a parada pelo ref remoto → (w5).
+  # (w3) API velha UMA vez, depois a nova ⇒ espera, o merge segue
+  _mv_out="$(export GH_HEAD_STALE_FIRST=2; _mva "CONFLICTING MERGEABLE" ok feat/alguma-coisa; printf '%s\n__rc=%s' "${_mv_out}" "${_mv_rc}")"
+  if grep -q "__rc=0" <<< "${_mv_out}" && grep -q "MERGED — provado pelo ESTADO" <<< "${_mv_out}" \
+     && [ "$(cat "${d}/hk")" -ge 3 ]; then
+    record_pass "pr-merge-verified: (w3) head do PR atrasado uma leitura ⇒ espera com teto e o merge segue"
+  else record_fail "pr-merge-verified: (w3) corrida do SAC-85" "hk=$(cat "${d}/hk") out=${_mv_out}"; fi
+  # (w4) API velha para sempre, sem ref remoto legível ⇒ para no teto (call 1 + 3 leituras), sem merge
+  _mv_out="$(export GH_HEAD_STALE_FIRST=2 GH_HEAD_STALE_LAST=999; _mva "CONFLICTING MERGEABLE" ok feat/alguma-coisa; printf '%s' "${_mv_out}")"
+  if grep -q "não virou o HEAD da worktree" <<< "${_mv_out}" && [ ! -s "${d}/margs" ] && [ "$(cat "${d}/hk")" -eq 4 ]; then
+    record_pass "pr-merge-verified: (w4) head do PR nunca converge ⇒ para no teto (3 leituras), sem merge"
+  else record_fail "pr-merge-verified: (w4) teto da espera" "hk=$(cat "${d}/hk") margs=[$(cat "${d}/margs")] out=${_mv_out}"; fi
+  # (w5) o ref REMOTO ficou para trás, mesmo com a API concordando ⇒ para na hora (o fato vence a API)
+  git clone -q --bare "${r2}" "${d}/r2-origin.git" >/dev/null 2>&1 || true
+  git -C "${r2}" remote add origin "${d}/r2-origin.git" >/dev/null 2>&1 || true
+  _mva "CONFLICTING MERGEABLE" ok feat/alguma-coisa
+  if [ "${_mv_rc}" -ne 0 ] && grep -q "o push não chegou à branch do PR" <<< "${_mv_out}" && [ ! -s "${d}/margs" ]; then
+    record_pass "pr-merge-verified: (w5) ref remoto atrás do HEAD da worktree ⇒ para na hora, sem merge"
+  else record_fail "pr-merge-verified: (w5) fato do ref remoto ignorado" "rc=${_mv_rc} margs=[$(cat "${d}/margs")] out=${_mv_out}"; fi
+  # (w6) ref remoto no HEAD novo, API velha para sempre ⇒ para no teto dizendo que o GitHub não refletiu
+  git -C "${r2}" remote set-url origin "${r2}" >/dev/null 2>&1 || true
+  _mv_out="$(export GH_HEAD_STALE_FIRST=2 GH_HEAD_STALE_LAST=999; _mva "CONFLICTING MERGEABLE" ok feat/alguma-coisa; printf '%s' "${_mv_out}")"
+  # ⚠️ o oráculo é a frase EXCLUSIVA deste ramo: "o GitHub não refletiu o push" também aparece na
+  #    mensagem do ramo "ref ilegível", e com ela o caso passava com o diagnóstico trocado (passada adversarial).
+  if grep -q "a branch remota já está em" <<< "${_mv_out}" && ! grep -q "não foi legível" <<< "${_mv_out}" \
+     && [ ! -s "${d}/margs" ]; then
+    record_pass "pr-merge-verified: (w6) push chegou mas a API não reflete ⇒ para no teto nomeando a causa"
+  else record_fail "pr-merge-verified: (w6) diagnóstico" "margs=[$(cat "${d}/margs")] out=${_mv_out}"; fi
+  git -C "${r2}" remote remove origin >/dev/null 2>&1 || true
 
   # ── (kg-a)-(kg-g) PROVENANCE DA BRANCH × REBASE (SAC-80, 2026-10-09) ─────────────────────────
   # Defeito medido num adotante: o .kg.yaml do PR citava `caminho@<sha>` de commit da PRÓPRIA branch,
@@ -13601,6 +13816,53 @@ PY
      && ! grep -q 'o overlay do papel' <<< "${_p2c}"; then
     record_pass "role-bundle: (p2) fonte de overlay do mini ausente → HARD só onde o motor de portas existe; presente → silêncio"
   else record_fail "role-bundle: (p2)" "sem-motor=$(grep -c 'o overlay do papel' <<< "${_p2a}" || true) com-motor-sem-fonte=$(grep -c 'o overlay do papel' <<< "${_p2b}" || true) com-fonte=$(grep -c 'o overlay do papel' <<< "${_p2c}" || true)"; fi
+  # (p3) PAPEL DE ADOÇÃO NO RESOLVEDOR (decisão do maestro, 2026-10-11): `--tools --kind adoption` soma o
+  #      adoption_keeps (o standalone adotado: co-relay e co-evolve); sem destino, ou `--kind door`, é o
+  #      conjunto da porta; papel sem adoption_keeps (hub) não muda; e personality-sync está no conjunto
+  #      federation (source e hub o recebem, standalone e plugins não), com `pending` vazio.
+  local _p3="" _p3a _p3d _p3x
+  _p3a="$(bash "${resolver}" standalone --tools --kind adoption 2>/dev/null)"
+  _p3d="$(bash "${resolver}" standalone --tools 2>/dev/null)"
+  _p3x="$(bash "${resolver}" standalone --tools --kind door 2>/dev/null)"
+  grep -qx co-relay <<< "${_p3a}" && grep -qx co-evolve <<< "${_p3a}" || _p3="${_p3} adoção-sem-canal"
+  grep -qx co-deliver <<< "${_p3a}" && _p3="${_p3} adoção-levou-co-deliver"
+  grep -qx co-relay <<< "${_p3d}" && _p3="${_p3} porta-levou-co-relay"
+  [ "${_p3d}" = "${_p3x}" ] || _p3="${_p3} default≠door"
+  [ "$(bash "${resolver}" hub --tools --kind adoption 2>/dev/null)" = "$(bash "${resolver}" hub --tools 2>/dev/null)" ] || _p3="${_p3} hub-mudou-com-adoption"
+  grep -qx personality-sync <<< "$(bash "${resolver}" source --tools 2>/dev/null)" || _p3="${_p3} source-sem-personality-sync"
+  grep -qx personality-sync <<< "$(bash "${resolver}" standalone --tools --kind adoption 2>/dev/null)" && _p3="${_p3} standalone-com-personality-sync"
+  python3 -c "import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); s=d['work_tool_sets']; sys.exit(0 if 'personality-sync' in (s.get('federation') or []) and not (s.get('pending') or []) else 1)" "${roles}" || _p3="${_p3} personality-sync-fora-de-federation"
+  if [ -z "${_p3}" ]; then
+    record_pass "role-bundle: (p3) --tools --kind adoption soma co-relay/co-evolve só ao standalone adotado; porta e hub inalterados; personality-sync em federation"
+  else record_fail "role-bundle: (p3)" "divergiu:${_p3}"; fi
+  # (p4) adoption_keeps com nome fora de qualquer conjunto: o resolvedor sai rc 2 e a REGRA 37 reprova.
+  #      Mesmo sandbox do (p1), com o roles.yaml copiado e uma sonda no adoption_keeps do standalone.
+  sed 's|^    adoption_keeps: \[co-evolve, co-relay\]$|    adoption_keeps: [co-evolve, co-relay, sonda-keep]|' "${roles}" > "${sb}/.claude/utils/marketplace/roles.yaml"
+  if ! cmp -s "${roles}" "${sb}/.claude/utils/marketplace/roles.yaml"; then
+    local _p4rc=0 _p4o
+    bash "${resolver}" standalone --tools --kind adoption "${sb}/.claude/utils/marketplace/roles.yaml" >/dev/null 2>&1 || _p4rc=$?
+    _p4o="$(LC_ALL=C bash "${sb}/.claude/validation/lint-artifacts.sh" --only="${sb}/.claude/utils/marketplace/roles.yaml" 2>&1 || true)"
+    if [ "${_p4rc}" -eq 2 ] && grep -q "declara adoption_keeps 'sonda-keep'" <<< "${_p4o}"; then
+      record_pass "role-bundle: (p4) adoption_keeps fora da partição → resolvedor rc 2 e HARD da REGRA 37"
+    else record_fail "role-bundle: (p4)" "resolvedor rc=${_p4rc} (espera 2) · KEEPBAD=$(grep -c 'declara adoption_keeps' <<< "${_p4o}" || true)"; fi
+    # (p4-MUT) sem a emissão KEEPBAD, a sonda passa calada no lint — prova que (p4) mede a cobrança.
+    sed 's|^            print("KEEPBAD\\t%s\\t%s" % (role, t))$|            pass|' "${sb}/.claude/validation/lint-artifacts.sh" > "${sb}/.claude/validation/lint-mut4.sh"
+    if ! cmp -s "${sb}/.claude/validation/lint-artifacts.sh" "${sb}/.claude/validation/lint-mut4.sh"; then
+      local _p4m; _p4m="$(LC_ALL=C bash "${sb}/.claude/validation/lint-mut4.sh" --only="${sb}/.claude/utils/marketplace/roles.yaml" 2>&1 || true)"
+      if ! grep -q 'sonda-keep' <<< "${_p4m}"; then
+        record_pass "role-bundle: (p4-MUT) sem a cobrança do adoption_keeps a sonda passa calada — (p4) é load-bearing"
+      else record_fail "role-bundle: (p4-MUT)" "o mutante ainda acusa a sonda — (p4) não prova a cobrança"; fi
+    else record_fail "role-bundle: (p4-MUT) setup" "a mutação não foi aplicada"; fi
+  else record_fail "role-bundle: (p4) setup" "a sonda não entrou no adoption_keeps (âncora do roles.yaml mudou?)"; fi
+  # (p5) comando do conjunto ADOPTION no adoption_keeps também reprova (o motor dele, utils/adopt/, segue
+  #      cortado: o comando nasceria morto no adotado), e o resolvedor recusa adoção em papel só de porta.
+  sed 's|^    adoption_keeps: \[co-evolve, co-relay\]$|    adoption_keeps: [co-evolve, co-relay, adopt]|' "${roles}" > "${sb}/.claude/utils/marketplace/roles.yaml"
+  local _p5o _p5rc=0
+  _p5o="$(LC_ALL=C bash "${sb}/.claude/validation/lint-artifacts.sh" --only="${sb}/.claude/utils/marketplace/roles.yaml" 2>&1 || true)"
+  bash "${resolver}" plugins --tools --kind adoption >/dev/null 2>&1 || _p5rc=$?
+  if grep -q "declara adoption_keeps 'adopt'" <<< "${_p5o}" && [ "${_p5rc}" -eq 2 ]; then
+    record_pass "role-bundle: (p5) adopt no adoption_keeps → HARD da REGRA 37; --kind adoption com plugins → resolvedor rc 2"
+  else record_fail "role-bundle: (p5)" "KEEPBAD de adopt=$(grep -c "adoption_keeps 'adopt'" <<< "${_p5o}" || true) · resolvedor plugins rc=${_p5rc} (espera 2)"; fi
   rm -rf "${sb}"
 }
 
@@ -14450,6 +14712,10 @@ version: 2
 members:
   - id: onion-evolve
     role: source
+    kind: source
+  - id: porta-src
+    role: source
+    kind: door
   - id: hub-a
     role: hub
     trust:
@@ -14491,8 +14757,12 @@ YAML
   tt onion-evolve hub-a relay   0 "source tem autoridade universal"
   tt hub-b onion-evolve advise  0 "inbox do core aberto p/ advise"
   tt ghost hub-a relay          2 "membro inexistente → exit 2"
+  # Porta com `role: source` + `kind: door` (a onion-core desde 2026-10-10) NÃO é a fonte: a autoridade se lê
+  # pelo kind. Mutante: decidir pelo role devolve AUTORIZADO nos dois (refutador de 2026-10-10).
+  tt porta-src hub-a correct    1 "porta source (kind door) não herda a autoridade emissora"
+  tt hub-b porta-src advise     1 "porta source (kind door) não é o inbox do core"
   # Invariante de auditabilidade: toda tentativa logada (no sandbox, não no real)
-  if [ -f "${d}/docs/evolution/trust-log.md" ] && [ "$(grep -c '^|' "${d}/docs/evolution/trust-log.md")" -ge 10 ]; then
+  if [ -f "${d}/docs/evolution/trust-log.md" ] && [ "$(grep -c '^|' "${d}/docs/evolution/trust-log.md")" -ge 12 ]; then
     record_pass "trust: toda tentativa logada (sandbox via --repo)"
   else record_fail "trust: log auditável" "trust-log.md do sandbox ausente/incompleto"; fi
 
@@ -17006,7 +17276,8 @@ run_role_cut_selftests() {
   else record_fail "role-cut: (n)" "desvio da matriz:${_nbad:- —} · plugins igual ao standalone=$([ "${_pl}" = "${_sa}" ] && echo sim || echo NÃO)"; fi
   # (n-MUT1) devolver o hook do inbox ao standalone (tirá-lo do corte) TEM de reprovar (n).
   local mut4="${d}/vm-hook.sh"
-  sed '/^        \.claude\/hooks\/co-evolution-inbox-check\.sh$/d; s|^        \.claude/validation/federation- \\$|        .claude/validation/federation-|' "${vm}" > "${mut4}"
+  # a âncora acompanha o bloco do canal upstream do _role_cut (2026-10-11: o hook só sai da PORTA)
+  sed '/^          \.claude\/hooks\/co-evolution-inbox-check\.sh$/d; s|^          \.claude/utils/co-evolution/ \\$|          .claude/utils/co-evolution/|' "${vm}" > "${mut4}"
   if ! cmp -s "${vm}" "${mut4}"; then
     if [ -n "$(_matrix_check "$(_rc_bundle "$(bash "${mut4}" --role standalone --repo "${REPO_ROOT}" 2>/dev/null)")")" ]; then
       record_pass "role-cut: (n-MUT1) sem o hook do inbox no corte, o standalone volta a levá-lo e (n) reprova"
@@ -17076,7 +17347,7 @@ run_role_cut_selftests() {
   else record_fail "role-cut: (t)" "ausente rc=${_rc_t1} · em erro rc=${_rc_t2} — o corte de comandos falhou ABERTO (adopt e federation-* viajariam)"; fi
   # (t-MUT) o `|| return 3` de volta a `|| return 0` (a forma de antes) TEM de reprovar (t).
   local mut10="${d}/vm-failopen.sh"
-  sed 's#^  _tools="$(bash "${_resolver}" "${_role}" --tools 2>/dev/null)" || {.*#  _tools="$(bash "${_resolver}" "${_role}" --tools 2>/dev/null)" || return 0#' "${vm}" > "${mut10}"
+  sed 's#^  _tools="$(bash "${_resolver}" "${_role}" --tools "${_kind_arg\[@\]}" 2>/dev/null)" || {.*#  _tools="$(bash "${_resolver}" "${_role}" --tools 2>/dev/null)" || return 0#' "${vm}" > "${mut10}"
   if ! cmp -s "${vm}" "${mut10}"; then
     local _rc_tm=0; bash "${mut10}" --role standalone --repo "${rt}" >/dev/null 2>&1 || _rc_tm=$?
     if [ "${_rc_tm}" -eq 0 ]; then
@@ -17280,6 +17551,145 @@ run_role_cut_selftests() {
   if [ -z "${_j}" ]; then
     record_pass "role-cut: (j) a enumeração é NUL-separada e imune a core.quotePath (acento/espaço não vazam)"
   else record_fail "role-cut: (j)" "falhou em:${_j} — caminho com acento sai C-quotado, o prefixo não casa e o arquivo VAZA em silêncio"; fi
+
+  # (u) PAPEL DE ADOÇÃO ≠ PAPEL DE PORTA (decisão do maestro, 2026-10-11, nó
+  #     D_PAPEL_DE_ADOCAO_STANDALONE_NAO_E_A_PORTA). O projeto ADOTADO com papel standalone (carimbo sem
+  #     `kind: door`, chamado com `--kind adoption`) mantém o canal upstream com o core: co-relay, co-evolve,
+  #     utils/co-evolution/ e o hook do inbox. A PORTA standalone (default, ou `--kind door`) não. Nas duas
+  #     polaridades, a adoção de terceiros e a federação cross-repo seguem fora, e personality-sync
+  #     (conjunto federation desde a mesma data) também. Medido no bundle EXTRAÍDO, não na lista.
+  local _t_up=(.claude/commands/meta/co-relay.md .claude/commands/meta/co-evolve.md
+               .claude/hooks/co-evolution-inbox-check.sh .claude/utils/co-evolution/co-relay.sh)
+  local _t_out=(.claude/commands/meta/adopt.md .claude/commands/meta/co-deliver.md
+                .claude/commands/meta/co-announce.md .claude/commands/meta/personality-sync.md
+                .claude/utils/federation-transport/inbox-pull.sh .claude/skills/onion-publish/SKILL.md)
+  _t_bundle() {  # $1=arquivo-saída, demais = argumentos do vendor-manifest → lista do bundle extraído
+    local _o="$1"; shift
+    local _s _a=()
+    _s="$(bash "$@" 2>/dev/null)" || { : > "${_o}"; return 1; }
+    mapfile -t _a <<< "${_s}"
+    git -C "${REPO_ROOT}" archive HEAD -- "${_a[@]}" 2>/dev/null | tar -t 2>/dev/null | grep -v '/$' > "${_o}" || true
+  }
+  _t_judge() {  # $1=lista $2=up|door → vazio se a polaridade bate, senão o que divergiu
+    local _l="$1" _pol="$2" _x _bad=""
+    for _x in "${_t_up[@]}"; do
+      if [ "${_pol}" = up ]; then grep -qxF "${_x}" "${_l}" || _bad="${_bad} faltou:${_x##*/}"
+      else grep -qxF "${_x}" "${_l}" && _bad="${_bad} vazou:${_x##*/}"; fi
+    done
+    for _x in "${_t_out[@]}"; do grep -qxF "${_x}" "${_l}" && _bad="${_bad} vazou:${_x##*/}"; done
+    [ "$(grep -c . "${_l}" || true)" -gt 0 ] || _bad="${_bad} bundle-vazio"
+    printf '%s' "${_bad}"
+  }
+  local _t_ad="${d}/t-adoption.lst" _t_do="${d}/t-door.lst" _t_dx="${d}/t-door-explicit.lst" _t_bad
+  _t_bundle "${_t_ad}" "${vm}" --role standalone --kind adoption --repo "${REPO_ROOT}"
+  _t_bundle "${_t_do}" "${vm}" --role standalone --repo "${REPO_ROOT}"
+  _t_bundle "${_t_dx}" "${vm}" --role standalone --kind door --repo "${REPO_ROOT}"
+  _t_bad="$(_t_judge "${_t_ad}" up)"
+  if [ -z "${_t_bad}" ]; then
+    record_pass "role-cut: (u) o ADOTADO standalone recebe co-relay, co-evolve, utils/co-evolution e o hook do inbox, e segue sem adoção, co-deliver/co-announce, personality-sync e federation-transport"
+  else record_fail "role-cut: (u)" "polaridade de adoção divergiu:${_t_bad}"; fi
+  _t_bad="$(_t_judge "${_t_do}" door)$(_t_judge "${_t_dx}" door)"
+  if [ -z "${_t_bad}" ] && cmp -s "${_t_do}" "${_t_dx}"; then
+    record_pass "role-cut: (u2) a PORTA standalone (default e --kind door, bundles idênticos) segue sem o canal upstream e sem adoção e federação"
+  else record_fail "role-cut: (u2)" "polaridade de porta divergiu:${_t_bad:- (default ≠ --kind door)}"; fi
+  # (u3) o destino de adoção só existe para os papéis de adoção: plugins, mini e source são só de porta.
+  local _t3="" _t3r _t3rc
+  for _t3r in plugins mini source; do
+    _t3rc=0; bash "${vm}" --role "${_t3r}" --kind adoption --repo "${REPO_ROOT}" >/dev/null 2>&1 || _t3rc=$?
+    [ "${_t3rc}" -eq 2 ] || _t3="${_t3} ${_t3r}:rc=${_t3rc}"
+  done
+  _t3rc=0; bash "${vm}" --role standalone --kind outro --repo "${REPO_ROOT}" >/dev/null 2>&1 || _t3rc=$?
+  [ "${_t3rc}" -eq 2 ] || _t3="${_t3} kind-desconhecido:rc=${_t3rc}"
+  if [ -z "${_t3}" ]; then
+    record_pass "role-cut: (u3) --kind adoption com papel só de porta (plugins, mini, source) e --kind desconhecido saem rc 2"
+  else record_fail "role-cut: (u3)" "aceitou o que devia recusar:${_t3}"; fi
+  # (u-MUT1) reverter o PREDICADO do destino no _role_cut (o canal sai sempre) devolve o corte de porta
+  #          ao adotado: (u) tem de reprovar. Âncora: a linha do `if` do canal upstream.
+  local _tm1="${d}/vm-t-mut1.sh" _tm1l="${d}/t-mut1.lst"
+  sed 's#^      if \[ "\$1" = plugins \] || \[ "\${KIND}" != adoption \]; then$#      if true; then#' "${vm}" > "${_tm1}"
+  if ! cmp -s "${vm}" "${_tm1}"; then
+    _t_bundle "${_tm1l}" "${_tm1}" --role standalone --kind adoption --repo "${REPO_ROOT}"
+    if [ -n "$(_t_judge "${_tm1l}" up)" ]; then
+      record_pass "role-cut: (u-MUT1) sem o predicado do destino o adotado standalone perde o canal upstream — (u) é load-bearing"
+    else record_fail "role-cut: (u-MUT1)" "o mutante ainda entrega o canal ao adotado — (u) não prova o predicado"; fi
+  else record_fail "role-cut: (u-MUT1) setup" "a mutação não foi aplicada (âncora do if mudou?)"; fi
+  # (u-MUT2) o predicado invertido (o canal fica sempre) poria o canal na PORTA: (u2) tem de reprovar.
+  local _tm2="${d}/vm-t-mut2.sh" _tm2l="${d}/t-mut2.lst"
+  sed 's#^      if \[ "\$1" = plugins \] || \[ "\${KIND}" != adoption \]; then$#      if [ "$1" = plugins ]; then#' "${vm}" > "${_tm2}"
+  if ! cmp -s "${vm}" "${_tm2}"; then
+    _t_bundle "${_tm2l}" "${_tm2}" --role standalone --repo "${REPO_ROOT}"
+    if [ -n "$(_t_judge "${_tm2l}" door)" ]; then
+      record_pass "role-cut: (u-MUT2) com o predicado ignorando o destino a PORTA standalone recebe o canal upstream — (u2) é load-bearing"
+    else record_fail "role-cut: (u-MUT2)" "o mutante não vazou o canal para a porta — (u2) não prova o predicado"; fi
+  else record_fail "role-cut: (u-MUT2) setup" "a mutação não foi aplicada (âncora do if mudou?)"; fi
+  # (u-MUT3) o destino que não chega ao RESOLVEDOR (sem o --kind adoption no corte de comandos): o hook
+  #          viaja e os comandos co-relay/co-evolve não — metade do canal. (u) tem de reprovar.
+  local _tm3="${d}/vm-t-mut3.sh" _tm3l="${d}/t-mut3.lst"
+  sed 's#^  \[ "\${KIND}" = adoption \] && _kind_arg=(--kind adoption)#  :#' "${vm}" > "${_tm3}"
+  if ! cmp -s "${vm}" "${_tm3}"; then
+    _t_bundle "${_tm3l}" "${_tm3}" --role standalone --kind adoption --repo "${REPO_ROOT}"
+    if grep -q 'faltou:co-relay.md' <<< "$(_t_judge "${_tm3l}" up)"; then
+      record_pass "role-cut: (u-MUT3) sem o destino no resolvedor o adotado perde os comandos do canal — (u) mede o roles.yaml, não só o pathspec"
+    else record_fail "role-cut: (u-MUT3)" "o mutante ainda entrega co-relay ao adotado — (u) não prova o adoption_keeps"; fi
+  else record_fail "role-cut: (u-MUT3) setup" "a mutação não foi aplicada (âncora do _kind_arg mudou?)"; fi
+  # (u4) O DESTINO CHEGA A QUEM COPIA — medido EXECUTANDO os dois helpers da adoção: o resolve-manifest
+  #      (adoção nova) e o vendor-branch (--update), com o default deles (adoption) e com ONION_KIND=door.
+  local _t4="" _t4a _t4d
+  _t4a="$(bash "${REPO_ROOT}/.claude/utils/adopt/resolve-manifest.sh" "${REPO_ROOT}" standalone 2>/dev/null)"
+  _t4d="$(ONION_KIND=door bash "${REPO_ROOT}/.claude/utils/adopt/resolve-manifest.sh" "${REPO_ROOT}" standalone 2>/dev/null)"
+  grep -qxF ':(exclude).claude/commands/meta/co-relay.md' <<< "${_t4a}" && _t4="${_t4} resolve-manifest:adoção-cortou-co-relay"
+  grep -qxF ':(exclude).claude/commands/meta/co-relay.md' <<< "${_t4d}" || _t4="${_t4} resolve-manifest:door-não-cortou"
+  grep -qxF ':(exclude).claude/commands/meta/adopt.md' <<< "${_t4a}" || _t4="${_t4} resolve-manifest:adoção-levou-adopt"
+  _t4a="$(ONION_ROLE=standalone ONION_KIND= bash "${vb}" --print-manifest "${REPO_ROOT}" 2>/dev/null)"
+  _t4d="$(ONION_ROLE=standalone ONION_KIND=door bash "${vb}" --print-manifest "${REPO_ROOT}" 2>/dev/null)"
+  grep -qxF ':(exclude).claude/hooks/co-evolution-inbox-check.sh' <<< "${_t4a}" && _t4="${_t4} vendor-branch:adoção-cortou-hook"
+  grep -qxF ':(exclude).claude/hooks/co-evolution-inbox-check.sh' <<< "${_t4d}" || _t4="${_t4} vendor-branch:door-não-cortou"
+  if [ -z "${_t4}" ]; then
+    record_pass "role-cut: (u4) resolve-manifest e vendor-branch entregam o canal upstream ao adotado standalone por default e o cortam com ONION_KIND=door"
+  else record_fail "role-cut: (u4)" "o destino não chegou a quem copia:${_t4}"; fi
+  # (u5) o --update do adopt.md DERIVA o destino do carimbo do alvo (kind: door → door; sem ele → adoption).
+  #      As duas linhas são EXTRAÍDAS do adopt.md e executadas contra dois carimbos sintéticos.
+  local _t5code _t5="" _t5k
+  _t5code="$(grep -E '^TARGET_KIND=|^if \[ "\$TARGET_KIND" = door \]' "${REPO_ROOT}/.claude/commands/meta/adopt.md" || true)"
+  if [ "$(grep -c . <<< "${_t5code}")" -ne 2 ]; then
+    record_fail "role-cut: (u5) setup" "o adopt.md não tem o par TARGET_KIND=/if — o --update não deriva o destino do carimbo"
+  else
+    mkdir -p "${d}/t5-door/.claude" "${d}/t5-adopted/.claude"
+    printf 'framework: x\nrole: standalone\nkind: door\n' > "${d}/t5-door/.claude/.onion-version"
+    printf 'framework: x\nrole: standalone\n' > "${d}/t5-adopted/.claude/.onion-version"
+    _t5k="$(TARGET="${d}/t5-door" bash -c "${_t5code}"$'\n''printf %s "$ONION_KIND"' 2>/dev/null)"
+    [ "${_t5k}" = door ] || _t5="${_t5} carimbo-door→'${_t5k}'"
+    _t5k="$(TARGET="${d}/t5-adopted" ONION_KIND=door bash -c "${_t5code}"$'\n''printf %s "$ONION_KIND"' 2>/dev/null)"
+    [ "${_t5k}" = adoption ] || _t5="${_t5} carimbo-sem-kind→'${_t5k}'"
+    if [ -z "${_t5}" ]; then
+      record_pass "role-cut: (u5) o --update do adopt.md deriva o destino do carimbo do alvo (kind: door → door; sem kind → adoption, mesmo com ONION_KIND=door herdado)"
+    else record_fail "role-cut: (u5)" "destino derivado errado:${_t5}"; fi
+  fi
+  # (u6) ENV PERDIDO NÃO MUDA O DESTINO (passada adversarial de 2026-10-11): o `--update` exporta o env
+  #      num bloco e chama o vendor-branch noutro, e a shell do agente não persiste. Com o env VAZIO, o
+  #      vendor-branch lê papel e destino do carimbo do ALVO (o mesmo caminho do `update`, exposto pelo
+  #      --print-manifest <SRC> <TARGET>): porta standalone corta o canal, adotado standalone o mantém.
+  local _u6="" _u6d _u6a
+  _u6d="$(ONION_ROLE= ONION_KIND= bash "${vb}" --print-manifest "${REPO_ROOT}" "${d}/t5-door" 2>/dev/null)"
+  _u6a="$(ONION_ROLE= ONION_KIND= bash "${vb}" --print-manifest "${REPO_ROOT}" "${d}/t5-adopted" 2>/dev/null)"
+  grep -qxF ':(exclude).claude/hooks/co-evolution-inbox-check.sh' <<< "${_u6d}" || _u6="${_u6} porta-sem-corte-do-canal"
+  grep -qxF ':(exclude).claude/commands/meta/adopt.md' <<< "${_u6d}" || _u6="${_u6} porta-sem-papel(não cortou adopt)"
+  grep -qxF ':(exclude).claude/hooks/co-evolution-inbox-check.sh' <<< "${_u6a}" && _u6="${_u6} adotado-perdeu-o-canal"
+  grep -qxF ':(exclude).claude/commands/meta/adopt.md' <<< "${_u6a}" || _u6="${_u6} adotado-sem-papel(não cortou adopt)"
+  if [ -z "${_u6}" ]; then
+    record_pass "role-cut: (u6) com o env vazio o vendor-branch deriva papel e destino do carimbo do alvo (porta corta o canal, adotado o mantém)"
+  else record_fail "role-cut: (u6)" "derivação pelo carimbo falhou:${_u6}"; fi
+  # (u6-MUT) sem a leitura do kind no carimbo, o destino cai no default (adoption) e a PORTA recebe o canal.
+  local _vbm="${d}/vb-u6-mut.sh"
+  sed 's#^    if \[ "\$(awk .\/\^kind:\/{print \$2; exit}. "\${_st}")" = door \]; then ONION_KIND=door; else ONION_KIND=adoption; fi$#    ONION_KIND=adoption#' "${vb}" > "${_vbm}"
+  if ! cmp -s "${vb}" "${_vbm}"; then
+    cp "${REPO_ROOT}/.claude/utils/adopt/vendor-manifest.sh" "${d}/vendor-manifest.sh"
+    local _u6m; _u6m="$(ONION_ROLE= ONION_KIND= bash "${_vbm}" --print-manifest "${REPO_ROOT}" "${d}/t5-door" 2>/dev/null)"
+    if ! grep -qxF ':(exclude).claude/hooks/co-evolution-inbox-check.sh' <<< "${_u6m}"; then
+      record_pass "role-cut: (u6-MUT) sem ler o kind do carimbo a porta recebe o canal upstream — (u6) é load-bearing"
+    else record_fail "role-cut: (u6-MUT)" "o mutante ainda corta o canal da porta — (u6) não prova a leitura do kind"; fi
+  else record_fail "role-cut: (u6-MUT) setup" "a mutação não foi aplicada (âncora do kind mudou?)"; fi
+  unset -f _t_bundle _t_judge
 
   rm -rf "${d}"
 }
@@ -20017,6 +20427,26 @@ PY2
      && ! grep -q 'colheita sem registro' <<< "${out}" && ! grep -q 'não há resíduo de revisão' <<< "${out}"; then
     record_pass "harvest-residue: nó só MOVIDO (sai e volta no diff) → guarda cala"
   else record_fail "harvest-residue: movido" "nó movido virou colheita (ou o cenário não moveu): ${out}"; fi
+
+  # (f) RENOME declarado (SAC-99): N_SEGUNDO vira N_SEGUNDO_NEUTRO com `x_renamed_from` = sha256[:12] do id
+  #     antigo → não é colheita, cala sem exigir o id antigo no resíduo. (f2) o MESMO renome SEM a declaração
+  #     segue cobrado — o hash é o que isenta, não o fato de haver id novo. Mutante: tirar o bloco do
+  #     x_renamed_from do lint reprova (f).
+  local _h2; _h2="$(printf '%s' N_SEGUNDO | sha256sum)"; _h2="${_h2:0:12}"
+  ( cd "${sb}" && git checkout -q main && git checkout -q -b test/rename-case
+    sed -i "s/  - id: N_SEGUNDO/  - id: N_SEGUNDO_NEUTRO\n    x_renamed_from: \"${_h2}\"/; s/to: N_SEGUNDO/to: N_SEGUNDO_NEUTRO/" docs/onion/graph/alvo.kg.yaml
+    git -c user.email=t@t -c user.name=t commit -qam renome ) >/dev/null 2>&1 || true
+  out="$(cd "${sb}" && bash .claude/validation/lint-artifacts.sh --only="${sb}/CLAUDE.md" 2>&1 || true)"
+  if grep -q 'N_SEGUNDO_NEUTRO' "${sb}/docs/onion/graph/alvo.kg.yaml" \
+     && ! grep -q 'colheita sem registro' <<< "${out}" && ! grep -q 'não há resíduo de revisão' <<< "${out}"; then
+    record_pass "harvest-residue: (f) renome com x_renamed_from (hash do id antigo) não é colheita → cala"
+  else record_fail "harvest-residue: (f) renome" "renome declarado virou colheita (ou o cenário não renomeou): ${out:0:300}"; fi
+  ( cd "${sb}" && sed -i '/x_renamed_from:/d' docs/onion/graph/alvo.kg.yaml \
+    && git -c user.email=t@t -c user.name=t commit -qam sem-hash ) >/dev/null 2>&1 || true
+  out="$(cd "${sb}" && bash .claude/validation/lint-artifacts.sh --only="${sb}/CLAUDE.md" 2>&1 || true)"
+  if grep -q 'não há resíduo de revisão' <<< "${out}"; then
+    record_pass "harvest-residue: (f2) o mesmo renome SEM x_renamed_from segue cobrado como colheita"
+  else record_fail "harvest-residue: (f2) renome sem hash" "renome sem declaração passou calado: ${out:0:300}"; fi
   ( cd "${sb}" && git checkout -q test/harvest-case ) >/dev/null 2>&1 || true
 
   # (d) SEM base resolvível → SOFT que DECLARA, nunca silêncio (o modo que matava a guarda no CI)
@@ -21633,10 +22063,15 @@ run_door_selftests() {
   local d4; d4="$(mktemp -d)"; rm -rf "${d4}"
   if bash "${REPO_ROOT}/ops/materialize-door.sh" "${d4}" >/dev/null 2>&1; then
     : > "${d4}/INTRUSO-DE-MATERIALIZACAO-ANTERIOR.md"
-    if bash "${REPO_ROOT}/ops/materialize-door.sh" "${d4}" >/dev/null 2>&1; then
+    # a 2ª leva --release (o que o motor do /meta:publish passa quando o maestro sela a versão): o
+    # materializador o repassa ao write-stamp, e o carimbo sai com `release:` (D_VERSIONAR_AS_PORTAS_POR_RELEASE)
+    if bash "${REPO_ROOT}/ops/materialize-door.sh" "${d4}" --release 9.9.9 >/dev/null 2>&1; then
       if [ -f "${d4}/INTRUSO-DE-MATERIALIZACAO-ANTERIOR.md" ]; then
         record_fail "door: (e)" "arquivo da materialização anterior SOBREVIVEU — a porta publicaria o que saiu do manifesto"
       else record_pass "door: (e) materialização AUTORITATIVA (o que sai do manifesto sai da porta)"; fi
+      if grep -q '^release: 9\.9\.9$' "${d4}/.claude/.onion-version" 2>/dev/null; then
+        record_pass "door: (e2) --release repassado ao write-stamp ⇒ o carimbo da porta sai com release: 9.9.9"
+      else record_fail "door: (e2)" "o carimbo não traz release: — $(cat "${d4}/.claude/.onion-version" 2>/dev/null | tr '\n' ' ')"; fi
     else record_fail "door: (e)" "2ª materialização abortou"; fi
   else record_fail "door: (e)" "1ª materialização abortou"; fi
 
@@ -22207,6 +22642,51 @@ run_door_cycle_selftests() {
   if grep -q 'ANDOU-PARA-TRAS' <<< "${outm}"; then
     record_pass "door-cycle: (h) mudança REAL junto do baseline volta a contar (exclusão cirúrgica)"
   else record_fail "door-cycle: (h)" "a exclusão virou salvo-conduto — framework novo passou batido: ${outm:0:140}"; fi
+
+  # (i)-(l) O EMISSOR NUM REPO SEM REGISTRO (medido em 2026-10-11, `/meta:adopt --update` de um
+  #   adotante): o `--emit-baseline` saía 3 com "members.yaml ausente", o `regen-baselines.sh` dizia
+  #   "emissor falhou — baseline mantido COMO VEIO DO CORE", e as portas do core viajavam com os tetos
+  #   do core para quem não tem porta. Sem registro a regra não tem OBJETO: emite vazio, rc 0.
+  #   MUTANTE (ops/mutate-and-restore.sh): sem o ramo da emissão sem registro → (j) e (l) reprovam.
+  # (i) com registro, a emissão segue dando as chaves — a cura não esvazia a catraca do core
+  rcm=0; outm="$(bash "${sbm}/work/.claude/validation/door-staleness-check.sh" "${sbm}/work" --emit-baseline 2>&1)" || rcm=$?
+  if [ "${rcm}" -eq 0 ] && grep -qE '^porta-x [0-9]+$' <<< "${outm}"; then
+    record_pass "door-cycle: (i) com members.yaml a emissão traz a chave da porta (porta-x <n>)"
+  else record_fail "door-cycle: (i)" "emissão com registro perdeu a chave (rc=${rcm}): ${outm:0:140}"; fi
+  local sbe; sbe="$(mktemp -d)"
+  mkdir -p "${sbe}/.claude/validation" "${sbe}/.claude/utils/adopt"
+  cp "${REPO_ROOT}/.claude/validation/door-staleness-check.sh" "${sbe}/.claude/validation/"
+  cp "${REPO_ROOT}/.claude/utils/adopt/vendor-manifest.sh" "${sbe}/.claude/utils/adopt/"
+  printf '# baseline do CORE, como viaja na cópia\nonion-standalone 423\nonion-core 0\n' > "${sbe}/.claude/validation/door-staleness-baseline.txt"
+  ( cd "${sbe}" && git init -q . && git add -A && git -c user.email=t@l -c user.name=t commit -qm base ) >/dev/null 2>&1 || true
+  # (j) sem members.yaml ⇒ emissão rc 0, ZERO chaves, e o cabeçalho diz o porquê
+  rcm=0; outm="$(bash "${sbe}/.claude/validation/door-staleness-check.sh" "${sbe}" --emit-baseline 2>&1)" || rcm=$?
+  local _keys; _keys="$(grep -cvE '^[[:space:]]*(#|$)' <<< "${outm}")" || _keys=0
+  if [ "${rcm}" -eq 0 ] && [ "${_keys}" -eq 0 ] && grep -q 'SEM OBJETO' <<< "${outm}"; then
+    record_pass "door-cycle: (j) sem members.yaml a emissão sai 0 com baseline VAZIO (só cabeçalho)"
+  else record_fail "door-cycle: (j)" "emissão sem registro (rc=${rcm}, chaves=${_keys}): ${outm:0:140}"; fi
+  # (k) …e a CHECAGEM segue fechada: sem registro ela diz que não sabe (rc 3), nunca "em dia"
+  rcm=0; outm="$(bash "${sbe}/.claude/validation/door-staleness-check.sh" "${sbe}" 2>&1)" || rcm=$?
+  if [ "${rcm}" -eq 3 ] && grep -q 'members.yaml ausente' <<< "${outm}"; then
+    record_pass "door-cycle: (k) sem members.yaml a checagem segue falhando fechada (rc 3)"
+  else record_fail "door-cycle: (k)" "checagem sem registro afrouxou (rc=${rcm}): ${outm:0:140}"; fi
+  # (l) COMO O RUNNER INVOCA: o `regen-baselines.sh --emit` no alvo troca o baseline do core pelo vazio
+  cp "${REPO_ROOT}/.claude/utils/adopt/regen-baselines.sh" "${sbe}/.claude/utils/adopt/"
+  rcm=0; outm="$(bash "${sbe}/.claude/utils/adopt/regen-baselines.sh" "${sbe}" --emit 2>&1)" || rcm=$?
+  _keys="$(grep -cvE '^[[:space:]]*(#|$)' "${sbe}/.claude/validation/door-staleness-baseline.txt")" || _keys=0
+  if [ "${rcm}" -eq 0 ] && [ "${_keys}" -eq 0 ] && grep -q '✓ door-staleness-baseline.txt' <<< "${outm}"; then
+    record_pass "door-cycle: (l) regen-baselines no adotante sem registro ⇒ baseline do core trocado pelo vazio"
+  else record_fail "door-cycle: (l)" "o baseline do core viajou (rc=${rcm}, chaves=${_keys}): ${outm:0:160}"; fi
+  # (m) registro PRESENTE mas sem porta com pin ⇒ emissão rc 0 e ZERO chaves: a frase "nenhuma porta
+  #     com pin" sai como COMENTÁRIO (crua, entrava no baseline como chave sem barra, que o filtro preserva)
+  mkdir -p "${sbe}/docs/evolution/federation"
+  printf 'members:\n  - id: adotante-x\n    kind: adopter\n    onion_version: abc123\n' > "${sbe}/docs/evolution/federation/members.yaml"
+  rcm=0; outm="$(bash "${sbe}/.claude/validation/door-staleness-check.sh" "${sbe}" --emit-baseline 2>&1)" || rcm=$?
+  _keys="$(grep -cvE '^[[:space:]]*(#|$)' <<< "${outm}")" || _keys=0
+  if [ "${rcm}" -eq 0 ] && [ "${_keys}" -eq 0 ] && grep -q 'nenhuma porta com pin' <<< "${outm}"; then
+    record_pass "door-cycle: (m) registro sem porta com pin ⇒ emissão rc 0, zero chaves (a frase vira comentário)"
+  else record_fail "door-cycle: (m)" "a frase entrou como chave (rc=${rcm}, chaves=${_keys}): ${outm:0:140}"; fi
+  rm -rf "${sbe}"
   rm -rf "${sbm}"
 }
 
@@ -22249,13 +22729,14 @@ run_publish_selftests() {
   cat > "${core}/ops/materialize-door.sh" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
-R="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; DEST="$1"; shift; ROLE=hub; FROM=origin/main
-while [ $# -gt 0 ]; do case "$1" in --role) ROLE="$2"; shift 2 ;; --from) FROM="$2"; shift 2 ;; *) shift ;; esac; done
+R="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; DEST="$1"; shift; ROLE=hub; FROM=origin/main; REL=""
+while [ $# -gt 0 ]; do case "$1" in --role) ROLE="$2"; shift 2 ;; --from) FROM="$2"; shift 2 ;; --release) REL="$2"; shift 2 ;; *) shift ;; esac; done
 find "${DEST}" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
 mkdir -p "${DEST}/.claude"
 git -C "${R}" archive --format=tar "${FROM}" -- payload | tar -x -C "${DEST}" --strip-components=1 || exit 3
 printf 'framework: %s\nsource_commit: %s\nrole: %s\nkind: door\n' "$(basename "${DEST}")" \
   "$(git -C "${R}" rev-parse --short=12 "${FROM}")" "${ROLE}" > "${DEST}/.claude/.onion-version"
+[ -z "${REL}" ] || printf 'release: %s\n' "${REL}" >> "${DEST}/.claude/.onion-version"
 exit 0
 STUB
   # o materializador de MARKETPLACE esboçado: SRC = o toplevel do próprio script (a worktree), como o
@@ -22266,8 +22747,8 @@ STUB
 set -uo pipefail
 SRC="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"; T="$1"
 mkdir -p "${T}/plugins/onion/.claude-plugin" "${T}/.claude-plugin"
-printf '{"ref": "%s"}\n' "$(git -C "${SRC}" rev-parse HEAD)" > "${T}/plugins/onion/.claude-plugin/provenance.json"
-printf '{"name":"x","plugins":[]}\n' > "${T}/.claude-plugin/marketplace.json"
+printf '{\n  "ref": "%s"\n}\n' "$(git -C "${SRC}" rev-parse HEAD)" > "${T}/plugins/onion/.claude-plugin/provenance.json"
+printf '{\n  "name": "x",\n  "metadata": {\n    "version": "0.1.0"\n  },\n  "plugins": []\n}\n' > "${T}/.claude-plugin/marketplace.json"
 # defeitos PLANTADOS quando a fonte pede (casos q3/q4): moat dentro do bundle; checador que não mede
 [ -f "${SRC}/payload/PLANT-MOAT" ] && { mkdir -p "${T}/plugins/onion/commands"; printf 'plantado\n' > "${T}/plugins/onion/commands/adopt.md"; }
 [ -f "${SRC}/payload/NM" ] && touch "${T}/plugins/onion/NAO-MEDE"
@@ -22363,7 +22844,7 @@ STUB
   else record_fail "publish: (g) o motor alterou o core" "antes ${snap0} depois $(_snap)"; fi
 
   # (b) --push publica, confere no remoto, e o carimbo publicado é o pin de origin/main
-  _pub porta-a --push
+  _pub porta-a --push --version 1.0.0
   if [ "${_r}" -eq 0 ] && [ "$(_door_tip)" != "${tip0}" ] && [ "$(_door_pin)" = "${NEWPIN}" ] \
      && grep -q 'CONFERIDO no remoto' <<< "${_o}" && [ "$(_snap)" = "${snap0}" ]; then
     record_pass "publish: (b) --push publica, confere o remoto, carimba ${NEWPIN} e não toca o core"
@@ -22402,7 +22883,7 @@ STUB
   git -C "${core}" add -A >/dev/null 2>&1 || true
   git -C "${core}" "${G[@]}" commit -qm vaza >/dev/null 2>&1 || true
   git -C "${core}" push -q origin main >/dev/null 2>&1 || true
-  _pub porta-a --push
+  _pub porta-a --push --version 2.0.0
   if [ "${_r}" -eq 1 ] && grep -q 'VAZAMENTO' <<< "${_o}" && grep -q 'onion-fulano' <<< "${_o}" && [ "$(_door_tip)" = "${tip1}" ]; then
     record_pass "publish: (d) id onion-* plantado ⇒ barra e o remoto NÃO anda (o ponto cego da REGRA 36)"
   else record_fail "publish: (d) vazamento passou" "rc=${_r} out=${_o:0:300}"; fi
@@ -22432,7 +22913,7 @@ STUB
   git -C "${core}" add -A >/dev/null 2>&1 || true
   git -C "${core}" "${G[@]}" commit -qm hard >/dev/null 2>&1 || true
   git -C "${core}" push -q origin main >/dev/null 2>&1 || true
-  _pub porta-a --push
+  _pub porta-a --push --version 2.0.0
   if [ "${_r}" -eq 1 ] && grep -q '2 HARD' <<< "${_o}" && [ "$(_door_tip)" = "${tip2}" ]; then
     record_pass "publish: (h) lint da porta com HARD ⇒ recusa e o remoto NÃO anda"
   else record_fail "publish: (h) porta vermelha publicada" "rc=${_r} out=${_o:0:300}"; fi
@@ -22443,14 +22924,14 @@ STUB
 
   # (e) PAPEL DIVERGENTE: registro diz hub, o carimbo publicado diz standalone ⇒ recusa
   _pub_members hub "${NEWPIN}"
-  _pub porta-a --push
+  _pub porta-a --push --version 2.0.0
   if [ "${_r}" -eq 2 ] && grep -q 'papel divergente' <<< "${_o}" && [ "$(_door_tip)" = "${tip2}" ]; then
     record_pass "publish: (e) registro × carimbo publicado divergentes ⇒ recusa antes de materializar"
   else record_fail "publish: (e) publicou com papéis divergentes" "rc=${_r} out=${_o:0:300}"; fi
   _pub_members standalone "${NEWPIN}"
 
   # (i) --from (ensaio de branch) com --push ⇒ recusa: porta pública só nasce de origin/main
-  _pub porta-a --from HEAD --push
+  _pub porta-a --from HEAD --push --version 2.0.0
   if [ "${_r}" -eq 2 ] && grep -q 'ensaio' <<< "${_o}"; then
     record_pass "publish: (i) --from com --push ⇒ recusa"
   else record_fail "publish: (i)" "rc=${_r} out=${_o:0:250}"; fi
@@ -22471,7 +22952,7 @@ STUB
   # (m) --clone com commit LOCAL à frente do remoto (o ensaio de (j) deixou um) ⇒ recusa: o push
   #     levaria junto um commit que esta rodada não verificou
   local tip3; tip3="$(_door_tip)"
-  _pub porta-a --clone "${cl}" --push
+  _pub porta-a --clone "${cl}" --push --version 2.0.0
   if [ "${_r}" -eq 2 ] && grep -q 'não está em origin/main' <<< "${_o}" && [ "$(_door_tip)" = "${tip3}" ]; then
     record_pass "publish: (m) clone à frente do remoto ⇒ recusa (commit não verificado não vai a público)"
   else record_fail "publish: (m) empurraria commit não verificado" "rc=${_r} out=${_o:0:300}"; fi
@@ -22501,7 +22982,7 @@ STUB
   printf 'exemplo: /home/conta/x\n' > "${core}/payload/nota.md"; _cp limpa
 
   # (n) --expect-pin que não é o de origin/main (a main andou desde o ensaio) ⇒ recusa
-  _pub porta-a --push --expect-pin "${OLDPIN}"
+  _pub porta-a --push --version 2.0.0 --expect-pin "${OLDPIN}"
   if [ "${_r}" -eq 2 ] && grep -q 'pin confirmado' <<< "${_o}"; then
     record_pass "publish: (n) --expect-pin divergente ⇒ recusa (o pin publicado é o pin confirmado)"
   else record_fail "publish: (n)" "rc=${_r} out=${_o:0:250}"; fi
@@ -22525,7 +23006,7 @@ STUB
   local fk="${d}/fakebin"; mkdir -p "${fk}"
   printf '#!/usr/bin/env bash\nexit 1\n' > "${fk}/claude"; chmod +x "${fk}/claude"
   local ptip; ptip="$(git ls-remote "${plugup}" refs/heads/main 2>/dev/null | awk '{print $1}')"
-  PATH="${fk}:${PATH}" _pub porta-p --push
+  PATH="${fk}:${PATH}" _pub porta-p --push --version 2.0.0
   if [ "${_r}" -eq 1 ] && grep -q 'validate --strict reprovou' <<< "${_o}" \
      && [ "$(git ls-remote "${plugup}" refs/heads/main 2>/dev/null | awk '{print $1}')" = "${ptip}" ]; then
     record_pass "publish: (q) plugins com validate --strict reprovando ⇒ recusa e o remoto não anda"
@@ -22539,7 +23020,7 @@ STUB
   #      na fonte ⇒ o checador o acusa no que foi montado, o motor recusa e o remoto NÃO anda, com --push.
   printf 'x\n' > "${core}/payload/PLANT-MOAT"; _cp planta-moat
   ptip="$(git ls-remote "${plugup}" refs/heads/main 2>/dev/null | awk '{print $1}')"
-  PATH="${fk}:${PATH}" _pub porta-p --push
+  PATH="${fk}:${PATH}" _pub porta-p --push --version 2.0.0
   if [ "${_r}" -eq 1 ] && grep -q '(5d) guardas de plugin no bundle: 1 HARD' <<< "${_o}" && grep -q 'moat-no-bundle' <<< "${_o}" \
      && [ "$(git ls-remote "${plugup}" refs/heads/main 2>/dev/null | awk '{print $1}')" = "${ptip}" ]; then
     record_pass "publish: (q3) defeito plantado no bundle de plugins ⇒ (5d) barra e o remoto NÃO anda"
@@ -22580,7 +23061,7 @@ STUB
   printf '  - id: porta-m\n    kind: door\n    role: mini\n    remote: %s\n    onion_version: n/a\n' "${mup}" \
     >> "${core}/docs/evolution/federation/members.yaml"
   _cp porta-m
-  _pub porta-m --push
+  _pub porta-m --push --version 9.0.0
   if [ "${_r}" -eq 2 ] && grep -q -- '--replace-foreign' <<< "${_o}" && [ "$(_mtip)" = "${mtip}" ] && [ "$(_mtags)" = "0" ]; then
     record_pass "publish: (k) porta nunca materializada com outro conteúdo e sem --replace-foreign ⇒ recusa e o repo fica intacto"
   else record_fail "publish: (k) o motor substituiria a destilação sem a flag" "rc=${_r} out=${_o:0:250}"; fi
@@ -22592,7 +23073,7 @@ STUB
   # (k3) com a flag, a verificação PRÓPRIA do mini (sem lint) roda no montado: defeito plantado ⇒ (5c)
   #      barra, e NEM a porta NEM a tag de arquivo chegam ao remoto (o arquivo só sobe com a porta).
   printf 'x\n' > "${core}/payload/PLANT-DANGLING"; _cp planta-dangling
-  _pub porta-m --replace-foreign --push
+  _pub porta-m --replace-foreign --push --version 9.0.0
   if [ "${_r}" -eq 1 ] && grep -q '(5c) a porta didática reprovou' <<< "${_o}" && [ "$(_mtip)" = "${mtip}" ] && [ "$(_mtags)" = "0" ]; then
     record_pass "publish: (k3) mini com ponteiro morto no montado ⇒ (5c) barra; porta e arquivo NÃO sobem"
   else record_fail "publish: (k3) mini com defeito publicado" "rc=${_r} tags=$(_mtags) out=${_o:0:300}"; fi
@@ -22600,7 +23081,7 @@ STUB
   # (k2) O MOTOR DEIXA DE RECUSAR O MINI (F5): com --replace-foreign --push a destilação é ARQUIVADA numa
   #      tag empurrada e conferida ANTES da porta, a porta sobe POR CIMA dela (a história fica: o pai do
   #      commit publicado é a ponta antiga) e o carimbo publicado diz role mini.
-  _pub porta-m --replace-foreign --push
+  _pub porta-m --replace-foreign --push --version 9.0.0
   local _mnew _mtag _mpar _mrole
   _mnew="$(_mtip)"
   _mtag="$(git ls-remote --tags "${mup}" 2>/dev/null | awk '/refs\/tags\/archive\/pre-door-.*\^\{\}$/ {print $1; exit}')"
@@ -22630,6 +23111,315 @@ STUB
   else record_fail "publish: (f)" "rc=${_r} out=${_o:0:250}"; fi
 
   unset -f _pub _pub_members _door_tip _door_pin _snap _cp
+  rm -rf "${d}"
+}
+
+# ── VERSIONAMENTO DAS PORTAS (decisão do maestro de 2026-10-11, D_VERSIONAR_AS_PORTAS_POR_RELEASE) ───
+# A versão é RÓTULO DE RELEASE de um pin: o motor PROPÕE o bump pelo diff de superfície e o maestro SELA
+# com --version, obrigatório com --push. A tag `onion-vX.Y.Z` nasce NAS PORTAS (o core fica intocado,
+# inclusive de tags), o carimbo leva `release:` pelo write-stamp REAL, os plugins levam a família no
+# metadata/provenance sem trocar o `version` por conteúdo, e o changelog da release (a mensagem da tag)
+# passa pela mesma varredura de vazamento do bundle. Mundo falso sem rede, como run_publish_selftests;
+# aqui o materializador esboçado espelha os CAMINHOS do core (como o real), para o intervalo do changelog
+# filtrar pelos caminhos que a porta mudou.
+run_publish_release_selftests() {
+  local sut="${REPO_ROOT}/ops/publish-door.sh"
+  if [ ! -f "${sut}" ]; then record_skip "publish_release: ops/publish-door.sh ausente (adotante) → pulado"; return; fi
+  local d; d="$(mktemp -d)"
+  local G=(-c user.email=t@t -c user.name=t)
+  local up="${d}/up.git" core="${d}/core" doorup="${d}/porta-a.git" plugup="${d}/porta-p.git"
+  git init -q --bare -b main "${up}" >/dev/null 2>&1 || true
+  git init -q --bare -b main "${doorup}" >/dev/null 2>&1 || true
+  git init -q --bare -b main "${plugup}" >/dev/null 2>&1 || true
+  git clone -q "${up}" "${core}" >/dev/null 2>&1 || true
+  git -C "${core}" checkout -q -b main >/dev/null 2>&1 || true
+  mkdir -p "${core}/ops" "${core}/.claude/validation" "${core}/.claude/utils/adopt" "${core}/.claude/agents" \
+           "${core}/.claude/commands/x" "${core}/.claude/utils/marketplace" "${core}/docs/evolution/federation"
+  cp "${sut}" "${core}/ops/publish-door.sh"
+  cp "${REPO_ROOT}/.claude/validation/resolve-integration-branch.sh" "${core}/.claude/validation/" 2>/dev/null || true
+  cp "${REPO_ROOT}/.claude/validation/door-staleness-check.sh" "${core}/.claude/validation/"
+  cp "${REPO_ROOT}/.claude/validation/projection-safety.sh" "${core}/.claude/validation/"
+  cp "${REPO_ROOT}/.claude/utils/adopt/vendor-manifest.sh" "${core}/.claude/utils/adopt/"
+  cp "${REPO_ROOT}/.claude/utils/adopt/write-stamp.sh" "${core}/.claude/utils/adopt/"
+  printf '#!/usr/bin/env bash\necho "  Violações HARD : 0"\n' > "${core}/.claude/validation/lint-artifacts.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${core}/.claude/validation/plugin-bundle-check.sh"
+  printf '# agente\n' > "${core}/.claude/agents/a.md"
+  printf '# comando um\n' > "${core}/.claude/commands/x/one.md"
+  printf 'conteudo publico\n' > "${core}/README.md"
+  printf '# CHANGELOG\n\n' > "${core}/docs/evolution/federation/CHANGELOG.md"
+  # o materializador ESBOÇADO de porta: copia .claude/ e README.md NOS MESMOS CAMINHOS do core e carimba
+  # pelo write-stamp REAL (o --release do motor chega ao carimbo pelo mesmo escritor da produção)
+  cat > "${core}/ops/materialize-door.sh" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+R="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; DEST="$1"; shift; ROLE=hub; FROM=origin/main; REL=()
+while [ $# -gt 0 ]; do case "$1" in --role) ROLE="$2"; shift 2 ;; --from) FROM="$2"; shift 2 ;; --release) REL=(--release "$2"); shift 2 ;; *) shift ;; esac; done
+find "${DEST}" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+git -C "${R}" archive --format=tar "${FROM}" -- .claude README.md | tar -x -C "${DEST}" || exit 3
+bash "${R}/.claude/utils/adopt/write-stamp.sh" "${DEST}" --kind door --role "${ROLE}" --framework "$(basename "${DEST}")" \
+  --commit "$(git -C "${R}" rev-parse --short=12 "${FROM}")" --commit-date 2026-10-11 "${REL[@]}" >/dev/null || exit 3
+[ -f "${DEST}/.claude/PLANT-KEY" ] && printf 'chave_nova: 1\n' >> "${DEST}/.claude/.onion-version"
+exit 0
+STUB
+  # o de MARKETPLACE: a FORMA do real (provenance multilinha com `ref`, catálogo com metadata.version) e um
+  # plugin.json com o version POR CONTEÚDO (0.1.7) que a família não pode tocar
+  cat > "${core}/.claude/utils/marketplace/materialize-marketplace-repo.sh" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+SRC="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"; T="$1"
+mkdir -p "${T}/plugins/onion/.claude-plugin" "${T}/.claude-plugin"
+printf '{\n  "ref": "%s",\n  "tree_sha": "abc"\n}\n' "$(git -C "${SRC}" rev-parse HEAD)" > "${T}/plugins/onion/.claude-plugin/provenance.json"
+printf '{\n  "name": "onion",\n  "version": "0.1.7"\n}\n' > "${T}/plugins/onion/.claude-plugin/plugin.json"
+printf '{\n  "name": "x",\n  "metadata": {\n    "description": "d",\n    "version": "0.1.0"\n  },\n  "plugins": []\n}\n' > "${T}/.claude-plugin/marketplace.json"
+exit 0
+STUB
+  { printf 'members:\n'
+    printf '  - id: onion-fulano\n    kind: adopter\n    role: standalone\n    local_path: "/home/fulano/onion-fulano"\n    onion_version: aaaaaaaaaaaa\n'
+    printf '  - id: porta-a\n    kind: door\n    role: standalone\n    remote: %s\n    onion_version: bbbbbbbbbbbb\n' "${doorup}"
+    printf '  - id: porta-p\n    kind: door\n    role: plugins\n    remote: %s\n    onion_version: cccccccccccc\n' "${plugup}"
+  } > "${core}/docs/evolution/federation/members.yaml"
+  _cpr() {  # $1 = assunto do commit; o motor lê de origin/main
+    git -C "${core}" add -A >/dev/null 2>&1 || true
+    git -C "${core}" "${G[@]}" commit -qm "$1" >/dev/null 2>&1 || true
+    git -C "${core}" push -q origin main >/dev/null 2>&1 || true
+  }
+  _cpr "chore: core falso"
+  local OLDPIN; OLDPIN="$(git -C "${core}" rev-parse --short=12 HEAD)"
+  # as portas JÁ publicadas antes do versionamento: carimbo sem release, provenance sem onion_release
+  local seed="${d}/seed" pseed="${d}/pseed"
+  git clone -q "${doorup}" "${seed}" >/dev/null 2>&1 || true
+  mkdir -p "${seed}/.claude"
+  printf 'framework: porta-a\nsource_commit: %s\nsource_commit_date: 2026-10-11\nrole: standalone\nkind: door\nmaterialized_at: 2026-10-11\n' "${OLDPIN}" > "${seed}/.claude/.onion-version"
+  git -C "${seed}" add -A >/dev/null 2>&1 || true
+  git -C "${seed}" "${G[@]}" commit -qm porta >/dev/null 2>&1 || true
+  git -C "${seed}" push -q origin HEAD:main >/dev/null 2>&1 || true
+  git clone -q "${plugup}" "${pseed}" >/dev/null 2>&1 || true
+  mkdir -p "${pseed}/plugins/onion/.claude-plugin"
+  printf '{\n  "ref": "%s",\n  "tree_sha": "abc"\n}\n' "$(git -C "${core}" rev-parse HEAD)" > "${pseed}/plugins/onion/.claude-plugin/provenance.json"
+  git -C "${pseed}" add -A >/dev/null 2>&1 || true
+  git -C "${pseed}" "${G[@]}" commit -qm plugins >/dev/null 2>&1 || true
+  git -C "${pseed}" push -q origin HEAD:main >/dev/null 2>&1 || true
+  local fk="${d}/fakebin"; mkdir -p "${fk}"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${fk}/claude"; chmod +x "${fk}/claude"
+  printf '#!/usr/bin/env bash\ncase "$*" in *+%%F*) if [ -n "${FAKE_DATE:-}" ]; then echo "${FAKE_DATE}"; exit 0; fi ;; esac\nexec /usr/bin/date "$@"\n' > "${fk}/date"; chmod +x "${fk}/date"
+
+  local _o _r
+  _pr() { if _o="$(PATH="${fk}:${PATH}" GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+                    bash "${core}/ops/publish-door.sh" "$@" 2>&1)"; then _r=0; else _r=$?; fi; }
+  _tip() { git ls-remote "$1" refs/heads/main 2>/dev/null | awk '{print $1}' || true; }
+  _tags() { git ls-remote --tags "$1" 2>/dev/null | awk '$2 !~ /\^\{\}$/ {print $2}' | LC_ALL=C sort | paste -sd' ' - || true; }
+  _tagmsg() { git --git-dir="$1" cat-file -p "refs/tags/$2" 2>/dev/null || true; }
+  # o core intacto INCLUSIVE DE TAGS: a tag mora nas portas
+  _rsnap() { printf '%s|%s|%s|%s' "$(git -C "${core}" rev-parse HEAD)" "$(git -C "${core}" status --porcelain | sha256sum | cut -c1-12)" \
+               "$(git -C "${core}" tag -l | sha256sum | cut -c1-12)" "$(git -C "${core}" worktree list --porcelain | grep -c '^worktree ' || true)"; }
+  local snap0 atip; atip="$(_tip "${doorup}")"
+
+  # (r1) 1º ensaio sem tag nenhuma ⇒ proposta 1.0.0 ('primeira'), nada sobe, nenhuma tag nasce
+  printf '# agente b\n' > "${core}/.claude/agents/b.md"; _cpr "feat: agente b"
+  _pr porta-a
+  if [ "${_r}" -eq 0 ] && grep -qP '^PROPOSTA-DA-PORTA\tporta-a\t—\tprimeira\t1\.0\.0$' <<< "${_o}" \
+     && [ "$(_tip "${doorup}")" = "${atip}" ] && [ -z "$(_tags "${doorup}")" ]; then
+    record_pass "publish_release: (r1) sem tag no remoto ⇒ proposta onion-v1.0.0 'primeira'; ensaio não sobe nada nem cria tag"
+  else record_fail "publish_release: (r1)" "rc=${_r} tags=$(_tags "${doorup}") out=${_o:0:400}"; fi
+
+  # (r2) --push SEM --version ⇒ recusa antes de qualquer rede; e --version malformado também
+  _pr porta-a --push
+  local _r2="${_r}" _o2="${_o}"
+  _pr porta-a --push --version 1.0
+  if [ "${_r2}" -eq 2 ] && grep -q -- '--push sem --version' <<< "${_o2}" && [ "${_r}" -eq 2 ] && grep -q 'não é X.Y.Z' <<< "${_o}" \
+     && [ "$(_tip "${doorup}")" = "${atip}" ]; then
+    record_pass "publish_release: (r2) --push sem --version ⇒ rc 2 e o remoto não anda; --version fora de X.Y.Z ⇒ rc 2"
+  else record_fail "publish_release: (r2) publicaria sem o selo do maestro" "rc=${_r2}/${_r} out=${_o2:0:250}"; fi
+
+  # (r3) --push --version 1.0.0 ⇒ a tag com o NOME DO PRODUTO (onion-v1.0.0, nunca v1.0.0) aponta a ponta
+  #      publicada, o carimbo diz release: 1.0.0 (write-stamp real), a mensagem é o changelog, core intacto
+  snap0="$(_rsnap)"
+  _pr porta-a --push --version 1.0.0
+  local _t3 _st3 _m3
+  _t3="$(git ls-remote "${doorup}" 'refs/tags/onion-v1.0.0^{}' 2>/dev/null | awk '{print $1}' || true)"
+  _st3="$(git --git-dir="${doorup}" show main:.claude/.onion-version 2>/dev/null | sed -n 's/^release: //p' || true)"
+  _m3="$(_tagmsg "${doorup}" onion-v1.0.0)"
+  if [ "${_r}" -eq 0 ] && [ "$(_tags "${doorup}")" = "refs/tags/onion-v1.0.0" ] && [ -n "${_t3}" ] && [ "${_t3}" = "$(_tip "${doorup}")" ] \
+     && [ "${_st3}" = "1.0.0" ] && grep -q 'Quebras nesta porta' <<< "${_m3}" && grep -q 'primeira release' <<< "${_m3}" \
+     && grep -q 'release onion-v1.0.0 empurrada e CONFERIDA' <<< "${_o}" && [ "$(_rsnap)" = "${snap0}" ]; then
+    record_pass "publish_release: (r3) --push --version 1.0.0 ⇒ tag onion-v1.0.0 na ponta, conferida; carimbo release: 1.0.0; changelog na tag; core intacto (tags inclusive)"
+  else record_fail "publish_release: (r3)" "rc=${_r} tags=$(_tags "${doorup}") tag=${_t3:0:12} tip=$(_tip "${doorup}" | cut -c1-12) rel=${_st3} core=$(_rsnap)≠${snap0} out=${_o:0:400}"; fi
+
+  # (r3b) o ramo subiu e a TAG NÃO (simulado apagando-a do remoto): a re-rodada com o MESMO número não
+  #       commita nada e só empurra a tag, na mesma ponta
+  atip="$(_tip "${doorup}")"
+  git --git-dir="${doorup}" tag -d onion-v1.0.0 >/dev/null 2>&1 || true
+  _pr porta-a --push --version 1.0.0
+  _t3="$(git ls-remote "${doorup}" 'refs/tags/onion-v1.0.0^{}' 2>/dev/null | awk '{print $1}' || true)"
+  if [ "${_r}" -eq 0 ] && [ "$(_tip "${doorup}")" = "${atip}" ] && [ "${_t3}" = "${atip}" ] && grep -q 'nada a empurrar' <<< "${_o}"; then
+    record_pass "publish_release: (r3b) tag que não chegou ao remoto ⇒ a re-rodada com o mesmo número só empurra a tag (ponta intacta)"
+  else record_fail "publish_release: (r3b) a tag faltante não foi recuperada" "rc=${_r} tag=${_t3:0:12} tip=${atip:0:12} out=${_o:0:400}"; fi
+  # (r3c) e com a tag lá, a re-rodada é idempotente: rc 0, nada sobe, a tag não muda de objeto
+  local _tobj; _tobj="$(git ls-remote "${doorup}" refs/tags/onion-v1.0.0 2>/dev/null | awk '{print $1}' || true)"
+  _pr porta-a --push --version 1.0.0
+  if [ "${_r}" -eq 0 ] && [ "$(_tip "${doorup}")" = "${atip}" ] && grep -q 'já está no remoto' <<< "${_o}" \
+     && [ "$(git ls-remote "${doorup}" refs/tags/onion-v1.0.0 2>/dev/null | awk '{print $1}' || true)" = "${_tobj}" ]; then
+    record_pass "publish_release: (r3c) re-rodada da mesma release no mesmo pin ⇒ idempotente (nada sobe, a tag fica)"
+  else record_fail "publish_release: (r3c)" "rc=${_r} out=${_o:0:400}"; fi
+
+  # (r3d) re-rodada da MESMA release noutro DIA: a única diferença é o materialized_at ⇒ nada sobe
+  FAKE_DATE=2099-01-01 _pr porta-a --push --version 1.0.0
+  if [ "${_r}" -eq 0 ] && [ "$(_tip "${doorup}")" = "${atip}" ] && grep -q 'única diferença era a data' <<< "${_o}"; then
+    record_pass "publish_release: (r3d) mesma release, mesmo pin, outro dia ⇒ só a data muda e nada sobe"
+  else record_fail "publish_release: (r3d) a re-rodada noutro dia publicou um 2º commit" "rc=${_r} out=${_o:0:400}"; fi
+  # (r3e) troca de PAPEL no mesmo pin e número ⇒ rc 2 (não some em silêncio como 'só a data')
+  _pr porta-a --push --version 1.0.0 --role hub --force-role-change
+  if [ "${_r}" -eq 2 ] && grep -q 'não se reescreve' <<< "${_o}" && [ "$(_tip "${doorup}")" = "${atip}" ]; then
+    record_pass "publish_release: (r3e) mesma release com troca de papel ⇒ rc 2, nada sobe"
+  else record_fail "publish_release: (r3e) troca de papel engolida" "rc=${_r} out=${_o:0:400}"; fi
+  # (r3f) NÚMERO DA FAMÍLIA: a porta de plugins entra na MESMA release (mesmo pin) com o mesmo número
+  _pr porta-p --push --version 1.0.0
+  if [ "${_r}" -eq 0 ] && grep -q 'no MESMO pin: esta porta entra na mesma release' <<< "${_o}" && grep -q 'refs/tags/onion-v1.0.0' <<< "$(_tags "${plugup}")"; then
+    record_pass "publish_release: (r3f) a mesma publicação (mesmo pin) entra noutra porta com o mesmo número"
+  else record_fail "publish_release: (r3f)" "rc=${_r} out=${_o:0:400}"; fi
+
+  # (r4) comando ADICIONADO ⇒ minor (1.1.0); o commit `docs:` não entra no changelog
+  printf '# comando dois\n' > "${core}/.claude/commands/x/two.md"; _cpr "feat: adiciona o comando dois"
+  printf '# agente (texto)\n' > "${core}/.claude/agents/a.md"; _cpr "docs: só texto do agente"
+  _pr porta-a
+  if [ "${_r}" -eq 0 ] && grep -qP '^PROPOSTA-DA-PORTA\tporta-a\t1\.0\.0\tminor\t1\.1\.0$' <<< "${_o}"; then
+    record_pass "publish_release: (r4) comando adicionado ⇒ proposta minor onion-v1.1.0"
+  else record_fail "publish_release: (r4) superfície adicionada não virou minor" "rc=${_r} out=${_o:0:400}"; fi
+  _pr porta-a --push --version 1.1.0
+  local _m4; _m4="$(_tagmsg "${doorup}" onion-v1.1.0)"
+  if [ "${_r}" -eq 0 ] && grep -q 'nenhuma quebra nesta porta' <<< "${_m4}" && grep -q '\.claude/commands/x/two\.md' <<< "${_m4}" \
+     && grep -q 'feat: 1' <<< "${_m4}" && ! grep -q 'adiciona o comando dois' <<< "${_m4}" && ! grep -q 'só texto do agente' <<< "${_m4}"; then
+    record_pass "publish_release: (r4b) changelog da 1.1.0: 'nenhuma quebra nesta porta', o comando novo listado, commits só por contagem (assunto não viaja, docs: fora)"
+  else record_fail "publish_release: (r4b) changelog da release" "rc=${_r} msg=${_m4:0:500}"; fi
+  # (r4c) a tag 1.1.0 some do remoto e é RECUPERADA: a mensagem nova compara com a 1.0.0, não com o HEAD
+  git --git-dir="${doorup}" tag -d onion-v1.1.0 >/dev/null 2>&1 || true
+  _pr porta-a --push --version 1.1.0
+  _m4="$(_tagmsg "${doorup}" onion-v1.1.0)"
+  if [ "${_r}" -eq 0 ] && grep -q '\.claude/commands/x/two\.md' <<< "${_m4}" && grep -q 'release anterior: onion-v1.0.0' <<< "${_m4}"; then
+    record_pass "publish_release: (r4c) tag recuperada leva o changelog verdadeiro (base = tag anterior, não o HEAD)"
+  else record_fail "publish_release: (r4c) a tag recuperada mente" "rc=${_r} msg=${_m4:0:500}"; fi
+
+  # (r5) release não anda para trás: --version menor que a última ⇒ rc 2, nada sobe
+  printf 'conteudo publico, revisto\n' > "${core}/README.md"; _cpr "fix: readme revisto"
+  atip="$(_tip "${doorup}")"
+  _pr porta-a --push --version 1.0.5
+  if [ "${_r}" -eq 2 ] && grep -q 'não é maior que a última release' <<< "${_o}" && [ "$(_tip "${doorup}")" = "${atip}" ]; then
+    record_pass "publish_release: (r5) --version 1.0.5 depois da 1.1.0 ⇒ rc 2 e o remoto não anda"
+  else record_fail "publish_release: (r5)" "rc=${_r} out=${_o:0:300}"; fi
+  # (r5b) e o MESMO número com conteúdo novo ⇒ rc 2 (release publicada não se reescreve)
+  _pr porta-a --push --version 1.1.0
+  if [ "${_r}" -eq 2 ] && grep -q 'não se reescreve' <<< "${_o}" && [ "$(_tip "${doorup}")" = "${atip}" ]; then
+    record_pass "publish_release: (r5b) --version de uma release já publicada com conteúdo novo ⇒ rc 2"
+  else record_fail "publish_release: (r5b)" "rc=${_r} out=${_o:0:300}"; fi
+  # (r5c) o número é da FAMÍLIA: os plugins não podem tomar onion-v1.1.0 num pin diferente do da porta-a
+  local ptip0; ptip0="$(_tip "${plugup}")"
+  _pr porta-p --push --version 1.1.0
+  if [ "${_r}" -eq 2 ] && grep -q 'não nomeia dois pins' <<< "${_o}" && [ "$(_tip "${plugup}")" = "${ptip0}" ]; then
+    record_pass "publish_release: (r5c) onion-v1.1.0 já designa outro pin noutra porta ⇒ rc 2 (o número da família não nomeia dois pins)"
+  else record_fail "publish_release: (r5c) colisão de número entre portas" "rc=${_r} out=${_o:0:400}"; fi
+  # (r5d) e a proposta da porta de plugins parte do máximo da FAMÍLIA (1.1.0), não da tag dela (1.0.0)
+  _pr porta-p
+  if grep -qP '^PROPOSTA-DA-PORTA\tporta-p\t1\.1\.0\t' <<< "${_o}"; then
+    record_pass "publish_release: (r5d) a proposta de uma porta parte do máximo da família"
+  else record_fail "publish_release: (r5d)" "rc=${_r} out=$(grep PROPOSTA <<< "${_o}")"; fi
+
+  # (r6) só conteúdo fora da superfície ⇒ patch (1.1.1) e 'nenhuma quebra nesta porta' no changelog
+  _pr porta-a
+  if [ "${_r}" -eq 0 ] && grep -qP '^PROPOSTA-DA-PORTA\tporta-a\t1\.1\.0\tpatch\t1\.1\.1$' <<< "${_o}" && grep -q 'nenhuma quebra nesta porta' <<< "${_o}"; then
+    record_pass "publish_release: (r6) mudança fora da superfície ⇒ proposta patch onion-v1.1.1, 'nenhuma quebra nesta porta'"
+  else record_fail "publish_release: (r6)" "rc=${_r} out=${_o:0:400}"; fi
+
+  # (r7) comando REMOVIDO ⇒ major (2.0.0), e a quebra é nomeada no changelog
+  git -C "${core}" rm -q .claude/commands/x/one.md >/dev/null 2>&1 || true; _cpr "refactor: remove o comando um"
+  _pr porta-a
+  if [ "${_r}" -eq 0 ] && grep -qP '^PROPOSTA-DA-PORTA\tporta-a\t1\.1\.0\tmajor\t2\.0\.0$' <<< "${_o}" && grep -q 'removido: \.claude/commands/x/one\.md' <<< "${_o}"; then
+    record_pass "publish_release: (r7) comando removido ⇒ proposta major onion-v2.0.0 e a quebra nomeada"
+  else record_fail "publish_release: (r7) remoção não virou major" "rc=${_r} out=${_o:0:400}"; fi
+  printf '# comando um\n' > "${core}/.claude/commands/x/one.md"; _cpr "fix: devolve o comando um"
+  # (r7b) comando RENOMEADO ⇒ major, nomeado como renomeação
+  git -C "${core}" mv .claude/commands/x/one.md .claude/commands/x/uno.md >/dev/null 2>&1 || true; _cpr "refactor: renomeia o comando um"
+  _pr porta-a
+  if grep -qP '^PROPOSTA-DA-PORTA\tporta-a\t1\.1\.0\tmajor\t2\.0\.0$' <<< "${_o}" && grep -q 'renomeado: \.claude/commands/x/one\.md -> \.claude/commands/x/uno\.md' <<< "${_o}"; then
+    record_pass "publish_release: (r7b) comando renomeado ⇒ proposta major e a renomeação nomeada"
+  else record_fail "publish_release: (r7b) renomeação não virou major" "rc=${_r} out=${_o:0:400}"; fi
+  git -C "${core}" mv .claude/commands/x/uno.md .claude/commands/x/one.md >/dev/null 2>&1 || true; _cpr "refactor: desfaz a renomeação"
+  # (r7c) chave do CARIMBO mudou ⇒ major
+  printf 'x\n' > "${core}/.claude/PLANT-KEY"; _cpr "chore: planta chave"
+  _pr porta-a
+  if grep -qP '^PROPOSTA-DA-PORTA\tporta-a\t1\.1\.0\tmajor\t2\.0\.0$' <<< "${_o}" && grep -q 'chave do carimbo mudou' <<< "${_o}"; then
+    record_pass "publish_release: (r7c) chave nova no carimbo ⇒ proposta major"
+  else record_fail "publish_release: (r7c) schema do carimbo não virou major" "rc=${_r} out=${_o:0:400}"; fi
+  git -C "${core}" rm -q .claude/PLANT-KEY >/dev/null 2>&1 || true; _cpr "chore: tira chave"
+
+  # (r8) entrada BREAKING no CHANGELOG da federação desde a última tag ⇒ candidata a major, só a CONTAGEM viaja
+  printf '## 2026-10-11 · renomeia algo · BREAKING · alvo: todos\n\ntexto do core\n' >> "${core}/docs/evolution/federation/CHANGELOG.md"; _cpr "feat: anuncia quebra"
+  _pr porta-a
+  if [ "${_r}" -eq 0 ] && grep -qP '^PROPOSTA-DA-PORTA\tporta-a\t1\.1\.0\tmajor\t2\.0\.0$' <<< "${_o}" && grep -q 'candidata a major: 1 entrada' <<< "${_o}" \
+     && grep -q 'candidata: 1 entrada(s) BREAKING' <<< "${_o}" && ! grep -q '│ .*renomeia algo' <<< "${_o}"; then
+    record_pass "publish_release: (r8) BREAKING no CHANGELOG da federação ⇒ candidata a major; o changelog leva a contagem, não o texto"
+  else record_fail "publish_release: (r8)" "rc=${_r} out=${_o:0:500}"; fi
+
+  # (r9) PLUGINS: a família vai no metadata do catálogo e em onion_release do provenance; o version do
+  #      plugin.json (por conteúdo) NÃO muda por causa da família; a tag nasce no repo de plugins
+  local ptip; ptip="$(_tip "${plugup}")"
+  _pr porta-p --push --version 1.2.0
+  local _pv _pm _pj
+  _pv="$(git --git-dir="${plugup}" show main:plugins/onion/.claude-plugin/provenance.json 2>/dev/null | sed -n 's/.*"onion_release": "\([^"]*\)".*/\1/p' || true)"
+  _pm="$(git --git-dir="${plugup}" show main:.claude-plugin/marketplace.json 2>/dev/null | sed -n 's/.*"version": "\([^"]*\)".*/\1/p' | sed -n '1p' || true)"
+  _pj="$(git --git-dir="${plugup}" show main:plugins/onion/.claude-plugin/plugin.json 2>/dev/null | sed -n 's/.*"version": "\([^"]*\)".*/\1/p' || true)"
+  if [ "${_r}" -eq 0 ] && [ "$(_tip "${plugup}")" != "${ptip}" ] && [ "${_pv}" = "1.2.0" ] && [ "${_pm}" = "1.2.0" ] && [ "${_pj}" = "0.1.7" ] \
+     && [ "$(_tags "${plugup}")" = "refs/tags/onion-v1.0.0 refs/tags/onion-v1.2.0" ]; then
+    record_pass "publish_release: (r9) plugins: onion_release e metadata.version = 1.2.0; plugin.json segue 0.1.7 (por conteúdo); tag onion-v1.2.0"
+  else record_fail "publish_release: (r9)" "rc=${_r} prov=${_pv} meta=${_pm} plugin=${_pj} tags=$(_tags "${plugup}") out=${_o:0:400}"; fi
+
+  # (r10) --status mostra a versão PUBLICADA, lida do carimbo remoto, e a derivada do pin que não é release
+  _pr --status
+  if [ "${_r}" -eq 0 ] && grep -qE '^porta-a .* 1\.1\.0 .*DEFASADA.*≈ onion-v1\.1\.0-[0-9]+-g[0-9a-f]{12}' <<< "${_o}" \
+     && grep -qE '^porta-p .* 1\.2\.0 ' <<< "${_o}"; then
+    record_pass "publish_release: (r10) --status: versão publicada por porta (1.1.0 · 1.2.0) e o pin novo derivado onion-v1.1.0-N-gSHA"
+  else record_fail "publish_release: (r10)" "rc=${_r} out=${_o:0:500}"; fi
+
+  # (r11) --all ensaia porta a porta e agrega o NÚMERO ÚNICO da família (maior tag, maior bump)
+  _pr --all
+  if grep -q 'PROPOSTA DA FAMÍLIA (número único): onion-v2.0.0 — major sobre onion-v1.2.0' <<< "${_o}"; then
+    record_pass "publish_release: (r11) --all agrega a proposta da família: onion-v2.0.0 (major sobre a maior tag da família)"
+  else record_fail "publish_release: (r11)" "rc=${_r} out=$(grep -E 'FAMÍLIA|PROPOSTA' <<< "${_o}" | head -5)"; fi
+
+  # (r12) assunto de commit com id de adotante NÃO trava a porta: o assunto não viaja (a porta é sem
+  #       biografia), a release sai, e a mensagem da tag não traz o id
+  printf '# agente (rev)\n' > "${core}/.claude/agents/a.md"; _cpr "fix: sinal do onion-fulano"
+  _pr porta-a --push --version 2.0.0
+  local _m12; _m12="$(_tagmsg "${doorup}" onion-v2.0.0)"
+  if [ "${_r}" -eq 0 ] && [ -n "${_m12}" ] && ! grep -q 'onion-fulano' <<< "${_m12}" && grep -q 'fix: ' <<< "${_m12}"; then
+    record_pass "publish_release: (r12) assunto com id de adotante no intervalo ⇒ a release sai e o assunto não viaja (só a contagem)"
+  else record_fail "publish_release: (r12) o assunto travou a porta ou vazou" "rc=${_r} msg=${_m12:0:300} out=${_o:0:300}"; fi
+  # (r12b) o changelog é VARRIDO: um NOME de arquivo com id de adotante (a varredura do bundle lê só
+  #        conteúdo) chega à lista de superfície e barra; porta e tag NÃO sobem
+  printf '# comando\n' > "${core}/.claude/commands/x/onion-fulano.md"; _cpr "feat: comando novo"
+  atip="$(_tip "${doorup}")"
+  _pr porta-a --push --version 3.0.0
+  if [ "${_r}" -eq 1 ] && grep -q 'VAZAMENTO' <<< "${_o}" && grep -q '‹changelog da release›' <<< "${_o}" && [ "$(_tip "${doorup}")" = "${atip}" ] \
+     && ! grep -q 'onion-v3.0.0' <<< "$(_tags "${doorup}")"; then
+    record_pass "publish_release: (r12b) id de adotante num nome de arquivo da superfície ⇒ o changelog barra; porta e tag NÃO sobem"
+  else record_fail "publish_release: (r12b) changelog com termo de adotante passou" "rc=${_r} out=${_o:0:400}"; fi
+
+  # (r14) A LENTE SEGUE O COMANDO (o mecanismo REAL de corte por papel, no core real): o standalone não
+  #       recebe /meta:publish, então nem a publish-lens (cujo `paths:` lá não casaria nada: 1 HARD da
+  #       REGRA 53 no lint da porta, medido em 2026-10-11) nem a publish-doctrine viajam a ele; a source leva as duas
+  local _vmo _vms
+  _vmo="$(bash "${REPO_ROOT}/.claude/utils/adopt/vendor-manifest.sh" --repo "${REPO_ROOT}" --list standalone 2>/dev/null || true)"
+  _vms="$(bash "${REPO_ROOT}/.claude/utils/adopt/vendor-manifest.sh" --repo "${REPO_ROOT}" --list source 2>/dev/null || true)"
+  if [ -n "${_vmo}" ] && ! grep -qx '\.claude/rules/publish-lens\.md' <<< "${_vmo}" && ! grep -qx '\.claude/commands/common/prompts/publish-doctrine\.md' <<< "${_vmo}" \
+     && grep -qx '\.claude/rules/publish-lens\.md' <<< "${_vms}" && grep -qx '\.claude/commands/common/prompts/publish-doctrine\.md' <<< "${_vms}"; then
+    record_pass "publish_release: (r14) publish-lens e publish-doctrine saem do standalone com o comando; a source leva as duas"
+  else record_fail "publish_release: (r14) a lente viaja sem o comando" "standalone: $(grep -E 'publish-(lens|doctrine)' <<< "${_vmo}" | tr '\n' ' ') · source: $(grep -cE 'publish-(lens|doctrine)' <<< "${_vms}")"; fi
+
+  # (r13) depois de tudo, o core falso segue intocado no que é do motor (HEAD andou pelos commits DA BANCADA)
+  if [ -z "$(git -C "${core}" tag -l)" ]; then
+    record_pass "publish_release: (r13) nenhuma tag nasceu no core em nenhuma rodada (a tag mora nas portas)"
+  else record_fail "publish_release: (r13) tag no core" "$(git -C "${core}" tag -l | tr '\n' ' ')"; fi
+
+  unset -f _pr _tip _tags _tagmsg _rsnap _cpr
   rm -rf "${d}"
 }
 
@@ -23271,6 +24061,7 @@ _family run_door_seal_pin_selftests
 _family run_registry_pins_selftests
 _family run_door_cycle_selftests
 _family run_publish_selftests
+_family run_publish_release_selftests
 _family run_door_mini_selftests
 # ── REGRA 86: workflow que não parseia é workflow MORTO, e o repo não sabe ────────────────────
 # Nasceu de um `env:` duplicado que deixou o `onion-review-diagnose.yml` inexecutável por um dia
@@ -24985,6 +25776,32 @@ run_kg_contract_check_selftests() {
   if [ "${rc}" -eq 1 ] && grep -q "MACHINE-PATH E_A.label: '//home/' (dbl)" <<< "${out}" && ! grep -q "Q_A.label" <<< "${out}"; then
     record_pass "kg-contract-check: (j3) rastreado que ganha caminho novo → rc 1 só pelo novo (o herdado não é cobrado)"
   else record_fail "kg-contract-check: (j3)" "esperava rc 1 só com o //home novo: rc=${rc} ${out}"; fi
+  # (k) RENOME (SAC-99, 2026-10-11): `git mv` de um grafo com dívida HERDADA (data sem aspas desde a base) não
+  #     vira piora — a versão de antes é a do caminho antigo em HEAD. E o renomeado que GANHA código novo segue
+  #     reprovando (o renome não vira isenção). Mutante: tirar o bloco do rename deixa (k1) rc 1 → reprova.
+  ( cd "${sb}" && git mv g/divida.kg.yaml g/renomeada.kg.yaml ) >/dev/null 2>&1
+  if out="$(cd "${sb}" && bash .claude/validation/kg-contract-check.sh g/renomeada.kg.yaml 2>&1)"; then rc=0; else rc=$?; fi
+  if [ "${rc}" -eq 0 ]; then record_pass "kg-contract-check: (k1) grafo renomeado com dívida herdada → rc 0 (renomear não é escrever)"
+  else record_fail "kg-contract-check: (k1)" "dívida herdada do renomeado cobrada como nova: rc=${rc} ${out}"; fi
+  sed -i "s/label: \"evidência A\"/label: \"${long}\"/" "${sb}/g/renomeada.kg.yaml"
+  if out="$(cd "${sb}" && bash .claude/validation/kg-contract-check.sh g/renomeada.kg.yaml 2>&1)"; then rc=0; else rc=$?; fi
+  if [ "${rc}" -eq 1 ] && grep -q 'form.range.node.label' <<< "${out}"; then
+    record_pass "kg-contract-check: (k2) renomeado que ganha label longo → rc 1 (o renome não isenta a piora)"
+  else record_fail "kg-contract-check: (k2)" "piora no renomeado não acusada: rc=${rc} ${out}"; fi
+  # (k3) NÃO é renome: apagar o grafo A com dívida e criar, no mesmo índice, um B com o mesmo esqueleto mas
+  #      OUTROS nós (ids trocados) → o git pareia A→B pelo texto (>=50%), mas B é outro grafo: nasce novo e a
+  #      dívida É cobrada. Só o limiar de texto faria B herdar a tolerância de A. Mutante: tirar a exigência de
+  #      ids em comum reprova este caso.
+  _kcc_graph antiga | sed -e 's/baseline: "2026-10-08"/baseline: 2026-10-08/' > "${sb}/g/antiga.kg.yaml"
+  ( cd "${sb}" && git add g/antiga.kg.yaml && git -c user.email=t@t -c user.name=t commit -qm antiga \
+    && git rm -qf g/antiga.kg.yaml ) >/dev/null 2>&1 || true
+  { _kcc_graph outro | sed -e 's/baseline: "2026-10-08"/baseline: 2026-10-08/' \
+      -e 's/Q_A$/Q_OUTRA/' -e 's/E_A$/E_OUTRA/' -e 's/: Q_A$/: Q_OUTRA/' -e 's/: E_A$/: E_OUTRA/'; } > "${sb}/g/outro.kg.yaml"
+  ( cd "${sb}" && git add g/outro.kg.yaml ) >/dev/null 2>&1 || true
+  if out="$(cd "${sb}" && bash .claude/validation/kg-contract-check.sh g/outro.kg.yaml 2>&1)"; then rc=0; else rc=$?; fi
+  if [ "${rc}" -eq 1 ] && grep -q 'yaml.unquoted-date' <<< "${out}"; then
+    record_pass "kg-contract-check: (k3) apagar A e criar B reescrito não é renome → a dívida de B é cobrada"
+  else record_fail "kg-contract-check: (k3)" "B herdou a tolerância de A: rc=${rc} ${out} [$(cd "${sb}" && git diff --cached -M --name-status HEAD 2>&1 | tr '\n' ' ')]"; fi
   # (f) o checador NÃO deixa bytecode no vendor. Medido em 2026-10-08: rodar o leitor de referência sem -B
   #     plantava tools/__pycache__/*.pyc, e o `kg_vendor.py check` seguinte reprovava o vendor como
   #     "divergente da tag" (o check rejeita bytecode de propósito). Rodamos sem PYTHONDONTWRITEBYTECODE,
@@ -25125,6 +25942,75 @@ EOF_MUT
   rm -rf "${sb}"
 }
 _family run_kg_machine_path_selftests
+
+# REGRA 100 (Superfície que viaja não cita ops/ como se o destinatário o tivesse) — SAC-86, medido em 2026-10-09
+# na materialização do onion-standalone (pin 947e69ce): a lente kg-grammar.md descrevia ao adotante o
+# comportamento de um script de ops/, que não viaja. Casos: (a) as polaridades do --selftest · (b) o modo que o
+# lint consome, no corpus real · (c) o dispatcher de produção sobre o defeito verbatim · (m) UM MUTANTE POR CASO,
+# na CÓPIA da guarda — mutante que não se aplica é FALHA, nunca verde por vacuidade.
+run_ops_citation_travel_selftests() {
+  # o baseline (.claude/validation/ops-citation-travel-baseline.txt) é exercitado pelo (b), no corpus real
+  local chk="${REPO_ROOT}/.claude/validation/ops-citation-travel-check.sh"
+  [ -f "${chk}" ] || { record_fail "ops-citation-travel" "guarda ausente"; return; }
+  local o rc
+  # (a) o --selftest próprio: acusa o defeito verbatim e cala nas três declarações + fora do escopo
+  if o="$(LC_ALL=C bash "${chk}" --selftest 2>&1)"; then rc=0; else rc=$?; fi
+  if [ "${rc}" -eq 0 ] && grep -qF 'selftest: 17/17 verdes' <<< "${o}"; then
+    record_pass "ops-citation-travel: (a) --selftest verde (17 casos: o defeito verbatim, as três declarações, fora do escopo, catraca por contagem e os achados da passada adversarial)"
+  else record_fail "ops-citation-travel: (a) --selftest" "rc=${rc}; $(grep '✗' <<< "${o}" | head -3 | tr '\n' '|')"; fi
+  # (b) O MODO QUE A PRODUÇÃO CONSOME, no corpus real: --format tsv sai 0, sem HARD, e com o passivo à vista.
+  #     CAMINHO LITERAL: a REGRA 59 casa o nome do arquivo para achar o par.
+  if o="$(cd "${REPO_ROOT}" && LC_ALL=C bash "${REPO_ROOT}/.claude/validation/ops-citation-travel-check.sh" "${REPO_ROOT}" --format tsv 2>&1)"; then rc=0; else rc=$?; fi
+  if [ "${rc}" -eq 0 ] && ! grep -q '^HARD' <<< "${o}" && grep -q $'^SOFT\tPASSIVO\t' <<< "${o}"; then
+    record_pass "ops-citation-travel: (b) corpus real → rc 0, sem HARD, passivo SOFT no modo tsv"
+  else record_fail "ops-citation-travel: (b) corpus real" "rc=${rc}; [$(grep '^HARD' <<< "${o}" | head -3 | tr '\n' '|')]"; fi
+  # (c) O CAMINHO DE PRODUÇÃO: o lint-artifacts real, num repo com o defeito VERBATIM numa lente, emite a REGRA 100
+  local sd; sd="$(TMPDIR=/tmp mktemp -d)"
+  cp -a "${SANDBOX}/.claude" "${sd}/" 2>/dev/null; mkdir -p "${sd}/.claude/rules"
+  printf '| x | o rebase reescreve o sha — o `ops/pr-merge-verified.sh` recusa e pede `--merge-commit` (SAC-80) |\n' > "${sd}/.claude/rules/fx-lens.md"
+  ( cd "${sd}" && git init -q . 2>/dev/null; git add -A ) >/dev/null 2>&1
+  local l; l="$(cd "${sd}" && LC_ALL=C bash .claude/validation/lint-artifacts.sh --only="${sd}/.claude/rules/fx-lens.md" 2>&1 || true)"
+  if grep -q "REGRA 100 (Superfície que viaja não cita ops/ como se o destinatário o tivesse): \[NEW\] cita 'ops/pr-merge-verified.sh'" <<< "${l}"; then
+    record_pass "ops-citation-travel: (c) o lint de produção (dispatcher) emite a REGRA 100 sobre o defeito verbatim"
+  else record_fail "ops-citation-travel: (c) dispatcher" "$(grep -E 'REGRA 100|HARD' <<< "${l}" | head -3 | tr '\n' '|')"; fi
+  rm -rf "${sd}"
+  # (m) MUTANTES — revertem cada cura na CÓPIA da guarda e EXIGEM que o caso nomeado reprove
+  local sb; sb="$(TMPDIR=/tmp mktemp -d)"; mkdir -p "${sb}/.claude/validation"
+  local s="${sb}/.claude/validation/ops-citation-travel-check.sh" old new want mo mrc
+  while IFS=$'\x1f' read -r old new want; do
+    [ -n "${old}" ] || continue
+    cp "${chk}" "${s}"
+    if ! python3 -I -B -c 'import sys; p,a,b=sys.argv[1:4]; s=open(p,encoding="utf-8").read(); sys.exit(3) if s.count(a)!=1 else open(p,"w",encoding="utf-8").write(s.replace(a,b))' \
+         "${s}" "${old}" "${new}"; then
+      record_fail "ops-citation-travel: (m) mutante não aplicou" "${want}"; continue
+    fi
+    if mo="$(LC_ALL=C bash "${s}" --selftest 2>&1)"; then mrc=0; else mrc=$?; fi
+    if [ "${mrc}" -eq 1 ] && grep -qF "✗ ${want}" <<< "${mo}"; then record_pass "ops-citation-travel: (m) mutante morde → ✗ ${want}"
+    else record_fail "ops-citation-travel: (m) mutante NÃO morde" "${want} (rc=${mrc})"; fi
+  done <<EOF_MUT
+if (!(cand[i] in gtok)) print rel "|" cand[i]$(printf '\x1f')if (0) print rel "|" cand[i]$(printf '\x1f')(i)
+l ~ /\([Cc]ore[- ]only[),;[:space:]]/ { next }$(printf '\x1f')l ~ /\(XCore[- ]only[),;[:space:]]/ { next }$(printf '\x1f')(ii)
+  [ "\${#bases[@]}" -gt 0 ] || return 0$(printf '\x1f')  bases+=("\${repo}/docs"); [ "\${#bases[@]}" -gt 0 ] || return 0$(printf '\x1f')(iii)
+else if (c + 0 > b[k] + 0)$(printf '\x1f')else if (c + 0 >= b[k] + 0)$(printf '\x1f')(iv)
+if (tokens(op) > 0) lg[toks[1]] = 1$(printf '\x1f')if (tokens(op) > 0) lg["x"] = 1$(printf '\x1f')(v)
+) fmcore = 1 }$(printf '\x1f')) fmcore = 0 }$(printf '\x1f')(vi)
+       ! -path '*/fixtures/*' -print0$(printf '\x1f')       -print0$(printf '\x1f')(vii)
+|[A-Za-z][A-Za-z0-9_-]+\/[A-Za-z0-9_.*-]*)/$(printf '\x1f')|[A-Za-z][A-Za-z0-9_-]*\/[A-Za-z0-9_.*-]*)/$(printf '\x1f')(vii)
+\$NF + 0 > p[k] + 0) print k "|" \$NF }$(printf '\x1f')\$NF + 0 > p[k] + 0) k = k }$(printf '\x1f')(viii)
+if [ ! -f "\${BASELINE}" ]; then$(printf '\x1f')if false; then$(printf '\x1f')(ix)
+if (c == "/" && !rootvar(substr(pre, 1, length(pre) - 1))) continue$(printf '\x1f')if (0) continue$(printf '\x1f')(x)
+if (op in vtok) lg[vtok[op]] = 1$(printf '\x1f')if (op in vtok) lg["x"] = 1$(printf '\x1f')(xi)
+l ~ /\([Cc]ore[- ]only[),;[:space:]]/ { next }$(printf '\x1f')l ~ /\([Cc]ore[- ]only[)]/ { next }$(printf '\x1f')(xii)
+else if (c + 0 > b[k] + 0)$(printf '\x1f')else if (c + 0 > b[k] + 99)$(printf '\x1f')(xiii)
+sub(/\r\$/, "", l);$(printf '\x1f')sub(/\rX\$/, "", l);$(printf '\x1f')(xiv)
+(NÃO|Não|não|NAO|Nao|nao|NOT|Not|not)$(printf '\x1f')(XYZ)$(printf '\x1f')(xiv)
+for (t in lg) if (code) gtok[t] = 1$(printf '\x1f')for (t in lg) gtok[t] = 1$(printf '\x1f')(xvi)
+-[efxsdrL][[:space:]]+[^] ]+/)$(printf '\x1f')-[efxsd][[:space:]]+[^] ]+/)$(printf '\x1f')(xvii)
+if (inpaths) next$(printf '\x1f')if (0) next$(printf '\x1f')(xv)
+EOF_MUT
+  rm -rf "${sb}"
+}
+_family run_ops_citation_travel_selftests
 
 # Modo kg-migrate-v3 — SAC-73 parte 1: a ferramenta de migração do corpus ao contrato v3
 # (.claude/utils/kg/kg-migrate-v3.py) cita datas, deriva provenance SÓ de fonte que o nó já traz,

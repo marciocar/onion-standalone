@@ -1565,6 +1565,22 @@ check_harvest_names_removed_nodes() {
   added="$(grep -E '^[+][[:space:]]*-[[:space:]]*id:' <<< "${_kgdiff}" \
              | sed -E 's/^[+][[:space:]]*-[[:space:]]*id:[[:space:]]*//; s/[[:space:]]*$//' | sort -u || true)"
   [ -n "${added}" ] && removed="$(comm -23 <(printf '%s\n' "${removed}") <(printf '%s\n' "${added}") | sed '/^$/d')"
+  # RENOME não é colheita (SAC-99, 2026-10-11): o nó renomeado declara `x_renamed_from: "<sha256[:12] do id
+  # antigo>"`, e o id antigo cujo hash aparece numa linha ADICIONADA do diff sai da cobrança. Por HASH e não
+  # pelo id: o renome do SAC-99 existiu para TIRAR um nome privado do id, e cobrar o id antigo verbatim no
+  # resíduo obrigaria a gravar o nome de novo (o refutador mediu: 4 vezes). Nada se perde — o nó segue no grafo.
+  local _ren _rid _h _keep=""
+  _ren="$(grep -E '^[+][[:space:]]+x_renamed_from:' <<< "${_kgdiff}" \
+          | sed -E 's/^[+][[:space:]]+x_renamed_from:[[:space:]]*//; s/["'"'"'[:space:]]//g' || true)"
+  if [ -n "${_ren}" ] && [ -n "${removed}" ]; then
+    while IFS= read -r _rid; do
+      [ -n "${_rid}" ] || continue
+      _h="$(printf '%s' "${_rid}" | sha256sum 2>/dev/null)"; _h="${_h:0:12}"
+      grep -qxF -- "${_h}" <<< "${_ren}" || _keep="${_keep}${_rid}
+"
+    done <<< "${removed}"
+    removed="$(sed '/^$/d' <<< "${_keep}")"
+  fi
   [ -n "${removed}" ] || return 0   # não houve colheita → nada a julgar
 
   slug="$(printf '%s' "${branch}" | tr '/' '-')"
@@ -1754,6 +1770,14 @@ for name, lst in sets.items():
 for t, names in sorted(owner.items()):
     if len(names) > 1:
         print("DUPSET\t%s\t%s" % (t, ",".join(names)))
+# adoption_keeps (2026-10-11, papel de ADOÇÃO ≠ papel de PORTA): o que o adotado mantém e a porta do mesmo
+# papel não leva. Nome fora da partição seria capacidade prometida que o corte não sabe entregar.
+for role, spec in (d.get("roles") or {}).items():
+    for t in ((spec or {}).get("adoption_keeps") or []):
+        # e nunca um comando de ADOÇÃO: o companheiro dele (utils/adopt/) segue cortado do standalone, e o
+        # comando nasceria morto no adotado (passada adversarial de 2026-10-11)
+        if t not in owner or "adoption" in owner.get(t, []):
+            print("KEEPBAD\t%s\t%s" % (role, t))
 mdir = os.path.join(root, ".claude", "commands", "meta")
 # A partição julga o que é RASTREADO (o que o transporte pode levar): a bancada planta sondas não
 # rastreadas em commands/meta/ para testar OUTRAS regras, e contá-las reprovava 3 casos alheios (medido
@@ -1780,6 +1804,7 @@ PY
       BADSET) violation "HARD" "utils/marketplace/roles.yaml" "papel '${a}' referencia work_tools set '${b}' inexistente em work_tool_sets" ;;
       TOOL) [ -f "${REPO_ROOT}/.claude/commands/meta/${a}.md" ] || violation "HARD" "utils/marketplace/roles.yaml" "work_tool '${a}' sem comando em .claude/commands/meta/${a}.md — crie com /meta:create-command ${a} (ou corrija o nome em work_tool_sets se foi digitado errado)" ;;
       DUPSET) violation "HARD" "utils/marketplace/roles.yaml" "work_tool '${a}' está em MAIS DE UM conjunto (${b}) — os conjuntos particionam commands/meta/: deixe o comando em um só" ;;
+      KEEPBAD) violation "HARD" "utils/marketplace/roles.yaml" "o papel '${a}' declara adoption_keeps '${b}', que não está em NENHUM work_tool_set ou é do conjunto adoption — o adotado receberia um nome que o corte não sabe entregar (ou um comando sem o motor dele); corrija o nome ou classifique o comando" ;;
       UNSET) violation "HARD" "utils/marketplace/roles.yaml" "comando /meta:${a} não está em NENHUM work_tool_set — classifique-o (full, meta_factory, federation, adoption ou pending) em roles.yaml; sem classificação o corte por papel decide por default, em silêncio" ;;
       ALLOWDEAD) violation "HARD" "utils/marketplace/roles.yaml" "a allowlist do papel '${a}' nomeia '.claude/${b}', que não existe — corrija o caminho ou tire-o da lista" ;;
       OVERDEAD) violation "HARD" "utils/marketplace/roles.yaml" "o overlay do papel '${a}' aponta a fonte '${b}', que não existe — a porta sairia sem o arquivo próprio dela (o materializador recusa); crie a fonte ou corrija o caminho" ;;
@@ -1819,8 +1844,8 @@ check_moat_boundary() {
   # PODEM entrar num manifesto publicável (o empacotamento é da F4, SAC-93), e o que a regra protege é
   # o que a matriz tira do standalone: adoção (adopt, federation-*, onion-publish, decouple, o motor do
   # marketplace) e federação. Por isso co-evolve e co-relay, que eram "upstream permitido por desenho",
-  # passaram a ser barrados: a matriz os nomeia entre o que sai. personality-sync entra pela mesma razão
-  # do roles.yaml (conjunto `pending`): a matriz não o classificou, e o lado seguro é não publicá-lo.
+  # passaram a ser barrados: a matriz os nomeia entre o que sai. personality-sync também: desde 2026-10-11
+  # ele mora no conjunto `federation` do roles.yaml (decisão do maestro), e federação não se publica.
   # O grafo (*.kg.yaml) segue moat em todo papel: é o SSOT privado, não fábrica.
   local moat_base='^(adopt|federation-.*|co-(announce|deliver|evolve|relay)|co-evolution-inbox-check|personality-sync|decouple-source|assemble-plugin|generate-marketplace|materialize-marketplace-repo)\.(md|sh)$'
   local moat_path='(/utils/adopt/|/utils/marketplace/|/utils/federation/|/utils/federation-transport/|/utils/co-evolution/|/skills/onion-publish/|\.kg\.yaml$)'
@@ -3984,6 +4009,8 @@ check_kg_view_sync() {
 #   Termos são DERIVADOS de members.yaml (nunca hardcoded — nome de cliente no
 #   script seria o próprio vazamento).
 #   Hub de privacidade: as REGRAS 33 e 36 derivam desta (threat models distintos).
+#   P7 (SAC-99, 2026-10-11): também IDS DE NÓ e CAMINHOS DE GRAFO de todo o corpus em docs/, com os
+#   termos do client-terms.txt — o id e o caminho saem para as projeções geradas de qualquer grafo.
 # ===========================================================================
 check_projection_safety() {
   local helper="${SCRIPT_DIR}/projection-safety.sh"
@@ -3991,7 +4018,7 @@ check_projection_safety() {
   # Honra --only com a MESMA semântica do _find (mantém o selftest O(fixtures × 1)).
   if [ -n "${ONLY_PATH}" ]; then
     case "${ONLY_PATH}" in
-      "${REPO_ROOT}"/site/*|"${REPO_ROOT}"/docs/onion/graph/*|*/federation-console.html|*/members.yaml) : ;;
+      "${REPO_ROOT}"/site/*|"${REPO_ROOT}"/docs/onion/graph/*|*/federation-console.html|*/members.yaml|"${REPO_ROOT}"/docs/*.kg.yaml|*/client-terms.txt) : ;;
       *) return 0 ;;
     esac
   fi
@@ -4016,6 +4043,14 @@ check_projection_safety() {
                "${REPO_ROOT}/docs/onion/federation-map.md")
   fi
   out="$(bash "${helper}" --format tsv "${surfaces[@]}" 2>/dev/null || true)"
+  # P7 (SAC-99, 2026-10-11): IDS DE NÓ e CAMINHOS DE GRAFO de todo o corpus em docs/. O id e o caminho são
+  # o que as projeções geradas (índice de leitura do KG, backlog projetado) copiam de QUALQUER grafo, não só
+  # dos de docs/onion/graph — e a varredura de conteúdo acima não os via (dano medido na onda O4: 4 ids e 1
+  # grafo com o nome da pasta privada de um hub). Folha não entra: lá os grafos são do próprio adotante.
+  if [ "${IS_LEAF}" -ne 1 ] && [ -d "${REPO_ROOT}/docs" ]; then
+    out="${out}
+$(bash "${helper}" --kg-identifiers --format tsv "${REPO_ROOT}/docs" 2>/dev/null || true)"
+  fi
   [ -n "${out}" ] || return 0
   while IFS=$'\t' read -r sev tag path msg; do
     [ -n "${sev}" ] || continue
@@ -5454,6 +5489,47 @@ check_kg_machine_path() {
   return 0
 }
 check_kg_machine_path
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGRA 100 (Superfície que viaja não cita ops/ como se o destinatário o tivesse) — HARD, com catraca
+#   DANO MEDIDO (SAC-86, 2026-10-09, materialização do onion-standalone no pin 947e69ce): a lente
+#   kg-grammar.md afirmava ao adotante que o `ops/pr-merge-verified.sh` (core-only) recusa o rebase —
+#   e `ops/` não viaja para porta nem adotante. A classe já estava publicada no pretooluse-merge-gate.sh
+#   e na onion-orchestration/SKILL.md, e nenhuma guarda via. A citação nova num arquivo que viaja é HARD
+#   até se declarar: marcador `(core-only)` na linha, teste de presença na linha, ou arquivo que se
+#   declara Core-only no frontmatter. Passivo no baseline = SOFT; baseline só encolhe. Lógica em
+#   ops-citation-travel-check.sh; baseline em ops-citation-travel-baseline.txt.
+check_ops_citation_travel() {
+  local helper="${SCRIPT_DIR}/ops-citation-travel-check.sh"
+  [ -f "${helper}" ] || return 0
+  [ "${IS_DERIVED}" -eq 1 ] && return 0   # no adotante/porta não há ops/ a citar nem baseline a cobrar
+  if [ -n "${ONLY_PATH}" ]; then          # --only: só quando o arquivo está numa raiz que viaja (ou é a própria guarda)
+    case "${ONLY_PATH}" in
+      */ops-citation-travel-*) : ;;
+      */fixtures/*) return 0 ;;
+      "${REPO_ROOT}"/.claude/*|"${REPO_ROOT}"/docs/meta-specs/*|"${REPO_ROOT}"/docs/knowledge-base/*|"${REPO_ROOT}"/docs/sdaal/*) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  local _out _hrc=0 _err passivo=0
+  _err="$(mktemp 2>/dev/null || echo /dev/null)"
+  if _out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>"${_err}")"; then _hrc=0; else _hrc=$?; fi
+  while IFS=$'\t' read -r _sev _code _path _msg; do
+    [ -n "${_path:-}" ] || continue
+    if [ "${_code}" = "PASSIVO" ]; then passivo=$(( passivo + 1 )); continue; fi
+    violation "${_sev:-SOFT}" "${REPO_ROOT}/${_path#./}" "REGRA 100 (Superfície que viaja não cita ops/ como se o destinatário o tivesse): [${_code}] ${_msg}"
+  done <<< "${_out}"
+  if [ "${passivo}" -gt 0 ]; then
+    violation "SOFT" "${REPO_ROOT}/.claude/validation/ops-citation-travel-baseline.txt" \
+      "REGRA 100 (Superfície que viaja não cita ops/ como se o destinatário o tivesse): [PASSIVO] ${passivo} citação(ões) tolerada(s) pelo baseline — a saúde é este número DIMINUINDO (detalhe: bash .claude/validation/ops-citation-travel-check.sh)"
+  fi
+  if [ "${_hrc}" -ge 2 ] || { [ "${_hrc}" -ne 0 ] && [ -z "${_out}" ]; }; then
+    violation "HARD" "${REPO_ROOT}/.claude/validation/ops-citation-travel-check.sh" "REGRA 100 (Superfície que viaja não cita ops/ como se o destinatário o tivesse): a guarda NÃO RODOU (rc=${_hrc}: $(head -1 "${_err}" 2>/dev/null)) — isto não é aprovação"
+  fi
+  [ "${_err}" = /dev/null ] || rm -f "${_err}"
+  return 0
+}
+check_ops_citation_travel
 
 # ===========================================================================
 # SUMÁRIO FINAL
