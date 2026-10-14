@@ -56,6 +56,9 @@ COMMANDS=(
   ".claude/commands/meta/kg-inbox.md"
   ".claude/commands/meta/radar.md"
   ".claude/commands/meta/census.md"
+  # 2026-10-14: o maestro classificou o /meta:decide em `full` (todos os papéis menos o mini); a REGRA 37
+  # (Mapa role→bundle (roles.yaml) consistente com os verticais) o cobrou aqui na mesma hora.
+  ".claude/commands/meta/decide.md"
 )
 AGENTS=(
   ".claude/agents/meta/metaspec-gate-keeper.md"
@@ -77,6 +80,9 @@ HOOKS=(
   ".claude/hooks/pretooluse-env-guard.sh"
 )
 UTILS=(
+  # A classe do caminho de máquina (machine_path.py), que o kg-contract-check.sh do /meta:decide importa de
+  # `validation/../utils/kg` (2026-10-14). Sem ela o checador sai 2 ("não dá para julgar") onde o vendor existe.
+  ".claude/utils/kg"
   ".claude/utils/diagnose"
   ".claude/utils/task-manager"
   ".claude/utils/forge"
@@ -104,6 +110,10 @@ VALIDATION=(
   ".claude/validation/kg-drive-project.sh"
   ".claude/validation/kg-realign-project.sh"
   ".claude/validation/kg-seal-exception.sh"
+  # O executor do degrau AUTOMATE (2026-10-14): o /meta:drive o injeta na carga (`--status`) e o manda rodar
+  # em cada passo do laço. Ele acha o radar, o censo e o tm.sh PELO PRÓPRIO ARQUIVO; ops/ é core-only, e sem
+  # ops/merge-serial.sh (core-only) o merge é recusado — no consumidor do plugin o degrau para em PR verde.
+  ".claude/validation/drive-automate.sh"
   ".claude/validation/lib/status-factor.awk"
   ".claude/validation/kg-console.sh"
   ".claude/validation/kg-view.sh"
@@ -122,6 +132,12 @@ VALIDATION=(
   ".claude/validation/inventory.sh"
   ".claude/validation/graph.sh"
   ".claude/validation/kg-census-extract.sh"
+  # Motores do /meta:decide (2026-10-14): o medidor que a carga injeta e o selador que grava a resposta.
+  ".claude/validation/decide-census.sh"
+  ".claude/validation/kg-decide-seal.sh"
+  # o selador chama o checador do contrato quando o repo tem o vendor kg-ssot (sem ele, só o radar julga);
+  # o assemble-plugin recusou o bundle sem ele: "o plugin nasceria morto no adotante".
+  ".claude/validation/kg-contract-check.sh"
 )
 TEMPLATES=()
 DOCS=(

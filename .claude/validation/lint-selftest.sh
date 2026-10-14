@@ -1580,7 +1580,7 @@ _lib_beside() {  # $1 = diretorio onde o motor copiado vai rodar
 # vendor-baseline-removido (RED/MUT)) — por isso é UM helper, não dois remendos.
 _adopt_sibs_beside() {  # $1 = diretório onde o motor copiado vai rodar
   local f
-  for f in vendor-manifest.sh durable-commit.sh regen-baselines.sh; do
+  for f in vendor-manifest.sh durable-commit.sh regen-baselines.sh regen-ssot-projections.sh; do
     cp "${REPO_ROOT}/.claude/utils/adopt/${f}" "$1/" 2>/dev/null || true
   done
 }
@@ -6554,6 +6554,35 @@ run_vendor_branch_selftests() {
   fi
   rm -rf "$mutd" 2>/dev/null
 
+  # (g2) a PROJEÇÃO GERADA não é produto alheio (2026-10-14, --update de um hub): o commit da
+  #      onion/vendor regenera docs/onion/inventory.md e companhia, que ficam fora do manifesto; o teste
+  #      de pureza as lia como produto de outra integration branch e recusava com BASE CRUZADA (rc=11).
+  #      Aceite: a vendor que difere da base SÓ numa projeção gerada mergeia. MUTANTE: sem o filtro das
+  #      projeções (a lista do gerador), o MESMO caso volta a dar rc=11.
+  local c6 t6 ib6 rcp=0 rcpm=0 mutp
+  c6="$(mktemp -d)/c6"; t6="$(mktemp -d)/a6"; _vb_core "$c6" 1; _vb_adopter "$t6" "$c6"
+  ib6="$(git -C "$t6" rev-parse --abbrev-ref HEAD)"; bash "${helper}" seed "$t6" "$ib6" >/dev/null 2>&1
+  _g2_vendor_projection() {  # $1 = adotante: o commit da vendor regenera uma projeção gerada
+    git -C "$1" checkout -q onion/vendor; mkdir -p "$1/docs/onion"; printf 'inventario regenerado\n' > "$1/docs/onion/inventory.md"
+    git -C "$1" add -A; git -C "$1" commit -qm "vendor regenera projecao"; git -C "$1" checkout -q "$2"; }
+  _g2_vendor_projection "$t6" "$ib6"
+  _vb_core "$c6" 2
+  LC_ALL=C bash "${helper}" update "$t6" "$c6" "$(git -C "$c6" rev-parse --short=12 HEAD)" "$ib6" >/dev/null 2>&1 || rcp=$?
+  if [ "$rcp" -eq 0 ]; then
+    record_pass "vendor-branch: (g2) vendor que difere da base só numa projeção gerada mergeia (não é BASE CRUZADA)"
+  else record_fail "vendor-branch: (g2) projeção gerada" "esperava rc 0, veio rc=$rcp (BASE CRUZADA falsa?)"; fi
+  mutp="$(mktemp -d)"
+  sed 's/^  \[ -n "\$gen_out" \] && keep=.*$/  : # ONION_MUTANTE sem o filtro das projeções/' "${helper}" > "${mutp}/mut.sh"
+  _adopt_sibs_beside "${mutp}"
+  if grep -q 'ONION_MUTANTE sem o filtro' "${mutp}/mut.sh"; then
+    _vb_core "$c6" 1; _vb_adopter "$t6" "$c6"; ib6="$(git -C "$t6" rev-parse --abbrev-ref HEAD)"
+    bash "${mutp}/mut.sh" seed "$t6" "$ib6" >/dev/null 2>&1; _g2_vendor_projection "$t6" "$ib6"; _vb_core "$c6" 2
+    LC_ALL=C bash "${mutp}/mut.sh" update "$t6" "$c6" "$(git -C "$c6" rev-parse --short=12 HEAD)" "$ib6" >/dev/null 2>&1 || rcpm=$?
+    if [ "$rcpm" -eq 11 ]; then record_pass "vendor-branch: (g2-MUT) sem o filtro das projeções o mesmo caso volta a BASE CRUZADA — o filtro é load-bearing"
+    else record_fail "vendor-branch: (g2-MUT)" "o mutante não mudou o desfecho (rc=$rcpm) — o caso não prova a cura"; fi
+  else record_fail "vendor-branch: (g2-MUT)" "a mutação NÃO foi aplicada — âncora do sed não casou"; fi
+  rm -rf "$mutp" "$c6" "$t6" 2>/dev/null
+
   rm -rf "$core" "$t" "$c2" "$t2" "$c3" "$t3" "$c4" "$t4" "$c5" "$t5" 2>/dev/null
   unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 }
@@ -8418,7 +8447,11 @@ run_pre_push_selftests() {
            'else S="$(git -c core.abbrev=40 -c diff.noprefix=false diff --no-ext-diff --no-color --cached "$BASE" -- . ":(exclude)docs/evolution/review" | sha256sum | cut -c1-64)"; fi' \
            'D="$(awk '"'"'NR==1 && $0!="---"{exit} NR>1 && $0=="---"{exit} NR>1'"'"' "$R" 2>/dev/null | sed -n "s/^reviewed_diff_sha256:[[:space:]]*//p" | head -1 | tr -d "\"")"' \
            '[ "$D" = "$S" ] && echo "  ✅ casa" || echo "  ✗ ARTEFATO-CADUCO atual $S"' > .claude/validation/review-artifact-check.sh \
-      && chmod +x .claude/utils/adopt/*.sh .claude/validation/*.sh \
+      && mkdir -p ops && printf '%s\n' '#!/bin/bash' \
+           '# stub do gate do contrato KG-SSOT (ops/kg-gate-ci.sh): reprova quando o arquivo kgverdict diz "piorou"' \
+           'if [ "$(cat kgverdict 2>/dev/null)" = piorou ]; then echo "✗ PIOROU  debt.form.range.node.label: 1 → 2"; exit 1; fi' \
+           'echo "✓ gate"; exit 0' > ops/kg-gate-ci.sh \
+      && chmod +x .claude/utils/adopt/*.sh .claude/validation/*.sh ops/kg-gate-ci.sh \
       && echo base > docs/backlog.md && echo v0 > a.txt && echo 0 > verdict && seq 1 60 > c.txt \
       && printf 'v-v0\n' > .claude/validation/lint-rules.md \
       && git add -A && git commit -qm base && git push -q origin main && git switch -q -c feat/x ) >/dev/null 2>&1
@@ -8446,6 +8479,15 @@ run_pre_push_selftests() {
     g="$(_pf "${sb}" -m t2)"; _pfc "CÓDIGO mudou depois da revisão → RECUSA" 1 "${g}" "${sb}"
     ( cd "${sb}/w" && git reset -q a.txt && git checkout -q a.txt && echo mudou >> docs/backlog.md && git add docs/backlog.md ) >/dev/null 2>&1
     g="$(_pf "${sb}" -m t3)"; _pfc "só projeção mudou → recarimba" 0 "${g}" "${sb}"
+  fi
+  # o contrato KG-SSOT reprova o COMMIT (a catraca da dívida SHOULD, que o lint não vê: o #1106) → nada
+  # enviado, com a causa nomeada. Antes de 2026-10-14 o motor nem chamava o gate e saía rc 0 aqui.
+  if _new kg_gate_reprova; then
+    ( cd "${sb}/w" && echo piorou > kgverdict && git add kgverdict ) >/dev/null 2>&1
+    g="$(_pf "${sb}" -m t1)"
+    if [ "${g}" = 1 ] && grep -q 'contrato KG-SSOT' "${sb}/out" && grep -q 'PIOROU' "${sb}/out"; then
+      record_pass "pr-finalize: contrato KG-SSOT reprova o commit → rc 1 com a causa nomeada"
+    else record_fail "pr-finalize: contrato KG-SSOT reprova" "esperava rc 1 + 'contrato KG-SSOT' + 'PIOROU'; rc=${g}: $(tail -2 "${sb}/out" 2>/dev/null)"; fi
   fi
   # B1 reaberto pelo Elenxo 2: hash entre aspas / com espaço no fim NÃO é "pendente"
   local form
@@ -9229,10 +9271,17 @@ YML
   local NOW out rc
   NOW="$(date +%s)"
   _b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
-  _jws() { local h p; h="$(printf '{"alg":"RS256","kid":"%s"}' "${6:-k1}" | _b64url)"
-    p="$(printf '{"iss":"%s","aud":"%s","iat":%s,"exp":%s,"jti":"%s"}' "$1" "$2" "$3" "$4" "$5" | _b64url)"
+  _sha() { openssl dgst -sha256 | awk '{print $NF}'; }
+  # Desde 2026-10-14 o corpo entra na assinatura: o _jws assina body_sha256 de ${_BODY} (vazio por default,
+  # o caso dos sinais de julho sem corpo) e o _env embarca signal.body quando ${_BODY} não é vazio.
+  _BODY=""
+  _jws_raw() { local h p; h="$(printf '{"alg":"RS256","kid":"%s"}' "${2:-k1}" | _b64url)"   # $1 = payload JSON literal
+    p="$(printf '%s' "$1" | _b64url)"
     printf '%s.%s.%s' "$h" "$p" "$(printf '%s' "$h.$p" | openssl dgst -sha256 -sign "${sb}/priv.pem" | _b64url)"; }
-  _env() { printf '{"jws":"%s","signal":{"from":"%s","to":"%s","kind":"signal"}%s}' "$1" "$2" "$3" "$4"; }
+  _jws() { _jws_raw "$(printf '{"iss":"%s","aud":"%s","iat":%s,"exp":%s,"jti":"%s","body_sha256":"%s"}' \
+    "$1" "$2" "$3" "$4" "$5" "$(printf '%s' "${_BODY}" | _sha)")" "${6:-k1}"; }
+  _env() { local b=""; [ -z "${_BODY}" ] || b=",\"body\":$(printf '%s' "${_BODY}" | jq -Rs .)"
+    printf '{"jws":"%s","signal":{"from":"%s","to":"%s","kind":"signal"%s}%s}' "$1" "$2" "$3" "${b}" "$4"; }
   # A2A_CLOCK_TRUST=attested: o relógio do HOST de teste não é o SUT destes casos (a guarda
   # clock-untrusted tem casos dedicados abaixo, com PATH stubado — determinístico em qualquer CI).
   _verify() { rc=0; out="$(A2A_CLOCK_TRUST=attested A2A_JWKS_DIR="${sb}/jwks" bash "${helper}" --receiver "$1" --repo "${sb}" --dry-run --envelope - <<<"$2" 2>/dev/null)" || rc=$?; }
@@ -9298,7 +9347,9 @@ YML
   # CLOCK-TRUST (carimbo de tempo só vale com fonte verificada): PATH stubado com TODAS as
   # ferramentas + timedatectl fake dizendo NTPSynchronized=no e sem chronyc/ntpstat → veto.
   local clkbin; clkbin="$(mktemp -d)"
-  for t in jq date mktemp python3 grep cat dirname git tr sed sort find awk head cut wc bash sha256sum openssl; do
+  # `mkdir` entrou em 2026-10-14: o anti-replay virou fail-closed (gravar o jti É verificar), e o
+  # PATH stubado sem mkdir só passava porque a gravação antiga engolia o erro com `|| true`.
+  for t in jq date mktemp mkdir python3 grep cat dirname git tr sed sort find awk head cut wc bash sha256sum openssl; do
     p="$(command -v "$t" 2>/dev/null)"; [ -n "$p" ] && ln -s "$p" "${clkbin}/$t"
   done
   printf '#!/usr/bin/env bash\necho no\n' > "${clkbin}/timedatectl"; chmod +x "${clkbin}/timedatectl"
@@ -9311,7 +9362,209 @@ YML
   rc=0; out="$(PATH="${clkbin}" A2A_CLOCK_TRUST=attested A2A_JWKS_DIR="${sb}/jwks" bash "${helper}" --receiver onion-evolve --repo "${sb}" --dry-run --envelope - <<<"${ce}" 2>/dev/null)" || rc=$?
   if [ "${rc}" -eq 0 ] && grep -q '"verified":true' <<< "${out}"; then record_pass "a2a-verify: A2A_CLOCK_TRUST=attested → atestado explícito destrava a camada"
   else record_fail "a2a-verify: clock-attested" "out='${out}' rc=${rc}"; fi
-  rm -rf "${bin}" "${clkbin}" "${sb}"
+
+  # ANTI-REPLAY FAIL-CLOSED (2026-10-14): estado de jti NÃO-GRAVÁVEL → veto, nunca verified.
+  # A versão antiga gravava com `|| true` e emitia verified:true — o anti-replay sumia em silêncio.
+  # Fixture: `.claude/sessions` é um ARQUIVO no sandbox, então o mkdir -p falha mesmo sob root
+  # (chmod não barra root; um arquivo no lugar do diretório barra qualquer um).
+  local sbw; sbw="$(mktemp -d)"; mkdir -p "${sbw}/docs/evolution/federation" "${sbw}/.claude"
+  cp "${sb}/docs/evolution/federation/members.yaml" "${sbw}/docs/evolution/federation/members.yaml"
+  : > "${sbw}/.claude/sessions"
+  _verify_w() { rc=0; out="$(A2A_CLOCK_TRUST=attested A2A_JWKS_DIR="${sb}/jwks" bash "$1" --receiver onion-evolve --repo "${sbw}" --dry-run --envelope - <<<"$2" 2>/dev/null)" || rc=$?; }
+  local we; we="$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+3600))" jti-unw)" acme onion-evolve "")"
+  _verify_w "${helper}" "${we}"
+  local rc_int=1
+  if [ "${rc}" -eq 1 ] && grep -q '"reason":"replay-state-unwritable"' <<< "${out}" && ! grep -q '"verified":true' <<< "${out}"; then
+    rc_int=0; record_pass "a2a-verify: estado de jti não-gravável → veto replay-state-unwritable (fail-closed)"
+  else record_fail "a2a-verify: replay-state-unwritable" "out='${out}' rc=${rc}"; fi
+  # (MUT) o mutante devolve o `|| true` antigo: grava-ou-ignora e emite verified. O caso tem de reprová-lo.
+  local mutd; mutd="$(mktemp -d)"
+  # As DUAS barreiras saem: a contagem pós-append (cura da corrida) também veta estado não-gravável,
+  # então um mutante que só tirasse o veto explícito seria morto pela outra e não provaria a primeira.
+  sed -e 's|^  veto "replay-state-unwritable" "replay"$|  true # MUTANTE: fail-open|' \
+      -e 's|^\[ "\$(grep -cxF "\${JTI}" "\${STATE}" 2>/dev/null)" = "1" \] \|\| veto "replay" "replay"$|true # MUTANTE: sem contagem|' \
+      "${helper}" > "${mutd}/a2a-verify.sh"
+  [ "$(grep -c '# MUTANTE' "${mutd}/a2a-verify.sh")" = "2" ] \
+    || record_fail "a2a-verify: (MUT) âncora" "o sed não aplicou as DUAS mutações (a linha da cura mudou?)"
+  cp "${REPO_ROOT}/.claude/utils/federation-transport/a2a-ssrf-check.sh" "${mutd}/" 2>/dev/null || true
+  # o mutante roda FORA da árvore: o REAL_ROOT dele cai em ${mutd}/../../.. — o trust-check precisa existir lá
+  local mroot; mroot="$(mktemp -d)"; mkdir -p "${mroot}/.claude/validation" "${mroot}/.claude/utils/federation-transport"
+  cp "${REPO_ROOT}/.claude/validation/trust-topology-check.sh" "${mroot}/.claude/validation/"
+  cp "${mutd}/a2a-verify.sh" "${mutd}/a2a-ssrf-check.sh" "${mroot}/.claude/utils/federation-transport/" 2>/dev/null
+  we="$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+3600))" jti-unw-mut)" acme onion-evolve "")"
+  _verify_w "${mroot}/.claude/utils/federation-transport/a2a-verify.sh" "${we}"
+  # O mutante só prova algo se ele RODOU até o fim: o desfecho esperado dele é verified:true (o
+  # fail-open de volta). Veto por OUTRO motivo (trust-check ausente, tooling) é mutante não exercido —
+  # e contá-lo como "mutante morto" seria falso-verde por vacuidade.
+  local rc_mut=0
+  if grep -q '"verified":true' <<< "${out}"; then rc_mut=1
+  elif ! grep -q '"reason":"replay-state-unwritable"' <<< "${out}"; then
+    record_fail "a2a-verify: (MUT) mutante não exercido" "vetou por outro motivo: out='${out}'"
+  fi
+  _prove_mutation "a2a-verify: (MUT) devolver o '|| true' faz o estado não-gravável voltar a verificar" \
+    "${helper}" "${mroot}/.claude/utils/federation-transport/a2a-verify.sh" "${rc_int}" "${rc_mut}"
+  # CORRIDA DE REPLAY (2026-10-14): 8 verificações SIMULTÂNEAS do mesmo jti → no máximo 1 verified.
+  # Com a cura (contagem == 1 depois do append) o teto vale sempre; o mutante sem a contagem só viola
+  # o teto quando a corrida acontece, então NÃO há mutante aqui — matá-lo seria sorte, não prova.
+  local sbr; sbr="$(mktemp -d)"; mkdir -p "${sbr}/docs/evolution/federation"
+  cp "${sb}/docs/evolution/federation/members.yaml" "${sbr}/docs/evolution/federation/members.yaml"
+  local re i; re="$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+3600))" jti-race)" acme onion-evolve "")"
+  for i in 1 2 3 4 5 6 7 8; do
+    ( A2A_CLOCK_TRUST=attested A2A_JWKS_DIR="${sb}/jwks" bash "${helper}" --receiver onion-evolve --repo "${sbr}" --dry-run --envelope - <<<"${re}" > "${sbr}/out.${i}" 2>/dev/null ) &
+  done
+  wait
+  # `grep -c` sai 1 quando conta zero: sob errexit+pipefail isso abortaria a bancada inteira
+  local nver nall; nver="$(cat "${sbr}"/out.* | grep -c '"verified":true' || true)"
+  nall="$(cat "${sbr}"/out.* | grep -c '"verified":' || true)"
+  if [ "${nver:-9}" -le 1 ] && [ "${nall:-0}" -eq 8 ]; then
+    record_pass "a2a-verify: 8 envios simultâneos do mesmo jti → no máximo 1 verified (deu ${nver})"
+  else record_fail "a2a-verify: corrida de replay" "verified=${nver} de 8 (esperava ≤1, e 8 vereditos)"; fi
+
+  # CORPO ASSINADO + EXP OBRIGATÓRIO (2026-10-14, achados F1/F2 do spike a2a cross-user). Cada cura tem
+  # caso e MUTANTE; o mutante devolve o comportamento antigo e o caso tem de reprová-lo. Mutante que veta
+  # por OUTRO motivo é "não exercido" (falso-verde por vacuidade) e reprova.
+  _verify_h() { rc=0; out="$(A2A_CLOCK_TRUST=attested A2A_JWKS_DIR="${sb}/jwks" bash "$1" --receiver onion-evolve --repo "${sb}" --dry-run --envelope - <<<"$2" 2>/dev/null)" || rc=$?; }
+  local _MUT="" mroots=()
+  _mk_mut() {  # $1 = rótulo; $2 = script sed (UMA linha trocada por `c`); deixa o caminho em _MUT
+    local d; d="$(mktemp -d)"; mroots+=("${d}")
+    mkdir -p "${d}/.claude/validation" "${d}/.claude/utils/federation-transport"
+    cp "${REPO_ROOT}/.claude/validation/trust-topology-check.sh" "${d}/.claude/validation/"
+    cp "${REPO_ROOT}/.claude/utils/federation-transport/a2a-ssrf-check.sh" "${d}/.claude/utils/federation-transport/"
+    _MUT="${d}/.claude/utils/federation-transport/a2a-verify.sh"
+    sed -e "$2" "${helper}" > "${_MUT}"
+    [ "$(grep -c '# MUTANTE' "${_MUT}")" = "1" ] \
+      || record_fail "a2a-verify: (MUT) âncora ${1}" "o sed não trocou EXATAMENTE uma linha (a linha da cura mudou?)"
+  }
+  _case_mut() {  # $1 rótulo · $2 motivo esperado no intacto · $3 envelope p/ o intacto · $4 envelope p/ o mutante
+    local ri=1 rmu=0
+    _verify "onion-evolve" "$3"
+    if [ "${rc}" -eq 1 ] && grep -q "\"reason\":\"$2\"" <<< "${out}"; then ri=0; record_pass "a2a-verify: $1 → veto $2"
+    else record_fail "a2a-verify: $1" "out='${out}' rc=${rc}"; fi
+    _verify_h "${_MUT}" "$4"
+    if grep -q '"verified":true' <<< "${out}"; then rmu=1
+    elif ! grep -q "\"reason\":\"$2\"" <<< "${out}"; then record_fail "a2a-verify: (MUT) $1 não exercido" "vetou por outro motivo: out='${out}'"; fi
+    _prove_mutation "a2a-verify: (MUT) sem a cura, '$1' volta a verificar" "${helper}" "${_MUT}" "${ri}" "${rmu}"
+  }
+
+  # (a) envelope bem formado COM corpo (Unicode, aspas, \n final) → verified
+  _BODY=$'pergunta com corpo: "é" ou não?\n'
+  _verify onion-evolve "$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-body-ok)" acme onion-evolve "")"
+  if [ "${rc}" -eq 0 ] && grep -q '"verified":true' <<< "${out}"; then record_pass "a2a-verify: corpo assinado (body_sha256) e íntegro → verified"
+  else record_fail "a2a-verify: corpo íntegro" "out='${out}' rc=${rc}"; fi
+  # (b) corpo trocado DEPOIS de assinar → body-mismatch  (+MUTANTE: tirar a comparação)
+  _mk_mut "body-mismatch" '/veto "body-mismatch" "body"$/c true # MUTANTE: corpo fora da assinatura'
+  local tb1 tb2
+  tb1="$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-body-x1)" acme onion-evolve "" | jq -c '.signal.body="corpo trocado"')"
+  tb2="$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-body-x2)" acme onion-evolve "" | jq -c '.signal.body="corpo trocado"')"
+  _case_mut "corpo trocado depois de assinar" "body-mismatch" "${tb1}" "${tb2}"
+  # (c) corpo ACRESCENTADO a um sinal assinado sem corpo (claim = sha256 do vazio) → body-mismatch
+  _BODY=""
+  tb1="$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-body-add)" acme onion-evolve "" | jq -c '.signal.body="injetado"')"
+  _verify onion-evolve "${tb1}"
+  if [ "${rc}" -eq 1 ] && grep -q '"reason":"body-mismatch"' <<< "${out}"; then record_pass "a2a-verify: corpo acrescentado a sinal assinado sem corpo → veto body-mismatch"
+  else record_fail "a2a-verify: corpo acrescentado" "out='${out}' rc=${rc}"; fi
+  # (d) corpo vazio ASSINADO (body:"" e claim = sha256 do vazio) → verified: vazio é corpo, não ausência de prova
+  tb1="$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-body-empty)" acme onion-evolve "" | jq -c '.signal.body=""')"
+  _verify onion-evolve "${tb1}"
+  if [ "${rc}" -eq 0 ] && grep -q '"verified":true' <<< "${out}"; then record_pass "a2a-verify: corpo vazio assinado como vazio → verified (o hash do vazio é o que amarra)"
+  else record_fail "a2a-verify: corpo vazio" "out='${out}' rc=${rc}"; fi
+  # (e) remetente ANTIGO (payload de julho, sem body_sha256) → recusado, nunca aceito em silêncio
+  _verify onion-evolve "$(_env "$(_jws_raw "{\"iss\":\"acme\",\"aud\":\"onion-evolve\",\"iat\":${NOW},\"exp\":$((NOW+3600)),\"jti\":\"jti-legacy\"}")" acme onion-evolve "")"
+  if [ "${rc}" -eq 1 ] && grep -q '"reason":"jws-missing-body-sha256"' <<< "${out}"; then record_pass "a2a-verify: remetente sem body_sha256 (formato de julho) → veto jws-missing-body-sha256"
+  else record_fail "a2a-verify: remetente antigo" "out='${out}' rc=${rc}"; fi
+  # (f) body_sha256 DUPLICADO no payload assinado: o 1º (o que um parser first-wins leria) é de outro corpo,
+  #     o último (o que o jq lê) é o do corpo que viaja → duplicate-key  (+MUTANTE: aceitar duplicata)
+  _BODY="corpo real"
+  local hreal hevil; hreal="$(printf '%s' "${_BODY}" | _sha)"; hevil="$(printf 'outro corpo' | _sha)"
+  _dup() { _env "$(_jws_raw "{\"iss\":\"acme\",\"aud\":\"onion-evolve\",\"iat\":${NOW},\"exp\":$((NOW+300)),\"jti\":\"$1\",\"body_sha256\":\"${hevil}\",\"body_sha256\":\"${hreal}\"}")" acme onion-evolve ""; }
+  _mk_mut "duplicate-key" '/veto "duplicate-key:/c *) true ;; # MUTANTE: duplicata aceita'
+  _case_mut "body_sha256 duplicado no payload" "duplicate-key:jws-payload" "$(_dup jti-dup1)" "$(_dup jti-dup2)"
+  _BODY=""
+  # (g) SEM exp → jws-missing-exp  (+MUTANTE: exp ausente volta a ser tolerado)
+  _noexp() { _env "$(_jws_raw "{\"iss\":\"acme\",\"aud\":\"onion-evolve\",\"iat\":${NOW},\"jti\":\"$1\",\"body_sha256\":\"$(printf '' | _sha)\"}")" acme onion-evolve ""; }
+  _mk_mut "missing-exp" '/veto "jws-missing-exp" "timestamp"$/c [ -n "${EXP}" ] || EXP="$(( NOW + 60 ))" # MUTANTE: exp opcional'
+  _case_mut "JWS sem exp" "jws-missing-exp" "$(_noexp jti-noexp1)" "$(_noexp jti-noexp2)"
+  # (h) exp ACIMA do teto (vida 7200 s > 3600) → exp-beyond-ceiling  (+MUTANTE: sem teto)
+  _mk_mut "exp-ceiling" '/veto "exp-beyond-ceiling" "timestamp"$/c true # MUTANTE: sem teto'
+  _case_mut "exp acima do teto de vida" "exp-beyond-ceiling" \
+    "$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+7200))" jti-ceil1)" acme onion-evolve "")" \
+    "$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+7200))" jti-ceil2)" acme onion-evolve "")"
+  # (i) a 2ª forma do teto: vida declarada cabe (exp−iat = 3500) mas o iat futuro (dentro do skew) estica o exp além de now+teto
+  _verify onion-evolve "$(_env "$(_jws acme onion-evolve "$((NOW+200))" "$((NOW+3700))" jti-ceil3)" acme onion-evolve "")"
+  if [ "${rc}" -eq 1 ] && grep -q '"reason":"exp-beyond-ceiling"' <<< "${out}"; then record_pass "a2a-verify: iat futuro no skew não estica o exp além do teto → veto exp-beyond-ceiling"
+  else record_fail "a2a-verify: teto pelo now" "out='${out}' rc=${rc}"; fi
+  # (j) exp não-inteiro (string) → jws-bad-exp: a leitura antiga deixava passar em silêncio
+  _verify onion-evolve "$(_env "$(_jws_raw "{\"iss\":\"acme\",\"aud\":\"onion-evolve\",\"iat\":${NOW},\"exp\":\"amanhã\",\"jti\":\"jti-badexp\",\"body_sha256\":\"$(printf '' | _sha)\"}")" acme onion-evolve "")"
+  if [ "${rc}" -eq 1 ] && grep -q '"reason":"jws-bad-exp"' <<< "${out}"; then record_pass "a2a-verify: exp não-inteiro → veto jws-bad-exp"
+  else record_fail "a2a-verify: exp não-inteiro" "out='${out}' rc=${rc}"; fi
+  # (j2) as linhas que o refutador provou load-bearing sem caso (2026-10-14): cada uma ganha caso + MUTANTE
+  _mk_mut "exp-not-after-iat" '/veto "exp-not-after-iat" "timestamp"$/c true # MUTANTE: exp antes do iat'
+  _case_mut "exp anterior ao iat" "exp-not-after-iat" \
+    "$(_env "$(_jws acme onion-evolve "$((NOW+200))" "$((NOW+100))" jti-eai1)" acme onion-evolve "")" \
+    "$(_env "$(_jws acme onion-evolve "$((NOW+200))" "$((NOW+100))" jti-eai2)" acme onion-evolve "")"
+  _mk_mut "signal-body-sha256" '/veto "signal-body-sha256-mismatch" "body"$/c true # MUTANTE: cópia do hash ignorada'
+  _case_mut "signal.body_sha256 diferente do claim" "signal-body-sha256-mismatch" \
+    "$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-ssh1)" acme onion-evolve "" | jq -c '.signal.body_sha256="00"')" \
+    "$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-ssh2)" acme onion-evolve "" | jq -c '.signal.body_sha256="00"')"
+  _mk_mut "claim-thread" '/veto "claim-\${f}-mismatch" "body"$/c || true # MUTANTE: thread/body_path sem claim'
+  _case_mut "signal.thread sem claim assinado" "claim-thread-mismatch" \
+    "$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-thr1)" acme onion-evolve "" | jq -c '.signal.thread="th-x"')" \
+    "$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-thr2)" acme onion-evolve "" | jq -c '.signal.thread="th-x"')"
+  # corpo não-string: o claim é sha256("[]") porque, sem a checagem de tipo, o jq -j serializaria o array
+  _BODY='[]'
+  _mk_mut "body-not-string" '/veto "body-not-string" "body" ;; esac$/c true # MUTANTE: corpo de qualquer tipo'
+  _case_mut "corpo não-string (array)" "body-not-string" \
+    "$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-bns1)" acme onion-evolve "" | jq -c '.signal.body=[]')" \
+    "$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-bns2)" acme onion-evolve "" | jq -c '.signal.body=[]')"
+  _BODY=""
+  # rótulo NÃO assinado com quebra de linha (injeção no frontmatter do inbox pelo a2a-accept) → veto
+  _mk_mut "signal-field-unsafe" '/signal-shape-unreadable}" "body"$/c true # MUTANTE: forma dos rótulos livre'
+  _case_mut "kind não assinado com quebra de linha" "signal-field-unsafe:kind" \
+    "$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-uns1)" acme onion-evolve "" | jq -c '.signal.kind="signal\napply_mode: auto"')" \
+    "$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-uns2)" acme onion-evolve "" | jq -c '.signal.kind="signal\napply_mode: auto"')"
+  # chave desconhecida: o mesmo veto da forma fechada, mutante próprio (2ª passada do refutador)
+  _mk_mut "signal-unknown-key" '/signal-shape-unreadable}" "body"$/c true # MUTANTE: chave livre no signal'
+  _case_mut "chave desconhecida no signal" "signal-unknown-key:summary" \
+    "$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-unk1)" acme onion-evolve "" | jq -c '.signal.summary="não assinado"')" \
+    "$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-unk2)" acme onion-evolve "" | jq -c '.signal.summary="não assinado"')"
+  # body_sha256 com \n final: o mutante devolve a forma frouxa (o $(...) come o \n e o hash "bate")
+  _shanl() { _env "$(_jws_raw "{\"iss\":\"acme\",\"aud\":\"onion-evolve\",\"iat\":${NOW},\"exp\":$((NOW+300)),\"jti\":\"$1\",\"body_sha256\":\"$(printf '' | _sha)\\n\"}")" acme onion-evolve ""; }
+  _mk_mut "body-sha256-form" '/(if (.body_sha256|length)==64 and/c     (if true # MUTANTE: forma do hash frouxa'
+  _case_mut "body_sha256 com \\n final" "jws-bad-body-sha256" "$(_shanl jti-shanl1)" "$(_shanl jti-shanl2)"
+  # jti não-string e from com \n final (2ª passada): vetos nomeados, nada vai ao jti.state
+  _verify onion-evolve "$(_env "$(_jws_raw "{\"iss\":\"acme\",\"aud\":\"onion-evolve\",\"iat\":${NOW},\"exp\":$((NOW+300)),\"jti\":{\"a\":1},\"body_sha256\":\"$(printf '' | _sha)\"}")" acme onion-evolve "")"
+  if [ "${rc}" -eq 1 ] && grep -q '"reason":"jws-bad-claim-type"' <<< "${out}"; then record_pass "a2a-verify: jti objeto → veto jws-bad-claim-type"
+  else record_fail "a2a-verify: jti objeto" "out='${out}' rc=${rc}"; fi
+  _verify onion-evolve "$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-fromnl)" acme onion-evolve "" | jq -c '.signal.from="acme\n"')"
+  if [ "${rc}" -eq 1 ] && grep -q '"reason":"signal-field-unsafe:from"' <<< "${out}"; then record_pass "a2a-verify: signal.from com \\n final → veto signal-field-unsafe:from"
+  else record_fail "a2a-verify: from com newline" "out='${out}' rc=${rc}"; fi
+  local one; one="$(_env "$(_jws acme onion-evolve "${NOW}" "$((NOW+300))" jti-multi)" acme onion-evolve "")"
+  _verify onion-evolve "${one} ${one}"
+  if [ "${rc}" -eq 1 ] && grep -q '"reason":"malformed-envelope"' <<< "${out}"; then record_pass "a2a-verify: dois documentos JSON no envelope → veto malformed-envelope"
+  else record_fail "a2a-verify: envelope multi-documento" "out='${out}' rc=${rc}"; fi
+
+  # (k) o REMETENTE DO SPIKE (notebook/send-a2a.sh), sem rede (--dry-run): o envelope dele é aceito; o
+  #     mesmo envelope re-serializado com OUTRO escape (é, como o bridge ou outro parser faria) também
+  #     — canonicalização divergente não gera falso body-mismatch; e o --no-exp dele (cenário A5c) é recusado.
+  local snd="${REPO_ROOT}/docs/evolution/research/a2a-cross-user-spike-2026-10/notebook/send-a2a.sh"
+  if [ ! -f "${snd}" ]; then record_fail "a2a-verify: remetente do spike" "ausente: ${snd}"
+  elif ! command -v curl >/dev/null 2>&1; then record_skip "a2a-verify: remetente do spike exige curl no PATH → skip (não-SUT)"
+  else
+    _spk() { HOME="${sb}/home" bash "${snd}" --dry-run --key "${sb}/priv.pem" --kid k1 --from acme --to onion-evolve "$@" 2>/dev/null; }
+    _verify onion-evolve "$(_spk --body $'conversa do spike: "olá", é?\n')"
+    if [ "${rc}" -eq 0 ] && grep -q '"verified":true' <<< "${out}"; then record_pass "a2a-verify: envelope do send-a2a.sh do spike → verified"
+    else record_fail "a2a-verify: remetente do spike" "out='${out}' rc=${rc}"; fi
+    _verify onion-evolve "$(_spk --body $'conversa do spike: "olá", é?\n' | python3 -c 'import sys,json;print(json.dumps(json.load(sys.stdin),ensure_ascii=True,indent=1))')"
+    if [ "${rc}" -eq 0 ] && grep -q '"verified":true' <<< "${out}"; then record_pass "a2a-verify: mesmo corpo com outro escape JSON (\\u00e9) → verified (canônico = string decodificada)"
+    else record_fail "a2a-verify: escape divergente" "out='${out}' rc=${rc}"; fi
+    _verify onion-evolve "$(_spk --body 'original' | jq -c '.signal.body="adulterado"')"
+    if [ "${rc}" -eq 1 ] && grep -q '"reason":"body-mismatch"' <<< "${out}"; then record_pass "a2a-verify: envelope do spike com corpo adulterado → veto body-mismatch"
+    else record_fail "a2a-verify: spike adulterado" "out='${out}' rc=${rc}"; fi
+    _verify onion-evolve "$(_spk --body 'sem validade' --no-exp)"
+    if [ "${rc}" -eq 1 ] && grep -q '"reason":"jws-missing-exp"' <<< "${out}"; then record_pass "a2a-verify: send-a2a.sh --no-exp (A5c) → veto jws-missing-exp"
+    else record_fail "a2a-verify: spike sem exp" "out='${out}' rc=${rc}"; fi
+  fi
+  rm -rf "${bin}" "${clkbin}" "${sb}" "${sbw}" "${mutd}" "${mroot}" "${sbr}" "${mroots[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -10851,6 +11104,14 @@ run_empty_result_guard_selftests() {
   if ! grep -q 'PR-SEM-PASSADA' <<< "${out}"; then
     record_pass "empty-result-guard: (u) create de outro checkout (\`cd <worktree> &&\`) olha o resíduo DALI"
   else record_fail "empty-result-guard: (u)" "olhou o projeto em vez do worktree do cd: ${out}"; fi
+  # (u2) o harness TIRA o `cd` que leva ao cwd da sessão: o comando chega sem `cd`, e o diretório real só
+  #      vem no `cwd` do payload. Sem lê-lo, o hook olhava o projeto (na main) e avisava falso para todo PR
+  #      aberto de dentro de uma worktree (#1110 e #1112, 2026-10-14). MUTANTE: ignorar o `.cwd` reprova.
+  out="$(printf '{"tool_input":{"command":"gh pr create --fill"},"cwd":"%s","tool_response":{"stdout":"ok"}}' "${_ok}" \
+    | CLAUDE_PROJECT_DIR="${_pj}" bash "${hook}" 2>&1 || true)"
+  if ! grep -q 'PR-SEM-PASSADA' <<< "${out}"; then
+    record_pass "empty-result-guard: (u2) create SEM cd, com o cwd do payload na worktree → olha o resíduo DALI"
+  else record_fail "empty-result-guard: (u2)" "olhou o projeto em vez do cwd do payload: ${out}"; fi
   rm -rf "${_pj}" "${_ok}" "${_ad}"
 
   # (e) exit 2 quando dispara — é a ÚNICA via medida em que o stderr de PostToolUse chega ao modelo.
@@ -15038,6 +15299,8 @@ case "$args" in
   *"api "*pulls*commits*)
       # os pais de cada commit do PR, um número por linha (1 = commit comum, 2 = commit de merge)
       printf '%s\n' ${GH_PR_PARENTS:-1}; exit "${GH_PR_COMMITS_RC:-0}" ;;
+  # strict local (FASE 0 de D_POSTMERGE_PROJECTION_WRITER_2026_10): quantos commits da base o head NÃO tem
+  *"api "*"/compare/"*) echo "${GH_BEHIND_BY:-0}"; exit 0 ;;
   *"api "*pulls*files*)
       # os arquivos do PR, um por linha (SAC-80: só PR que toca .kg.yaml faz a guarda ler git)
       [ -n "${GH_PR_FILES:-}" ] && printf '%s\n' ${GH_PR_FILES}; exit 0 ;;
@@ -15788,6 +16051,7 @@ case "$a" in
   *"pr checks"*)       printf 'selftest\tpass\t1s\turl\n'; exit 0 ;;
   *"api "*pulls*commits*) echo 1; exit 0 ;;
   *"api "*pulls*files*)   echo "ops/x.sh"; exit 0 ;;
+  *"api "*"/compare/"*)   echo 0; exit 0 ;;   # strict local: o head na ponta da base
   *"pr merge"*) echo "$a" >> "${R_MARGS}"; echo merged; exit 0 ;;
 esac
 exit 0
@@ -18632,6 +18896,21 @@ run_diary_crumbs_selftests() {
     record_pass "diary-crumbs: (h) marcador 📤 no frontmatter → exit 1 (projeção não entra na fonte)"
   else record_fail "diary-crumbs: (h) marcador na fonte" "esperava exit 1 + erro nomeado; rc=${rc} out='$(_emit "${out}" | head -2)'"; fi
 
+  # (i) migalha SUPERADA (`superseded: true`) com review_after vencido NÃO conta como ⏰, nem no índice
+  #     nem no contador do hook SessionStart; a vencida comum ao lado conta. Antes da cura (2026-10-14)
+  #     as duas contavam, e as 2 primeiras superadas do diário ficariam vencidas para sempre.
+  rm -f "${d}/.claude/diary/2026-01-10-marker-in-source.md"
+  printf -- '---\ndate: 2026-01-11\ntype: learning\nclassification: public\nreview_after: 2000-01-01\nconflict_class: static\nsuperseded: true\n---\n## Signal\nx\n' \
+    > "${d}/.claude/diary/2026-01-11-superseded-entry.md"
+  printf -- '---\ndate: 2026-01-12\ntype: learning\nclassification: public\nreview_after: 2000-01-01\nconflict_class: static\n---\n## Signal\nx\n' \
+    > "${d}/.claude/diary/2026-01-12-overdue-entry.md"
+  rc=0; out="$(bash "${di}" "${d}" 2>&1)" || rc=$?
+  local _hk="${REPO_ROOT}/.claude/hooks/co-evolution-inbox-check.sh" _hn
+  _hn="$(cd "${d}" && bash -c "$(sed -n '/^count_overdue_diary()/,/^}/p' "${_hk}"); count_overdue_diary" 2>/dev/null)"
+  if [ "${rc}" -eq 0 ] && grep -q '(1 stale' <<< "${out}" && [ "${_hn}" = 1 ]; then
+    record_pass "diary-crumbs: (i) superada não vence (índice 1 stale, hook 1) — só a vencida comum conta"
+  else record_fail "diary-crumbs: (i) superada" "esperava rc 0, '(1 stale' e hook 1; rc=${rc} hook=${_hn} out='$(_emit "${out}" | tail -2)'"; fi
+
   rm -rf "${d}"
 }
 
@@ -21163,7 +21442,9 @@ run_selftest_lanes_selftests() {
     #    da ancora contem o simbolo, entao procura-lo em `*.sh` (que inclui `lint-selftest.sh`)
     #    sempre acha — o mutante aplicou e a guarda passou. Achado pelo mutante, nao por leitura.
     _found=0
-    for _cand in "${SCRIPT_DIR}"/*.sh; do
+    # o pote inclui os hooks (2026-10-14): o caso (i) do diary_crumbs extrai `count_overdue_diary` do hook
+    # SessionStart, e a guarda o acusava de morto por só olhar .claude/validation/
+    for _cand in "${SCRIPT_DIR}"/*.sh "${SCRIPT_DIR}/../hooks"/*.sh; do
       case "${_cand##*/}" in lint-selftest.sh) continue ;; esac
       if LC_ALL=C grep -qw -- "${_anchor}" "${_cand}" 2>/dev/null; then _found=1; break; fi
     done
@@ -21176,7 +21457,7 @@ run_selftest_lanes_selftests() {
     record_fail "selftest-lanes: (0) ancoras" "ZERO ancoras extraidas — o proprio extrator quebrou (nao ha como isto ser conformidade)"
   elif [ -z "${_dead}" ]; then
     record_pass "selftest-lanes: (0) as ${_n} ancoras de sed do harness resolvem em simbolo VIVO do runner"
-  else record_fail "selftest-lanes: (0) ancora morta" "simbolo(s) citado(s) por \`sed -n '/^X/'\` que nao existem em .claude/validation/*.sh:${_dead} — renomeou no runner e esqueceu no harness"; fi
+  else record_fail "selftest-lanes: (0) ancora morta" "simbolo(s) citado(s) por \`sed -n '/^X/'\` que nao existem em .claude/validation/*.sh nem .claude/hooks/*.sh:${_dead} — renomeou no runner e esqueceu no harness"; fi
 
   local sut="${REPO_ROOT}/.claude/validation/lint-selftest.sh"
   if [ ! -f "${sut}" ]; then record_fail "selftest-lanes" "bancada ausente: ${sut}"; return; fi
@@ -23897,7 +24178,7 @@ run_backlog_projection_selftests() {
   local _err _md
   _err="$(cd "${sb}" && bash .claude/validation/kg-backlog-project.sh --markdown 2>&1 >/dev/null || true)"
   _md="$(cd "${sb}" && bash .claude/validation/kg-backlog-project.sh --markdown 2>/dev/null || true)"
-  if grep -q 'NÃO RASTREADO' <<< "${_err}" && grep -q 'sonda-untracked.kg.yaml' <<< "${_err}" && ! grep -q 'Q_SONDA' <<< "${_md}"; then
+  if grep -q 'NÃO RASTREADO' <<< "${_err}" && grep -q 'sonda-untracked.kg.yaml' <<< "${_err}" && ! grep -qw 'Q_SONDA' <<< "${_md}"; then   # -w: o id da sonda é PALAVRA (2026-10-14, o nó real Q_SONDAR_O_BUNDLE_… casava por substring)
     record_pass "backlog-projection: (c2) grafo novo não rastreado → fora da projeção, mas AVISADO e nomeado"
   else record_fail "backlog-projection: (c2)" "não avisou (ou entrou na projeção): err=${_err}"; fi
   ( cd "${sb}" && git add docs/evolution/research/sonda-untracked ) >/dev/null 2>&1 || true
@@ -24514,6 +24795,498 @@ EOF_K3
   rm -rf "${sb}" "${sbh}" "${sbj}" "${sbp}"
 }
 
+# AUTOMATE do /meta:drive (drive-automate.sh) — as PARADAS DURAS como predicado, uma bancada por objeção.
+#
+# POR QUE EXISTE. A decisão D_AUTO_DRIVE_DEGRAU_AUTOMATE (selo do maestro, 2026-10-12) forjou o degrau
+# «com as objeções»: as quatro arestas CONSTRAINS do grafo auto-drive-2026-10 são REQUISITO, e o merge
+# nasce DESLIGADO. A doutrina do drive (§0) diz que o degrau só abre quando as paradas forem predicados
+# com mutante; esta família é a prova. Cada caso nomeia a objeção (o1..o4) ou o invariante (i*) que
+# defende, e cada um foi conferido contra um MUTANTE do script (registro no resíduo da REGRA 56 do PR).
+#
+# O SUBSTRATO é um repo git de verdade, com STUBS só nas bordas que custam rede ou mudam o mundo:
+#   · `gh` (bin/ no PATH) devolve o JSON do PR de forge/pr-N.json e LOGA cada chamada;
+#   · `tm.sh` (no lugar do dispatcher) devolve tm/<ID>.json e tm/<ID>.kids.json e LOGA;
+#   · `ops/merge-serial.sh` LOGA e vira o PR para MERGED no forge falso — o caminho verificado de verdade
+#     não roda aqui (ele tem a família dele); o que se prova é que o AUTOMATE SÓ mergeia por ele.
+# O radar, o kg-drive-project.sh e o próprio drive-automate.sh são os REAIS.
+run_drive_automate_selftests() {
+  local da="${REPO_ROOT}/.claude/validation/drive-automate.sh"
+  if [ ! -f "${da}" ]; then record_skip "drive-automate: script ausente"; return; fi
+  if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import yaml' >/dev/null 2>&1; then
+    record_skip "drive-automate: python3+PyYAML ausentes (o predicado lê o grafo por YAML)"; return; fi
+  local base; base="$(mktemp -d)"
+  mkdir -p "${base}/.claude/validation/lib" "${base}/.claude/utils/task-manager" "${base}/ops" "${base}/bin" \
+           "${base}/forge" "${base}/tm" "${base}/docs/evolution/research/p" "${base}/docs/evolution/review" "${base}/docs/analysis"
+  cp "${da}" "${REPO_ROOT}/.claude/validation/kg-radar.sh" "${REPO_ROOT}/.claude/validation/kg-drive-project.sh" "${base}/.claude/validation/"
+  cp "${REPO_ROOT}/.claude/validation/lib/"* "${base}/.claude/validation/lib/"
+  cp "${REPO_ROOT}/ops/github-ruleset-main.json" "${base}/ops/" 2>/dev/null \
+    || printf '{"rules":[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"selftest-gate"},{"context":"lint-onion-artifacts"}]}}]}\n' > "${base}/ops/github-ruleset-main.json"
+  cat > "${base}/bin/gh" <<'EOF_GH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${DA_SB}/gh.log"
+case "$1 $2" in
+  "pr view") f="${DA_SB}/forge/pr-$3.json"; [ -f "$f" ] || { echo "PR inexistente" >&2; exit 1; }; cat "$f" ;;
+  *) echo "gh falso: verbo nao simulado: $*" >&2; exit 9 ;;
+esac
+EOF_GH
+  cat > "${base}/.claude/utils/task-manager/tm.sh" <<'EOF_TM'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${DA_SB}/tm.log"
+case "$1" in
+  item.read) cat "${DA_SB}/tm/$2.json" 2>/dev/null || { echo "item nao achado: $2" >&2; exit 1; } ;;
+  hierarchy.subtask_list) cat "${DA_SB}/tm/$2.kids.json" 2>/dev/null || printf '{"parent":"%s","count":0,"subtasks":[]}\n' "$2" ;;
+  *) exit 2 ;;
+esac
+EOF_TM
+  cat > "${base}/ops/merge-serial.sh" <<'EOF_MS'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${DA_SB}/merge.log"
+mode="$(cat "${DA_SB}/ms-mode" 2>/dev/null || true)"
+python3 - "${DA_SB}/forge/pr-$1.json" "${mode}" <<'EOF_FLIP'
+import json, sys
+p, mode = sys.argv[1], sys.argv[2]; d = json.load(open(p))
+d.update(state="MERGED", mergedAt="2026-10-03T03:04:05Z", mergeCommit={"oid": "abcdef0123456789abcdef0123456789abcdef01"})
+if mode == "addfile":
+    d["files"].append({"path": ".claude/hooks/pretooluse-moat-gate.sh"})
+if mode == "nochecks":
+    d["statusCheckRollup"] = []; d["headRefOid"] = "f" * 40
+json.dump(d, open(p, "w"))
+EOF_FLIP
+echo "MERGED $1"
+[ "${mode}" = fail-merged ] && exit 4
+exit 0
+EOF_MS
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${base}/ops/pr-merge-verified.sh"
+  chmod +x "${base}/bin/gh" "${base}/.claude/utils/task-manager/tm.sh" "${base}/ops/"*.sh
+  # gerador do PR falso: mkpr <N> <oid> <arquivos,separados,por,virgula> [checks=ok|vazio|so-lint|vermelho|pendente] [url-repo]
+  cat > "${base}/mkpr.py" <<'EOF_MK'
+import json, sys
+n, oid, files = sys.argv[1], sys.argv[2], sys.argv[3]
+mode = sys.argv[4] if len(sys.argv) > 4 else "ok"
+repo = sys.argv[5] if len(sys.argv) > 5 else "acme/core"
+run = lambda r: "https://github.com/%s/actions/runs/%s/job/1" % (repo, r)
+ok = [{"__typename": "CheckRun", "name": "selftest-gate", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": run(111)},
+      {"__typename": "CheckRun", "name": "lint-onion-artifacts", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": run(222)},
+      {"__typename": "CheckRun", "name": "onion-review", "status": "COMPLETED", "conclusion": "SKIPPED", "detailsUrl": run(333)}]
+roll = {"ok": ok, "vazio": [], "so-lint": ok[1:], "vermelho": ok + [{"name": "plano", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": run(444)}],
+        "pendente": ok + [{"name": "plano", "status": "IN_PROGRESS", "conclusion": "", "detailsUrl": run(555)}],
+        "revisor": ok + [{"name": "onion-review-verdict", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": run(666)}]}[mode]
+json.dump({"number": int(n), "url": "https://github.com/%s/pull/%s" % (repo, n), "state": "OPEN", "isDraft": False,
+           "baseRefName": "main", "headRefName": "feat/item-a", "headRefOid": oid, "mergedAt": None, "mergeCommit": None,
+           "isCrossRepository": False, "statusCheckRollup": roll,
+           "files": [{"path": f} for f in files.split(",") if f]}, open(sys.argv[0].rsplit("/", 1)[0] + "/forge/pr-%s.json" % n, "w"))
+EOF_MK
+  cat > "${base}/docs/evolution/research/p/plan.kg.yaml" <<'EOF_PLAN'
+meta:
+  id: plan
+  schema_version: "1"
+  baseline: "2026-10-14"
+  review_after: "2026-11-14"
+nodes:
+  - id: C_EPIC
+    node_type: claim
+    layer: audit
+    plane: DEV
+    status: open
+    impact: 3
+    confidence: 0.6
+    x_tm_item: "SAC-1"
+    label: "o epico entrega a cadeia inteira"
+  - id: C_TASK_A
+    node_type: claim
+    layer: audit
+    plane: DEV
+    status: open
+    impact: 3
+    confidence: 0.6
+    x_tm_item: "SAC-2"
+    x_drive_parent: C_EPIC
+    label: "a tarefa A muda a doc da analise"
+  - id: C_TASK_B
+    node_type: claim
+    layer: audit
+    plane: DEV
+    status: open
+    impact: 3
+    confidence: 0.6
+    x_tm_item: "SAC-3"
+    x_drive_parent: C_EPIC
+    label: "a tarefa B depende da A"
+  - id: E_INPUT
+    node_type: evidence
+    layer: audit
+    plane: DEV
+    status: confirmed
+    impact: 4
+    confidence: 0.8
+    verified_at: "2026-10-14"
+    verified_against: "medido na bancada"
+    label: "o insumo da tarefa A"
+    provenance:
+      source: "bancada"
+      locator: "caso a"
+      method: "medicao"
+edges:
+  - from: C_TASK_B
+    to: C_TASK_A
+    edge_type: DEPENDS_ON
+  - from: E_INPUT
+    to: C_TASK_A
+    edge_type: SUPPORTS
+  - from: C_TASK_A
+    to: C_EPIC
+    edge_type: SUPPORTS
+EOF_PLAN
+  printf '{"identifier":"SAC-1","parent":null,"state":{"type":"started"}}\n' > "${base}/tm/SAC-1.json"
+  printf '{"parent":"SAC-1","count":2,"subtasks":[{"identifier":"SAC-2"},{"identifier":"SAC-3"}]}\n' > "${base}/tm/SAC-1.kids.json"
+  printf '{"identifier":"SAC-2","parent":{"identifier":"SAC-1"},"state":{"type":"unstarted"}}\n' > "${base}/tm/SAC-2.json"
+  printf '{"identifier":"SAC-3","parent":{"identifier":"SAC-1"},"state":{"type":"unstarted"}}\n' > "${base}/tm/SAC-3.json"
+  local _git=(git -c user.name=bancada -c user.email=bancada@example.invalid -c commit.gpgsign=false -c core.hooksPath=/dev/null)
+  ( cd "${base}" && git init -q -b main . && git remote add origin https://github.com/acme/core.git \
+      && "${_git[@]}" add -A && "${_git[@]}" commit -qm base \
+      && git checkout -q -b feat/item-a \
+      && printf -- '---\ntitle: residuo\nreviewed_diff_sha256: 0123abcd\nverdict: CORRIGIDO\nelenxo: sim\nelenxo_isolado: sim\n---\n' > docs/evolution/review/feat-item-a.md \
+      && printf 'a\n' > docs/analysis/a.md && "${_git[@]}" add -A && "${_git[@]}" commit -qm item-a \
+      && printf -- '---\ntitle: residuo\nreviewed_diff_sha256: 0123abcd\nverdict: CORRIGIDO\nelenxo: sim\n---\n' > docs/evolution/review/feat-item-a.md \
+      && "${_git[@]}" commit -qam uma-voz \
+      && printf -- '---\ntitle: residuo\nreviewed_diff_sha256: 0123abcd\nverdict: REPROVADO\nelenxo: sim\nelenxo_isolado: sim\n---\n' > docs/evolution/review/feat-item-a.md \
+      && "${_git[@]}" commit -qam reprovado \
+      && git checkout -q main && git update-ref refs/remotes/origin/main main \
+      && git checkout -q -b feat/dec main && mkdir -p docs/evolution/research/q \
+      && printf 'meta:\n  id: q\n  schema_version: "1"\nnodes:\n  - id: D_Q\n    node_type: decision\n    plane: DEV\n    status: done\n    impact: 2\n    confidence: 0.5\n    label: "fechada por PR"\nedges: []\n' > docs/evolution/research/q/q.kg.yaml \
+      && "${_git[@]}" add -A && "${_git[@]}" commit -qm fecha-decisao \
+      && git checkout -q main ) >/dev/null 2>&1 \
+    || { record_fail "drive-automate: montagem" "não montei o repo da bancada"; rm -rf "${base}"; return; }
+  local OID_OK OID_ONEVOICE OID_REPROV
+  OID_REPROV="$(git -C "${base}" rev-parse feat/item-a)"; OID_ONEVOICE="$(git -C "${base}" rev-parse feat/item-a~1)"
+  OID_OK="$(git -C "${base}" rev-parse feat/item-a~2)"
+  local OID_DEC; OID_DEC="$(git -C "${base}" rev-parse feat/dec)"
+  local G="docs/evolution/research/p/plan.kg.yaml" FILES_OK="docs/analysis/a.md,docs/evolution/review/feat-item-a.md"
+
+  local sb rc out
+  _da_new() { sb="$(mktemp -d)"; cp -a "${base}/." "${sb}/"; : > "${sb}/gh.log"; : > "${sb}/tm.log"; : > "${sb}/merge.log"; }
+  _da() { rc=0; out="$( cd "${sb}" && DA_SB="${sb}" PATH="${sb}/bin:${PATH}" bash .claude/validation/drive-automate.sh "$@" 2>&1 )" || rc=$?; }
+  _da_pr() { python3 "${sb}/mkpr.py" "$@"; }
+  _da_ok() { [ "${rc}" = "$1" ] && grep -qF -- "$2" <<< "${out}"; }
+  _da_case() {  # nome · rc esperado · token esperado
+    if _da_ok "$2" "$3"; then record_pass "drive-automate: $1"; else record_fail "drive-automate: $1" "esperava rc=$2 e '$3'; veio rc=${rc}: $(head -c 400 <<< "${out}")"; fi
+  }
+  _da_ready() {  # passada aberta + C_TASK_A vinculado ao PR 7, forge verde
+    _da begin "${G}" --max-nodes 3 --budget 1000 "$@" >/dev/null; _da track "${G}" C_TASK_A --pr 7 >/dev/null
+    _da_pr 7 "${OID_OK}" "${FILES_OK}"
+  }
+
+  # ── OBJEÇÃO 1 — o grafo é a SSOT da ordem; a expansão para em voz alta ─────────────────────────
+  _da_new; _da plan "${G}"
+  if [ "${rc}" = 0 ] && [ "$(grep '^ITEM' <<< "${out}" | cut -f3 | paste -sd, -)" = "C_TASK_A,C_TASK_B,C_EPIC" ]; then
+    record_pass "drive-automate: (o1a) a cadeia sai em ordem topológica — predecessor antes do dependente, filho antes do pai"
+  else record_fail "drive-automate: (o1a) ordem" "rc=${rc}: ${out}"; fi
+  rm -rf "${sb}"
+  _da_new; printf '  - from: C_TASK_A\n    to: C_TASK_B\n    edge_type: DEPENDS_ON\n' >> "${sb}/${G}"; _da plan "${G}"
+  _da_case "(o1b) ciclo em DEPENDS_ON PARA (CICLO)" 1 "CICLO:"; rm -rf "${sb}"
+  _da_new; _da plan "${G}" --root SAC-99
+  _da_case "(o1c) item do task manager sem nó PARA (ITEM-SEM-NO)" 1 "ITEM-SEM-NO: SAC-99"; rm -rf "${sb}"
+  _da_new; printf '{"parent":"SAC-1","count":3,"subtasks":[{"identifier":"SAC-2"},{"identifier":"SAC-3"},{"identifier":"SAC-4"}]}\n' > "${sb}/tm/SAC-1.kids.json"
+  _da plan "${G}"; _da_case "(o1d) subtarefa do task manager sem nó PARA (ITEM-SEM-NO)" 1 "subtarefa SAC-4"; rm -rf "${sb}"
+  _da_new; sed -i '/x_tm_item: "SAC-3"/d' "${sb}/${G}"; _da plan "${G}"
+  _da_case "(o1e) nó da cadeia sem item PARA (NO-SEM-ITEM)" 1 "NO-SEM-ITEM: C_TASK_B"; rm -rf "${sb}"
+  _da_new; printf '{"identifier":"SAC-3","parent":{"identifier":"SAC-9"}}\n' > "${sb}/tm/SAC-3.json"; _da plan "${G}"
+  _da_case "(o1f) pai no grafo ≠ pai no task manager PARA (PAI-FILHO-DIVERGENTE)" 1 "PAI-FILHO-DIVERGENTE: C_TASK_B"; rm -rf "${sb}"
+  _da_new; rm -f "${sb}/tm/SAC-2.json"; _da plan "${G}"
+  _da_case "(o1g) task manager ilegível PARA (TM-ILEGIVEL), nunca segue sem conferir" 1 "TM-ILEGIVEL"; rm -rf "${sb}"
+
+  # ── OBJEÇÃO 2 — o carimbo vem do que foi LIDO no forge ─────────────────────────────────────────
+  _da_new; _da_ready; _da stamp "${G}" C_TASK_A
+  _da_case "(o2b) carimbo com PR ainda aberto PARA (PR-NAO-MERGEADO)" 1 "PR-NAO-MERGEADO"
+  if grep -q '^    status: open' <<< "$(awk '/- id: C_TASK_A/{f=1} f&&/- id: C_TASK_B/{f=0} f' "${sb}/${G}")"; then record_pass "drive-automate: (o2b') o nó segue open quando o forge não diz MERGED"
+  else record_fail "drive-automate: (o2b')" "o nó mudou sem merge lido"; fi
+  python3 - "${sb}/forge/pr-7.json" <<'EOF_INC'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d.update(mergedAt="2026-10-03T03:04:05Z", mergeCommit={"oid": "abcdef0123456789abcdef0123456789abcdef01"})
+json.dump(d, open(p, "w"))
+EOF_INC
+  _da stamp "${G}" C_TASK_A
+  _da_case "(o2b'') forge incoerente (state OPEN com mergedAt e SHA) não carimba: o estado MERGED é exigido" 1 "PR-NAO-MERGEADO"
+  DA_SB="${sb}" bash "${sb}/ops/merge-serial.sh" 7 >/dev/null 2>&1
+  : > "${sb}/merge.log"; _da stamp "${G}" C_TASK_A
+  local blk; blk="$(awk '/- id: C_TASK_A/{f=1} f&&/- id: C_TASK_B/{f=0} f' "${sb}/${G}")"
+  if [ "${rc}" = 0 ] && grep -q 'status: done' <<< "${blk}" && grep -q 'verified_at: "2026-10-03"' <<< "${blk}" \
+     && grep -q 'locator: "https://github.com/acme/core/pull/7 · merge abcdef0123456789abcdef0123456789abcdef01 · selftest-gate run 111, lint-onion-artifacts run 222"' <<< "${blk}" \
+     && grep -q 'method: "leitura: drive-automate.sh stamp' <<< "${blk}" && bash "${sb}/.claude/validation/kg-radar.sh" "${sb}/${G}" --integrity --schema >/dev/null 2>&1; then
+    record_pass "drive-automate: (o2a) o carimbo cita o que LEU: URL do PR, SHA do merge, run de CI de cada check exigido; verified_at = mergedAt; radar exit 0"
+  else record_fail "drive-automate: (o2a) carimbo" "rc=${rc}: ${out} :: ${blk}"; fi
+  rm -rf "${sb}"
+  _da_new
+  python3 - "${sb}/${G}" <<'EOF_DEC'
+import sys; p = sys.argv[1]; t = open(p).read()
+t = t.replace("  - id: C_TASK_A\n    node_type: claim", "  - id: C_TASK_A\n    node_type: decision", 1); open(p, "w").write(t)
+EOF_DEC
+  _da begin "${G}" --max-nodes 3 --budget 1000 --merge; _da_case "(o2c') decision aberta na cadeia PARA já na expansão (DECISAO-NAO-TOMADA)" 1 "DECISAO-NAO-TOMADA: C_TASK_A"
+  _da stamp "${G}" C_TASK_A; _da_case "(o2c) o carimbo nunca fecha decision (ITEM-E-DECISION)" 1 "ITEM-E-DECISION"
+  rm -rf "${sb}"
+  _da_new; _da_ready; DA_SB="${sb}" bash "${sb}/ops/merge-serial.sh" 7 >/dev/null 2>&1
+  python3 - "${sb}/${G}" <<'EOF_EP'
+import sys; p = sys.argv[1]; t = open(p).read()
+t = t.replace('    x_tm_item: "SAC-1"\n', '    x_tm_item: "SAC-1"\n    x_drive_pr: "7"\n', 1); open(p, "w").write(t)
+EOF_EP
+  _da stamp "${G}" C_EPIC; _da_case "(o2d) épico com filho aberto não fecha (PAI-COM-FILHO-ABERTO)" 1 "PAI-COM-FILHO-ABERTO: C_EPIC"
+  rm -rf "${sb}"
+  _da_new; _da_ready; _da_pr 7 "${OID_OK}" "${FILES_OK}" so-lint; DA_SB="${sb}" bash "${sb}/ops/merge-serial.sh" 7 >/dev/null 2>&1
+  _da stamp "${G}" C_TASK_A; _da_case "(o2e) sem run de CI SUCCESS de todo check exigido, não carimba (CI-SEM-RUN)" 1 "CI-SEM-RUN"
+  rm -rf "${sb}"
+
+  # ── OBJEÇÃO 3 — os riscos que faltavam ──────────────────────────────────────────────────────────
+  _da_new; _da_ready; _da gate "${G}" C_TASK_A
+  _da_case "(o3f) tudo verde e SEM --merge → AUDIT (rc 3): o merge nasce desligado" 3 "AUDIT:"
+  rm -rf "${sb}"
+  _da_new; _da_ready --merge; _da_pr 7 "${OID_OK}" "${FILES_OK}" vazio; _da gate "${G}" C_TASK_A --merge
+  _da_case "(o3a) CI verde VAZIO (nenhum check) PARA (CI-VAZIO)" 1 "CI-VAZIO"
+  _da_pr 7 "${OID_OK}" "${FILES_OK}" so-lint; _da gate "${G}" C_TASK_A --merge
+  _da_case "(o3a') check exigido ausente PARA (CI-SEM-CHECK-EXIGIDO)" 1 "CI-SEM-CHECK-EXIGIDO: o check selftest-gate"
+  _da_pr 7 "${OID_OK}" "${FILES_OK}" vermelho; _da gate "${G}" C_TASK_A --merge
+  _da_case "(o3j) check vermelho inesperado PARA (CI-VERMELHO, abort-on-anomaly)" 1 "CI-VERMELHO: o check plano"
+  _da_pr 7 "${OID_OK}" "${FILES_OK}" pendente; _da gate "${G}" C_TASK_A --merge
+  _da_case "(o3j') check pendente PARA (CI-PENDENTE)" 1 "CI-PENDENTE"
+  _da_pr 7 "${OID_ONEVOICE}" "${FILES_OK}"; _da gate "${G}" C_TASK_A --merge
+  _da_case "(o3c) Elenxo sem agente separado PARA (ELENXO-UMA-VOZ)" 1 "ELENXO-UMA-VOZ"
+  _da_pr 7 "${OID_REPROV}" "${FILES_OK}"; _da gate "${G}" C_TASK_A --merge
+  _da_case "(o3d) Elenxo reprovado PARA (ELENXO-REPROVADO)" 1 "ELENXO-REPROVADO"
+  sed -i 's/verified_at: "2026-10-14"/verified_at: "2026-09-01"/' "${sb}/${G}"; _da_pr 7 "${OID_OK}" "${FILES_OK}"; _da gate "${G}" C_TASK_A --merge
+  _da_case "(o3e) insumo STALE de impacto alto PARA (INSUMO-VENCIDO)" 1 "INSUMO-VENCIDO: E_INPUT"
+  rm -rf "${sb}"
+  _da_new; printf '{"identifier":"SAC-2","parent":{"identifier":"SAC-1"},"state":{"type":"completed","name":"Done"}}\n' > "${sb}/tm/SAC-2.json"
+  _da plan "${G}"
+  if [ "${rc}" = 0 ] && grep -q $'^ITEM\t1\tC_TASK_A\tclaim\tTODO' <<< "${out}"; then
+    record_pass "drive-automate: (o3i) status 'Done' no task manager não fecha o nó (o grafo é a SSOT; o status do provedor pode mentir)"
+  else record_fail "drive-automate: (o3i) status do provedor" "rc=${rc}: ${out}"; fi
+  rm -rf "${sb}"
+  # retomada depois da queda: a passada mora no grafo; reabrir não zera o gasto nem o teto
+  _da_new; _da begin "${G}" --max-nodes 2 --budget 1000 --merge >/dev/null; _da charge "${G}" --tokens 400 >/dev/null
+  _da track "${G}" C_TASK_A --pr 7 >/dev/null; _da begin "${G}" --max-nodes 9 --budget 99999 --merge
+  if [ "${rc}" = 0 ] && grep -q 'RETOMADA:.*gasto 400/1000, iniciados 1/2' <<< "${out}"; then
+    record_pass "drive-automate: (o3h) begin depois da queda RETOMA a passada do grafo (gasto e teto não zeram)"
+  else record_fail "drive-automate: (o3h) retomada" "rc=${rc}: ${out}"; fi
+  _da next "${G}"; _da_case "(o3h') next retoma o item em voo antes de qualquer novo (RETOMAR)" 0 $'RETOMAR\tC_TASK_A\tPR #7'
+  rm -rf "${sb}"
+
+  # ── OBJEÇÃO 4 — usa a maquinaria, não a reinterpreta ───────────────────────────────────────────
+  _da_new; _da plan "${G}"
+  if grep -qx 'item.read SAC-2 --lean' "${sb}/tm.log" && grep -qx 'hierarchy.subtask_list SAC-1' "${sb}/tm.log" \
+     && ! grep -qiE 'api\.linear\.app|zohoapis|api\.clickup\.com|atlassian\.net|app\.asana\.com|urllib|requests\.' "${da}"; then
+    record_pass "drive-automate: (o4a) o task manager é lido SÓ pelo tm.sh (nenhum host de provedor no script)"
+  else record_fail "drive-automate: (o4a) tm.sh" "tm.log=$(paste -sd' ' "${sb}/tm.log")"; fi
+  rm -rf "${sb}"
+  _da_new; _da_ready --merge; _da merge "${G}" C_TASK_A --merge
+  if [ "${rc}" = 0 ] && grep -qx '7' "${sb}/merge.log" && ! grep -qE '^pr merge|pulls/.*/merge' "${sb}/gh.log" \
+     && grep -q '^    status: done' <<< "$(awk '/- id: C_TASK_A/{f=1} f&&/- id: C_TASK_B/{f=0} f' "${sb}/${G}")"; then
+    record_pass "drive-automate: (o4b/i-merge) com --merge na passada E na chamada, o merge vai SÓ pelo ops/merge-serial.sh, e o carimbo lê o forge depois"
+  else record_fail "drive-automate: (o4b) caminho do merge" "rc=${rc}: ${out} :: merge.log=$(cat "${sb}/merge.log") gh.log=$(paste -sd' ' "${sb}/gh.log")"; fi
+  _da next "${G}"; _da_case "(o4b') depois do merge a cadeia anda para o dependente (PROXIMO C_TASK_B)" 0 $'PROXIMO\tC_TASK_B'
+  _da end "${G}" "lote de teste"
+  if [ "${rc}" = 0 ] && grep -q '^  x_drive_checkpoint: pending' "${sb}/${G}" \
+     && grep -q 'x_drive_checkpoint_note: .*mergeados e carimbados pelo forge: C_TASK_A' "${sb}/${G}" && ! grep -q 'x_drive_pass:' "${sb}/${G}"; then
+    record_pass "drive-automate: (o4c) end escreve o checkpoint pelo kg-drive-project.sh --close-lot, nomeando o que mergeou"
+  else record_fail "drive-automate: (o4c) checkpoint" "rc=${rc}: ${out}"; fi
+  _da begin "${G}" --max-nodes 1 --budget 10; _da_case "(i-ckpt) checkpoint pendente PARA a próxima passada" 1 "CHECKPOINT-PENDENTE"
+  rm -rf "${sb}"
+
+  # ── INVARIANTES ──────────────────────────────────────────────────────────────────────────────────
+  _da_new; _da_ready; _da merge "${G}" C_TASK_A --merge
+  if [ "${rc}" = 1 ] && grep -q 'MERGE-NAO-AUTORIZADO-NA-PASSADA' <<< "${out}" && [ ! -s "${sb}/merge.log" ]; then
+    record_pass "drive-automate: (i-merge1) passada aberta sem --merge não mergeia nem com --merge na chamada"
+  else record_fail "drive-automate: (i-merge1)" "rc=${rc}: ${out}"; fi
+  _da begin "${G}" --max-nodes 3 --budget 1000 --merge
+  _da_case "(i-merge2) retomada não liga o merge no meio do laço" 1 "não se liga merge numa retomada"
+  rm -rf "${sb}"
+  _da_new; _da_ready --merge; rc=0; out="$( cd "${sb}" && ONION_DRIVE_MERGE=1 ONION_AUTOMATE_MERGE=1 DA_SB="${sb}" PATH="${sb}/bin:${PATH}" bash .claude/validation/drive-automate.sh merge "${G}" C_TASK_A 2>&1 )" || rc=$?
+  if [ "${rc}" = 3 ] && [ ! -s "${sb}/merge.log" ]; then
+    record_pass "drive-automate: (i-merge3) sem --merge na chamada não há merge (o script não lê ambiente: a variável não abre nada)"
+  else record_fail "drive-automate: (i-merge3)" "rc=${rc}: ${out}"; fi
+  _da_pr 7 "${OID_OK}" "${FILES_OK},.claude/commands/meta/x.md"; _da gate "${G}" C_TASK_A --merge
+  _da_case "(i-moat1) diff que viaja ao adotante PARA (PATH-VENDORIZADO)" 1 "PATH-VENDORIZADO"
+  _da_pr 7 "${OID_OK}" "${FILES_OK},site/index.html"; _da gate "${G}" C_TASK_A --merge
+  _da_case "(i-moat1') diff do site público PARA (allowlist, nunca denylist)" 1 "PATH-VENDORIZADO"
+  _da_pr 7 "${OID_OK}" "${FILES_OK},${G}"; _da gate "${G}" C_TASK_A --merge
+  _da_case "(i-moat2) PR que toca o grafo de controle PARA (PR-DO-CONTROLE)" 1 "PR-DO-CONTROLE"
+  _da_pr 7 "${OID_OK}" "${FILES_OK}" ok other/repo; _da gate "${G}" C_TASK_A --merge
+  _da_case "(i-moat3) PR de outro repositório PARA (REPO-ALHEIO, I3)" 1 "REPO-ALHEIO"
+  _da_pr 7 "${OID_OK}" "$(seq -s, -f 'docs/analysis/f%g.md' 1 60)"; _da gate "${G}" C_TASK_A --merge
+  _da_case "(i-cap) diff grande PARA (DIFF-GRANDE)" 1 "DIFF-GRANDE"
+  _da_pr 7 "${OID_OK}" "${FILES_OK}"; mv "${sb}/ops/merge-serial.sh" "${sb}/ops/merge-serial.off"; _da gate "${G}" C_TASK_A --merge
+  _da_case "(i-path) sem ops/merge-serial.sh (adotante) o merge é recusado (SEM-CAMINHO-VERIFICADO)" 1 "SEM-CAMINHO-VERIFICADO"
+  mv "${sb}/ops/merge-serial.off" "${sb}/ops/merge-serial.sh"; _da gate "${G}" C_TASK_A --merge
+  _da_case "(i-ok) com tudo verde e --merge, o gate libera (MERGE-OK)" 0 "MERGE-OK"
+  python3 - "${sb}/${G}" <<'EOF_DEC2'
+import sys; p = sys.argv[1]; t = open(p).read()
+t = t.replace("  - id: C_TASK_A\n    x_drive_pr: \"7\"\n    node_type: claim", "  - id: C_TASK_A\n    x_drive_pr: \"7\"\n    node_type: decision", 1); open(p, "w").write(t)
+EOF_DEC2
+  _da gate "${G}" C_TASK_A --merge
+  _da_case "(o3g) item que virou decision depois de vinculado não mergeia nem com --merge (ITEM-E-DECISION)" 1 "ITEM-E-DECISION: C_TASK_A"
+  rm -rf "${sb}"
+  _da_new; sed -i 's/label: "a tarefa B depende da A"/label: "a tarefa B faz o deploy do site"/' "${sb}/${G}"; _da plan "${G}"
+  _da_case "(i-moat4) nó com trabalho de deploy/publicação PARA (NO-MOAT)" 1 "NO-MOAT: C_TASK_B"
+  rm -rf "${sb}"
+  _da_new; sed -i 's/    x_tm_item: "SAC-3"/    x_tm_item: "SAC-3"\n    x_drive_moat: "publica a porta"/' "${sb}/${G}"; _da plan "${G}"
+  _da_case "(i-moat4') nó marcado x_drive_moat PARA (NO-MOAT)" 1 "NO-MOAT: C_TASK_B está marcado"
+  rm -rf "${sb}"
+  _da_new; _da gate "${G}" C_TASK_A --merge; _da_case "(i-pass) sem passada aberta não há laço (SEM-PASSADA)" 1 "SEM-PASSADA"
+  _da begin "${G}" --max-nodes 1 --budget 0; _da_case "(i-teto0) teto zero é recusado (sem teto não há laço)" 2 "têm de ser >= 1"
+  _da begin "${G}" --max-nodes 1 --budget 500 --merge >/dev/null; _da track "${G}" C_TASK_A --pr 7 >/dev/null
+  _da track "${G}" C_TASK_B --pr 8; _da_case "(i-nos) o teto de nós por passada PARA o item seguinte (TETO-DE-NOS)" 1 "TETO-DE-NOS"
+  _da charge "${G}" --tokens 500; _da_case "(i-budget1) o gasto que alcança o budget PARA na hora (BUDGET-ESGOTADO)" 1 "BUDGET-ESGOTADO"
+  _da next "${G}"; _da_case "(i-budget2) budget esgotado PARA o next" 1 "BUDGET-ESGOTADO"
+  _da_pr 7 "${OID_OK}" "${FILES_OK}"; _da gate "${G}" C_TASK_A --merge; _da_case "(i-budget3) budget esgotado PARA o merge" 1 "BUDGET-ESGOTADO"
+  _da charge "${G}" --tokens -5; _da_case "(i-budget4) gasto não inteiro é recusado (rc 2)" 2 "inteiro"
+  rm -rf "${sb}"
+
+  # ── CURAS DO ELENXO (2026-10-14): cada achado reproduzido virou caso ────────────────────────────
+  # (e1) a passada editada à mão PARA: o merge não liga trocando "desligado" por "ligado" no YAML
+  _da_new; _da_ready; sed -i 's/merge: "desligado"/merge: "ligado"/' "${sb}/${G}"; _da merge "${G}" C_TASK_A --merge
+  if [ "${rc}" = 1 ] && grep -q 'PASSADA-ADULTERADA' <<< "${out}" && [ ! -s "${sb}/merge.log" ]; then
+    record_pass "drive-automate: (e1) merge ligado à mão no grafo quebra o selo da passada (PASSADA-ADULTERADA), sem merge"
+  else record_fail "drive-automate: (e1) selo da passada" "rc=${rc}: ${out}"; fi
+  rm -rf "${sb}"
+  _da_new; _da_ready --merge; sed -i 's/spent: 0/spent: -100000/' "${sb}/${G}"; _da gate "${G}" C_TASK_A --merge
+  _da_case "(e1') gasto negativo escrito à mão PARA (PASSADA-ADULTERADA)" 1 "PASSADA-ADULTERADA"
+  rm -rf "${sb}"
+  _da_new; _da_ready --merge; rm -rf "${sb}/.git/onion-drive-pass"; _da gate "${G}" C_TASK_A --merge
+  _da_case "(e1'') passada sem o segredo do begin (escrita à mão) PARA (PASSADA-ADULTERADA)" 1 "PASSADA-ADULTERADA"
+  rm -rf "${sb}"
+  # (e2) o head mergeado muda depois do gate: a política é relida no estado final e o nó não é carimbado
+  _da_new; _da_ready --merge; echo addfile > "${sb}/ms-mode"; _da merge "${G}" C_TASK_A --merge
+  if [ "${rc}" = 1 ] && grep -q 'POS-MERGE-FORA-DA-POLITICA' <<< "${out}" \
+     && grep -q '^    status: open' <<< "$(awk '/- id: C_TASK_A/{f=1} f&&/- id: C_TASK_B/{f=0} f' "${sb}/${G}")" \
+     && grep -q 'merged: "C_TASK_A"' "${sb}/${G}"; then
+    record_pass "drive-automate: (e2) head mergeado fora da política PARA sem carimbo, e o merge fica registrado na passada"
+  else record_fail "drive-automate: (e2) head divergente" "rc=${rc}: ${out}"; fi
+  rm -rf "${sb}"
+  # (e3) a ordem vale em todo passo: o dependente não se vincula nem mergeia antes do predecessor
+  _da_new; _da begin "${G}" --max-nodes 3 --budget 1000 --merge >/dev/null; _da track "${G}" C_TASK_B --pr 8
+  _da_case "(e3) track do dependente com predecessor aberto PARA (PREDECESSOR-ABERTO)" 1 "PREDECESSOR-ABERTO: C_TASK_B"
+  rm -rf "${sb}"
+  _da_new; _da_ready --merge
+  python3 - "${sb}/${G}" <<'EOF_KID'
+import sys; p = sys.argv[1]; t = open(p).read()
+t = t.replace('    x_tm_item: "SAC-3"\n    x_drive_parent: C_EPIC\n', '    x_tm_item: "SAC-3"\n    x_drive_parent: C_TASK_A\n', 1); open(p, "w").write(t)
+EOF_KID
+  _da gate "${G}" C_TASK_A --merge
+  _da_case "(e3') o gate não mergeia pai com filho aberto (PAI-COM-FILHO-ABERTO)" 1 "PAI-COM-FILHO-ABERTO: C_TASK_A"
+  rm -rf "${sb}"
+  # (e4) x_drive_pr escrito à mão (ou herdado de outra passada) não fura o teto
+  _da_new; _da begin "${G}" --max-nodes 1 --budget 1000 --merge >/dev/null
+  sed -i 's/    x_tm_item: "SAC-2"/    x_tm_item: "SAC-2"\n    x_drive_pr: "7"/' "${sb}/${G}"; _da_pr 7 "${OID_OK}" "${FILES_OK}"
+  _da gate "${G}" C_TASK_A --merge
+  _da_case "(e4) PR no nó sem vínculo NESTA passada não é julgado (ITEM-FORA-DA-PASSADA)" 1 "ITEM-FORA-DA-PASSADA"
+  _da next "${G}"; _da_case "(e4') item em voo de outra passada é retomado só pelo track, que conta no teto" 0 "de outra passada"
+  rm -rf "${sb}"
+  # (e5) superfície sensível dentro da allowlist
+  _da_new; _da_ready --merge; _da_pr 7 "${OID_DEC}" "docs/evolution/research/q/q.kg.yaml"; _da gate "${G}" C_TASK_A --merge
+  _da_case "(e5) PR que fecha uma decision num grafo da allowlist PARA (PR-MEXE-EM-DECISAO)" 1 "PR-MEXE-EM-DECISAO: o PR #7 muda a decision D_Q"
+  _da_pr 7 "${OID_OK}" "${FILES_OK},docs/evolution/federation/members.yaml"; _da gate "${G}" C_TASK_A --merge
+  _da_case "(e5') o registro da federação sai da allowlist (PATH-VENDORIZADO)" 1 "PATH-VENDORIZADO"
+  _da_pr 7 "${OID_OK}" "${FILES_OK}"
+  python3 - "${sb}/forge/pr-7.json" <<'EOF_X'
+import json, sys; p = sys.argv[1]; d = json.load(open(p)); d["isCrossRepository"] = True; json.dump(d, open(p, "w"))
+EOF_X
+  _da gate "${G}" C_TASK_A --merge; _da_case "(e5'') PR de fork com a URL do próprio repo PARA (REPO-ALHEIO)" 1 "vem de um fork"
+  rm -rf "${sb}"
+  # (e6) grafo de controle fora do projeto é recusado (o PR-DO-CONTROLE dependia do caminho relativo)
+  _da_new; local _out_g; _out_g="$(mktemp -d)"; cp "${sb}/${G}" "${_out_g}/fora.kg.yaml"; _da plan "${_out_g}/fora.kg.yaml"
+  _da_case "(e6) grafo de controle fora do projeto é recusado (rc 2)" 2 "fora deste projeto"
+  rm -rf "${sb}" "${_out_g}"
+  # (e7) o carimbo reaplica as paradas: base, passada, checkpoint
+  _da_new; _da_ready --merge; DA_SB="${sb}" bash "${sb}/ops/merge-serial.sh" 7 >/dev/null 2>&1
+  python3 - "${sb}/forge/pr-7.json" <<'EOF_B'
+import json, sys; p = sys.argv[1]; d = json.load(open(p)); d["baseRefName"] = "feat/rascunho"; json.dump(d, open(p, "w"))
+EOF_B
+  _da stamp "${G}" C_TASK_A; _da_case "(e7) carimbo de PR mergeado em outra base PARA (BASE-NAO-MAIN)" 1 "BASE-NAO-MAIN"
+  rm -rf "${sb}"
+  _da_new; _da_pr 7 "${OID_OK}" "${FILES_OK}"; DA_SB="${sb}" bash "${sb}/ops/merge-serial.sh" 7 >/dev/null 2>&1
+  sed -i 's/    x_tm_item: "SAC-2"/    x_tm_item: "SAC-2"\n    x_drive_pr: "7"/' "${sb}/${G}"; _da stamp "${G}" C_TASK_A
+  _da_case "(e7') carimbo sem passada aberta PARA (SEM-PASSADA)" 1 "SEM-PASSADA"
+  rm -rf "${sb}"
+  # (e8) merge sem CI depois de auto-rebase limpo: o carimbo usa os runs do head JULGADO, e o lote não mente
+  _da_new; _da_ready --merge; echo nochecks > "${sb}/ms-mode"; _da merge "${G}" C_TASK_A --merge
+  if [ "${rc}" = 0 ] && grep -q 'CARIMBADO' <<< "${out}" && grep -q "no head julgado ${OID_OK:0:12}" "${sb}/${G}"; then
+    record_pass "drive-automate: (e8) merge sem CI no head novo carimba com os runs do head julgado (nomeado no verified_against)"
+  else record_fail "drive-automate: (e8) head sem checks" "rc=${rc}: ${out}"; fi
+  rm -rf "${sb}"
+  # (e9) o forge decide se houve merge, nunca o rc do merge-serial
+  _da_new; _da_ready --merge; echo fail-merged > "${sb}/ms-mode"; _da merge "${G}" C_TASK_A --merge
+  _da_case "(e9) merge-serial sai ≠0 mas o forge diz MERGED: registra e carimba (o rc não é a verificação)" 0 "CARIMBADO"
+  rm -rf "${sb}"
+  # (e11) gasto concorrente não se perde (trava + escrita atômica)
+  _da_new; _da begin "${G}" --max-nodes 3 --budget 100000 >/dev/null
+  local _k; for _k in 1 2 3 4 5 6 7 8; do ( cd "${sb}" && DA_SB="${sb}" PATH="${sb}/bin:${PATH}" bash .claude/validation/drive-automate.sh charge "${G}" --tokens 100 >/dev/null 2>&1 ) & done; wait
+  if grep -q '^    spent: 800$' "${sb}/${G}"; then record_pass "drive-automate: (e11) 8 charges concorrentes somam 800 (nenhum gasto se perde)"
+  else record_fail "drive-automate: (e11) concorrência" "$(grep 'spent:' "${sb}/${G}")"; fi
+  rm -rf "${sb}"
+  # (e12) StatusContext legado pendente é pendente
+  _da_new; _da_ready --merge
+  python3 - "${sb}/forge/pr-7.json" <<'EOF_SC'
+import json, sys; p = sys.argv[1]; d = json.load(open(p))
+d["statusCheckRollup"].append({"__typename": "StatusContext", "context": "ci/legado", "state": "PENDING"}); json.dump(d, open(p, "w"))
+EOF_SC
+  _da gate "${G}" C_TASK_A --merge; _da_case "(e12) StatusContext legado PENDING PARA (CI-PENDENTE)" 1 "CI-PENDENTE: o check ci/legado"
+  rm -rf "${sb}"
+  # (e13) uma parada por nome — as que a 1ª bancada não exercitava
+  _da_new; _da_ready --merge
+  python3 - "${sb}/forge/pr-7.json" <<'EOF_DR'
+import json, sys; p = sys.argv[1]; d = json.load(open(p)); d["isDraft"] = True; json.dump(d, open(p, "w"))
+EOF_DR
+  _da gate "${G}" C_TASK_A --merge; _da_case "(e13a) PR em draft PARA (PR-NAO-ABERTO)" 1 "(draft)"
+  _da_pr 7 "${OID_OK}" "${FILES_OK}"
+  python3 - "${sb}/forge/pr-7.json" <<'EOF_BS'
+import json, sys; p = sys.argv[1]; d = json.load(open(p)); d["baseRefName"] = "develop"; json.dump(d, open(p, "w"))
+EOF_BS
+  _da gate "${G}" C_TASK_A --merge; _da_case "(e13b) PR que não mira main PARA (BASE-NAO-MAIN)" 1 "BASE-NAO-MAIN"
+  rm -rf "${sb}"
+  _da_new; ( cd "${sb}" && git checkout -q feat/item-a~2 2>/dev/null && sed -i 's/reviewed_diff_sha256: 0123abcd/reviewed_diff_sha256: pendente/' docs/evolution/review/feat-item-a.md \
+      && "${_git[@]}" commit -qam pendente && git rev-parse HEAD > ../oid-pend.$$ && git checkout -q main ) >/dev/null 2>&1
+  local OID_PEND; OID_PEND="$(cat "${sb}/../oid-pend.$$" 2>/dev/null)"; rm -f "${sb}/../oid-pend.$$"
+  _da_ready --merge; _da_pr 7 "${OID_PEND:-x}" "${FILES_OK}"; _da gate "${G}" C_TASK_A --merge
+  _da_case "(e13c) resíduo com reviewed_diff_sha256 pendente PARA (RESIDUO-PENDENTE)" 1 "RESIDUO-PENDENTE"
+  rm -rf "${sb}"
+  _da_new; ( cd "${sb}" && git checkout -q feat/item-a~2 2>/dev/null && sed -i 's/^elenxo: sim$/elenxo: nao/' docs/evolution/review/feat-item-a.md \
+      && "${_git[@]}" commit -qam sem-elenxo && git rev-parse HEAD > ../oid-ne.$$ && git checkout -q main ) >/dev/null 2>&1
+  local OID_NE; OID_NE="$(cat "${sb}/../oid-ne.$$" 2>/dev/null)"; rm -f "${sb}/../oid-ne.$$"
+  _da_ready --merge; _da_pr 7 "${OID_NE:-x}" "${FILES_OK}"; _da gate "${G}" C_TASK_A --merge
+  _da_case "(e13d) resíduo sem Elenxo PARA (ELENXO-AUSENTE)" 1 "ELENXO-AUSENTE"
+  rm -rf "${sb}"
+  _da_new; _da begin "${G}" --max-nodes 3 --budget 1000 >/dev/null; sed -i 's/verified_at: "2026-10-14"/verified_at: "2026-09-01"/' "${sb}/${G}"; _da next "${G}"
+  _da_case "(e13e) o next não entrega item com insumo vencido (INSUMO-VENCIDO)" 1 "INSUMO-VENCIDO: E_INPUT"
+  rm -rf "${sb}"
+  _da_new; _da begin "${G}" --max-nodes 1 --budget 1000 --merge >/dev/null; _da track "${G}" C_TASK_A --pr 7 >/dev/null
+  _da_pr 7 "${OID_OK}" "${FILES_OK}"; _da merge "${G}" C_TASK_A --merge >/dev/null; _da next "${G}"
+  _da_case "(e13f) com o teto alcançado, o next não entrega o item seguinte (TETO-DE-NOS)" 1 "TETO-DE-NOS"
+  rm -rf "${sb}"
+  _da_new; _da begin "${G}" --max-nodes 3 --budget 1000 >/dev/null
+  python3 - "${sb}/${G}" <<'EOF_TD'
+import sys; p = sys.argv[1]; t = open(p).read()
+t = t.replace("  - id: C_TASK_A\n    node_type: claim", "  - id: C_TASK_A\n    node_type: decision", 1); open(p, "w").write(t)
+EOF_TD
+  _da track "${G}" C_TASK_A --pr 7; _da_case "(e13g) decision não se vincula à passada (ITEM-E-DECISION)" 1 "ITEM-E-DECISION"
+  rm -rf "${sb}"
+  _da_new; _da_ready --merge; DA_SB="${sb}" bash "${sb}/ops/merge-serial.sh" 7 >/dev/null 2>&1
+  python3 - "${sb}/forge/pr-7.json" <<'EOF_NS'
+import json, sys; p = sys.argv[1]; d = json.load(open(p)); d["mergeCommit"] = None; json.dump(d, open(p, "w"))
+EOF_NS
+  _da stamp "${G}" C_TASK_A; _da_case "(e13h) MERGED sem SHA do merge não carimba (PR-NAO-MERGEADO)" 1 "PR-NAO-MERGEADO"
+  rm -rf "${sb}"
+  # nunca auto-iniciar, nunca agendar: o script só invoca bash (radar, censo, tm.sh, merge-serial), git e gh
+  local _inv; _inv="$(grep -oE 'run\(\["[^"]+"(, *[A-Z_]+)?' "${da}" | sed -E 's/run\(\["//; s/", */ /; s/"$//' | sort -u | paste -sd'|' -)"
+  if [ "${_inv}" = "bash DRIVE|bash MERGE_SERIAL|bash RADAR|bash TM|gh|git" ] \
+     && ! grep -qE '^[^#]*\b(while true|sleep [0-9]|time\.sleep|crontab -|systemd-run|ScheduleWakeup|CronCreate)' "${da}"; then
+    record_pass "drive-automate: (i-relogio) o script só invoca radar/censo/tm.sh/merge-serial, git e gh — sem laço, sono, cron ou agenda"
+  else record_fail "drive-automate: (i-relogio) invocações" "${_inv}"; fi
+  if grep -q 'pretooluse-moat-gate.sh' "${REPO_ROOT}/.claude/settings.json" && grep -q 'pretooluse-merge-gate.sh' "${REPO_ROOT}/.claude/settings.json"; then
+    record_pass "drive-automate: (i-moat5) os hooks de veto do MOAT e do merge seguem registrados no settings.json (prova do repo, não do script)"
+  else record_fail "drive-automate: (i-moat5)" "veto do MOAT ou do merge saiu do settings.json"; fi
+  rm -rf "${base}"
+  unset -f _da_new _da _da_pr _da_ok _da_case _da_ready
+}
+
 # RUNTIME DO PLUGIN — a bancada roda a cópia EMPACOTADA, num host que NÃO é o core.
 #
 # POR QUE EXISTE (medido 2026-09-06, achado de revisor adversarial). Toda família desta bancada
@@ -24851,176 +25624,185 @@ run_model_ssot_selftests() {
 # As duas curas desta família nasceram da PRIMEIRA materialização real (2026-09-17), e as duas são
 # do tipo que só aparece publicando: o bundle levava chave nomeada por cliente (salva de subir por
 # um `.gitignore` do destino — acidente, não desenho) e a porta subiu sem README/LICENSE/CLAUDE.md.
-# ═══ ops/door-seal-pin.sh — o registro só é carimbado com o REMOTO conferido ══════════════
-# POR QUE EXISTE: o `onion_version` de um membro `kind: door` é LIDO pela REGRA 85 (Porta publica
-# espelha o core, com catraca) para decidir defasagem, e era mantido A MAO. Apodreceu DUAS VEZES em
-# 2026-09-25/26 — a segunda em duas horas, depois de eu escrever no proprio members.yaml que
-# "numero mantido a mao apodrece". O script fecha isso, e esta familia prende as SEIS portas de
-# saida fail-closed dele, porque um carimbo que erra afirma PUBLICO o que pode nao ser.
-# ⚠️ O `gh` e esbocado: o SUT fala com a rede, e o esboco ESPELHA a consulta real
-# (`gh api repos/<owner>/<repo>/commits/<branch> --jq .sha`).
+# ═══ ops/door-seal-pin.sh — o cache do registro só recebe o carimbo PUBLICADO, lido do REMOTO ═══
+# POR QUE EXISTE: o `onion_version` de um membro `kind: door` era mantido A MAO e apodreceu DUAS VEZES em
+# 2026-09-25/26. Desde a F3 ele e CACHE do carimbo publicado, e o script o alinha ao fato.
+# ⚠️ A CURA DE 2026-10-14 (PR #1100): a v2 lia o carimbo do CLONE LOCAL da porta, e a F3 publica de um
+# clone descartavel que nao toca o local — as 4 portas recusaram em --dry-run com o `--status` dizendo
+# "em dia". Agora a leitura e a do `--status` (`ops/door-published-stamp.sh`, `door_read_published`).
+# MUNDO FALSO SEM REDE: o remoto da porta e um bare local (o `remote:` aceita caminho absoluto), e um
+# CLONE LOCAL defasado/sujo fica registrado em `local_path` com um pin DIFERENTE — se o SUT o ler, os
+# casos (a)/(n) reprovam. MUTANTE do cabeçalho (rodado com ops/mutate-and-restore.sh): trocar a leitura
+# do remoto pela do clone local reprova (a), (c) e (n).
 run_door_seal_pin_selftests() {
-  local sut="${REPO_ROOT}/ops/door-seal-pin.sh"
+  local sut="${REPO_ROOT}/ops/door-seal-pin.sh" lib="${REPO_ROOT}/ops/door-published-stamp.sh"
   if [ ! -f "${sut}" ]; then record_skip "door-seal-pin: ops/ ausente (adotante) → pulado"; return; fi
   local d; d="$(mktemp -d)"; trap 'rm -rf "'"${d}"'"' RETURN
+  local G=(-c user.email=t@t -c user.name=t)
 
-  # ── fakecore falso: repo git com origin/main de verdade (clone local), ops/ e o resolver ────────
-  local upstream="${d}/upstream" fakecore="${d}/fakecore" doorway="${d}/doorway"
+  # ── core falso: repo git com origin/main de verdade, ops/ (SUT + lib) e o resolver ──────────
+  local upstream="${d}/upstream" fakecore="${d}/fakecore" doorbare="${d}/door.git" seed="${d}/seed" stale="${d}/stale"
   mkdir -p "${upstream}"; git -C "${upstream}" init -q -b main
-  git -C "${upstream}" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "${upstream}" "${G[@]}" commit -q --allow-empty -m base
+  local PIN_OLD; PIN_OLD="$(git -C "${upstream}" rev-parse --short=12 HEAD)"
+  git -C "${upstream}" "${G[@]}" commit -q --allow-empty -m publicado
   local PIN_OK; PIN_OK="$(git -C "${upstream}" rev-parse --short=12 HEAD)"
+  local PIN_OK40; PIN_OK40="$(git -C "${upstream}" rev-parse HEAD)"
   git clone -q "${upstream}" "${fakecore}" 2>/dev/null
   mkdir -p "${fakecore}/ops" "${fakecore}/.claude/validation" "${fakecore}/docs/evolution/federation"
-  cp "${sut}" "${fakecore}/ops/"
+  cp "${sut}" "${lib}" "${fakecore}/ops/"
   cp "${REPO_ROOT}/.claude/validation/resolve-integration-branch.sh" "${fakecore}/.claude/validation/" 2>/dev/null || true
   # commit SÓ no core falso (não empurrado) → serve de "pin fora da integração"
-  git -C "${fakecore}" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "fora da integracao"
+  git -C "${fakecore}" "${G[@]}" commit -q --allow-empty -m "fora da integracao"
   local PIN_FORA; PIN_FORA="$(git -C "${fakecore}" rev-parse --short=12 HEAD)"
 
-  # ── doorway falsa: clone git com stamp declarando um pin ────────────────────────────────────
-  mkdir -p "${doorway}/.claude"; git -C "${doorway}" init -q -b main
-  _doorway_stamp() {  # $1 = pin declarado
-    printf 'role: hub\nadopted_from: onion-fakecore\nonion_version: %s\nmaterialized_at: 2026-09-26\n' "$1" > "${doorway}/.claude/.onion-version"
-    git -C "${doorway}" add -A >/dev/null 2>&1
-    # `|| true`: chamar o helper duas vezes com o MESMO pin não tem o que commitar, e `git commit`
-    # sai não-zero aí — que sob `set -e` mata a suíte inteira, sem registrar nenhum ✗. Terceira vez
-    # nesta leva que essa armadilha aparece; o helper passa a tolerá-la em vez de cada caso lembrar.
-    git -C "${doorway}" -c user.email=t@t -c user.name=t commit -q -m "stamp $1" 2>/dev/null || true
+  # ── a porta: REMOTO bare + seed que empurra; o clone LOCAL fica no pin velho e sujo ─────────
+  git init -q --bare -b main "${doorbare}" >/dev/null 2>&1
+  git clone -q "${doorbare}" "${seed}" 2>/dev/null; mkdir -p "${seed}/.claude"
+  _door_publish() {  # $1 = conteúdo do carimbo (vazio = porta sem carimbo) ; empurra ao remoto
+    rm -rf "${seed}/.claude/.onion-version" "${seed}/plugins"
+    [ -n "$1" ] && printf '%s\n' "$1" > "${seed}/.claude/.onion-version"
+    printf '%s\n' "$RANDOM$RANDOM" > "${seed}/README.md"
+    git -C "${seed}" add -A >/dev/null 2>&1
+    git -C "${seed}" "${G[@]}" commit -q -m publica 2>/dev/null || true
+    git -C "${seed}" push -q origin HEAD:main >/dev/null 2>&1 || true
   }
-  _registry() {  # $1 = kind ; $2 = pin no registro
+  _door_publish "role: hub
+onion_version: ${PIN_OLD}"
+  git clone -q "${doorbare}" "${stale}" 2>/dev/null   # o clone local NASCE aqui, no pin velho
+  printf 'materializado, nao commitado\n' > "${stale}/sujeira.txt"   # e fica sujo, como o onion-mini medido
+  _registry() {  # $1 = kind ; $2 = pin no registro ; $3 = remote (default: o bare)
     { printf 'members:\n'
-      printf '  - id: doorway-teste\n    kind: %s\n    remote: github.com/dono/doorway-teste\n' "$1"
-      printf '    local_path: "%s"\n    onion_version: %s   # comentário inline preservado?\n' "${doorway}" "$2"
+      printf '  - id: doorway-teste\n    kind: %s\n    remote: %s\n' "$1" "${3:-${doorbare}}"
+      printf '    local_path: "%s"\n    onion_version: %s   # comentário inline preservado?\n' "${stale}" "$2"
       printf '  - id: outro\n    kind: adopter\n    onion_version: aaaaaaaaaaaa\n'
     } > "${fakecore}/docs/evolution/federation/members.yaml"
   }
-  # esboço do `gh`: devolve o sha que GH_REMOTE_SHA mandar (vazio = remoto ilegível)
-  cat > "${d}/gh" <<'STUB'
-#!/usr/bin/env bash
-case "$*" in
-  *"api repos/"*commits*) [ -n "${GH_REMOTE_SHA:-}" ] && echo "${GH_REMOTE_SHA}"; exit 0 ;;
-esac
-exit 0
-STUB
-  chmod +x "${d}/gh"
-  local _o _r
-  _seal() {  # $@ = flags extra ; usa GH_REMOTE_SHA do ambiente
-    if _o="$(PATH="${d}:${PATH}" bash "${fakecore}/ops/door-seal-pin.sh" doorway-teste "$@" 2>&1)"; then _r=0; else _r=$?; fi
-  }
+  local M="${fakecore}/docs/evolution/federation/members.yaml" _o _r
+  _seal() { if _o="$(bash "${fakecore}/ops/door-seal-pin.sh" doorway-teste "$@" 2>&1)"; then _r=0; else _r=$?; fi; }
 
-  # (a) tudo conferido + registro DEFASADO ⇒ carimba, e o comentário do resto do arquivo sobrevive
-  _doorway_stamp "${PIN_OK}"; _registry door "ffffffffffff"
-  GH_REMOTE_SHA="$(git -C "${doorway}" rev-parse HEAD)" _seal
-  if [ "${_r}" -eq 0 ] && grep -qF "onion_version: ${PIN_OK}" "${fakecore}/docs/evolution/federation/members.yaml" \
-     && grep -qF "onion_version: aaaaaaaaaaaa" "${fakecore}/docs/evolution/federation/members.yaml"; then
-    record_pass "door-seal-pin: (a) remoto conferido + registro defasado ⇒ carimba SÓ o membro certo"
-  else record_fail "door-seal-pin: (a)" "rc=${_r} out=${_o:0:250}"; fi
+  # (a) O CASO MEDIDO: remoto com carimbo novo, clone local ATRÁS e SUJO ⇒ carimba o pin do REMOTO,
+  #     só no membro certo. A v2 recusava aqui (árvore suja) — e, limpa, carimbaria o pin VELHO do clone.
+  _door_publish "framework: x
+source_commit: ${PIN_OK}
+role: hub
+kind: door
+release: 1.1.0"
+  _registry door "ffffffffffff"; _seal
+  if [ "${_r}" -eq 0 ] && grep -qF "onion_version: ${PIN_OK}" "${M}" && grep -qF "onion_version: aaaaaaaaaaaa" "${M}" \
+     && ! grep -qF "onion_version: ${PIN_OLD}" "${M}"; then
+    record_pass "door-seal-pin: (a) remoto carimbado + clone local defasado e sujo ⇒ carimba o pin do REMOTO, só no membro certo"
+  else record_fail "door-seal-pin: (a) não carimbou o pin do remoto" "rc=${_r} out=${_o:0:300}"; fi
 
-  # (b) registro JÁ em dia ⇒ no-op explícito (não reescreve, não mente que carimbou)
-  GH_REMOTE_SHA="$(git -C "${doorway}" rev-parse HEAD)" _seal
+  # (b) registro JÁ em dia ⇒ no-op explícito
+  _seal
   if [ "${_r}" -eq 0 ] && grep -qF "já em dia" <<< "${_o}"; then
     record_pass "door-seal-pin: (b) registro em dia ⇒ no-op declarado"
   else record_fail "door-seal-pin: (b)" "rc=${_r} out=${_o:0:200}"; fi
 
-  # (c) PUSH NÃO ACONTECEU (clone ≠ remoto) ⇒ recusa. É a doorway que mais imdoorway: carimbar aqui
-  #     afirmaria PÚBLICO um commit que só existe no disco.
-  _registry door "ffffffffffff"
-  GH_REMOTE_SHA="0000000000000000000000000000000000000000" _seal
-  if [ "${_r}" -eq 1 ] && grep -qiE 'nao bate|NÃO bate' <<< "${_o}"; then
-    record_pass "door-seal-pin: (c) clone ≠ remoto ⇒ recusa (não afirma público o que é local)"
-  else record_fail "door-seal-pin: (c) carimbou sem push" "rc=${_r} out=${_o:0:200}"; fi
+  # (c) REMOTO ILEGÍVEL ⇒ rc=2, registro INTACTO, e a recusa DECLARA que não cai para o clone local.
+  #     O clone local está lá, com carimbo legível: um fallback silencioso carimbaria o pin dele.
+  _registry door "ffffffffffff" "${d}/nao-existe.git"; _seal
+  if [ "${_r}" -eq 2 ] && grep -qF "ffffffffffff" "${M}" && grep -qF "clone local não prova publicação" <<< "${_o}"; then
+    record_pass "door-seal-pin: (c) remoto ilegível ⇒ rc=2, registro INTACTO e recusa declarada (sem cair no clone)"
+  else record_fail "door-seal-pin: (c) remoto ilegível" "rc=${_r} out=${_o:0:250}"; fi
 
-  # (d) REMOTO ILEGÍVEL ⇒ rc=2 e NÃO carimba. "Não pude conferir" nunca vira "está certo".
-  GH_REMOTE_SHA="" _seal
-  if [ "${_r}" -eq 2 ] && grep -qF "ffffffffffff" "${fakecore}/docs/evolution/federation/members.yaml"; then
-    record_pass "door-seal-pin: (d) remoto ilegível ⇒ rc=2 e registro INTACTO"
+  # (d) remoto sem url clonável no registro ⇒ rc=2
+  _registry door "ffffffffffff" "n/a"; _seal
+  if [ "${_r}" -eq 2 ] && grep -qF "ffffffffffff" "${M}" && grep -qF "url clonável" <<< "${_o}"; then
+    record_pass "door-seal-pin: (d) registro sem url clonável ⇒ rc=2"
   else record_fail "door-seal-pin: (d)" "rc=${_r} out=${_o:0:200}"; fi
 
-  # (e) pin FORA da integração (doorway materializada de branch — o defeito de 2026-09-25) ⇒ recusa
-  _doorway_stamp "${PIN_FORA}"; _registry door "ffffffffffff"
-  GH_REMOTE_SHA="$(git -C "${doorway}" rev-parse HEAD)" _seal
-  if [ "${_r}" -eq 1 ] && grep -qiE 'nao esta em origin|NÃO está em origin' <<< "${_o}"; then
-    record_pass "door-seal-pin: (e) pin fora de origin/main ⇒ recusa (não legitima doorway de branch)"
+  # (e) pin FORA da integração (porta materializada de branch — o defeito de 2026-09-25) ⇒ recusa
+  _door_publish "source_commit: ${PIN_FORA}
+role: hub"
+  _registry door "ffffffffffff"; _seal
+  if [ "${_r}" -eq 1 ] && grep -qF "NÃO está em origin" <<< "${_o}" && grep -qF "ffffffffffff" "${M}"; then
+    record_pass "door-seal-pin: (e) pin fora de origin/main ⇒ recusa (não legitima porta de branch)"
   else record_fail "door-seal-pin: (e)" "rc=${_r} out=${_o:0:250}"; fi
 
   # (f) pin que NÃO é commit deste core (forjado/truncado) ⇒ recusa
-  _doorway_stamp "deadbeefcafe"; _registry door "ffffffffffff"
-  GH_REMOTE_SHA="$(git -C "${doorway}" rev-parse HEAD)" _seal
-  if [ "${_r}" -eq 1 ] && grep -qiE 'nao e commit|NÃO é commit' <<< "${_o}"; then
+  _door_publish "source_commit: deadbeefcafe
+role: hub"
+  _seal
+  if [ "${_r}" -eq 1 ] && grep -qF "NÃO é commit" <<< "${_o}"; then
     record_pass "door-seal-pin: (f) pin forjado ⇒ recusa"
   else record_fail "door-seal-pin: (f)" "rc=${_r} out=${_o:0:200}"; fi
 
-  # (g) kind ≠ door ⇒ rc=2. O objeto desta guarda é PORTA; adotante comum não é espelho do core falso.
-  _doorway_stamp "${PIN_OK}"; _registry adopter "ffffffffffff"
-  GH_REMOTE_SHA="$(git -C "${doorway}" rev-parse HEAD)" _seal
-  if [ "${_r}" -eq 2 ] && grep -qiE "nao 'door'|não 'door'" <<< "${_o}"; then
+  # (g) kind ≠ door ⇒ rc=2
+  _door_publish "source_commit: ${PIN_OK}
+role: hub"
+  _registry adopter "ffffffffffff"; _seal
+  if [ "${_r}" -eq 2 ] && grep -qF "não 'door'" <<< "${_o}"; then
     record_pass "door-seal-pin: (g) kind ≠ door ⇒ rc=2 (fora do objeto da guarda)"
   else record_fail "door-seal-pin: (g)" "rc=${_r} out=${_o:0:200}"; fi
 
-  # (h) --dry-run NÃO escreve — a diferença entre ver e fazer é medida, não prometida
-  _registry door "ffffffffffff"
-  GH_REMOTE_SHA="$(git -C "${doorway}" rev-parse HEAD)" _seal --dry-run
-  if [ "${_r}" -eq 0 ] && grep -qF "ffffffffffff" "${fakecore}/docs/evolution/federation/members.yaml"; then
+  # (h) --dry-run NÃO escreve
+  _registry door "ffffffffffff"; _seal --dry-run
+  if [ "${_r}" -eq 0 ] && grep -qF "ffffffffffff" "${M}" && grep -qF "eu carimbaria" <<< "${_o}"; then
     record_pass "door-seal-pin: (h) --dry-run mostra e NÃO escreve"
   else record_fail "door-seal-pin: (h) dry-run escreveu" "rc=${_r} out=${_o:0:200}"; fi
 
-  # (i) stamp com pin ILEGÍVEL ⇒ rc=2. Não se carimba o que não se consegue ler.
-  # ── (j)(k) O DEFEITO QUE O PRÓPRIO DOGFOOD ACHOU, na 1ª execução real (2026-09-26) ──────────
-  # A v1 lia o pin do stamp da ÁRVORE DE TRABALHO. Rodado depois de materializar e ANTES de commitar,
-  # ele lia o pin NOVO (só no disco) e comparava `HEAD` do clone com o remoto — e `HEAD` ainda era o
-  # commit antigo, IGUAL ao remoto. As duas conferências passavam, e ele carimbou como PUBLICADO um pin
-  # que não existia além do disco: exatamente o que este script existe para impedir.
-  # ⚠️ E o caso (c) NÃO pegava isso: ele esboça um remoto DIFERENTE, cenário que o fluxo real não
-  # produz. Caso que testa um mundo que não acontece não é cobertura.
-  _doorway_stamp "${PIN_OK}"; _registry door "ffffffffffff"
-  printf 'materializado, nao commitado\n' > "${doorway}/sujeira.txt"
-  GH_REMOTE_SHA="$(git -C "${doorway}" rev-parse HEAD)" _seal
-  rm -f "${doorway}/sujeira.txt"
-  if [ "${_r}" -eq 1 ] && grep -qiE 'nao-commitado|não-commitado' <<< "${_o}" \
-     && grep -qF "ffffffffffff" "${fakecore}/docs/evolution/federation/members.yaml"; then
-    record_pass "door-seal-pin: (j) árvore da porta SUJA ⇒ recusa e registro INTACTO (disco ≠ publicação)"
-  else record_fail "door-seal-pin: (j) carimbou materialização não-commitada" "rc=${_r} out=${_o:0:250}"; fi
-
-  # (k) o pin vem do stamp COMMITADO (`git show HEAD:`), não do disco — a fonte da leitura É a defesa.
-  _doorway_stamp "${PIN_OK}"; _registry door "ffffffffffff"
-  GH_REMOTE_SHA="$(git -C "${doorway}" rev-parse HEAD)" _seal
-  if [ "${_r}" -eq 0 ] && grep -qF "onion_version: ${PIN_OK}" "${fakecore}/docs/evolution/federation/members.yaml"; then
-    record_pass "door-seal-pin: (k) pin lido do stamp COMMITADO, não da árvore"
-  else record_fail "door-seal-pin: (k)" "rc=${_r} out=${_o:0:200}"; fi
-
-  # ⚠️ COMMITADO de propósito: desde a cura de 2026-09-26 o pin é lido de `git show HEAD:`, e árvore
-  #    suja recusa ANTES. Escrever só no disco faria este caso medir a guarda ERRADA — foi o que
-  #    aconteceu na 1ª volta, e o ✗ apontou para a guarda nova em vez do defeito que (i) persegue.
-  printf 'role: hub\nonion_version: nao-e-um-sha\n' > "${doorway}/.claude/.onion-version"
-  git -C "${doorway}" add -A >/dev/null 2>&1
-  git -C "${doorway}" -c user.email=t@t -c user.name=t commit -q -m 'stamp ilegivel' 2>/dev/null || true
-  GH_REMOTE_SHA="$(git -C "${doorway}" rev-parse HEAD)" _seal
-  if [ "${_r}" -eq 2 ] && grep -qiE 'ilegivel|ilegível' <<< "${_o}"; then
-    record_pass "door-seal-pin: (i) pin ilegível no stamp ⇒ rc=2"
+  # (i) carimbo publicado com pin ILEGÍVEL ⇒ rc=2
+  _door_publish "role: hub
+onion_version: nao-e-um-sha"
+  _seal
+  if [ "${_r}" -eq 2 ] && grep -qF "ilegível" <<< "${_o}"; then
+    record_pass "door-seal-pin: (i) pin ilegível no carimbo publicado ⇒ rc=2"
   else record_fail "door-seal-pin: (i)" "rc=${_r} out=${_o:0:200}"; fi
 
-  # (l)(m) STAMP ÚNICO (F1 das portas, 2026-10-09): a porta passou a ser carimbada pelo `write-stamp.sh
-  #     --kind door`, que escreve `source_commit` — o dialeto velho (`onion_version`) segue lido como
-  #     fallback para as portas já publicadas. (l) o dialeto NOVO é lido; (m) com os DOIS campos, o novo
-  #     vence (o velho carrega um pin forjado: se ele vencesse, o caso (f) recusaria). MUTANTES: tirar a
-  #     leitura de `source_commit` reprova (l) e (m); tirar o fallback reprova (a)/(k).
-  printf 'framework: x\nsource_commit: %s\nsource_commit_date: 2026-10-09\nrole: hub\nkind: door\nmaterialized_at: 2026-10-09\n' "${PIN_OK}" > "${doorway}/.claude/.onion-version"
-  git -C "${doorway}" add -A >/dev/null 2>&1
-  git -C "${doorway}" -c user.email=t@t -c user.name=t commit -q -m 'stamp dialeto novo' 2>/dev/null || true
-  _registry door "ffffffffffff"
-  GH_REMOTE_SHA="$(git -C "${doorway}" rev-parse HEAD)" _seal
-  if [ "${_r}" -eq 0 ] && grep -qF "onion_version: ${PIN_OK}" "${fakecore}/docs/evolution/federation/members.yaml"; then
-    record_pass "door-seal-pin: (l) stamp do write-stamp --kind door (source_commit) é lido e carimbado"
-  else record_fail "door-seal-pin: (l) dialeto novo não lido" "rc=${_r} out=${_o:0:200}"; fi
-  printf 'source_commit: %s\nonion_version: deadbeefcafe\nrole: hub\nkind: door\n' "${PIN_OK}" > "${doorway}/.claude/.onion-version"
-  git -C "${doorway}" add -A >/dev/null 2>&1
-  git -C "${doorway}" -c user.email=t@t -c user.name=t commit -q -m 'stamp com os dois campos' 2>/dev/null || true
-  _registry door "ffffffffffff"
-  GH_REMOTE_SHA="$(git -C "${doorway}" rev-parse HEAD)" _seal
-  if [ "${_r}" -eq 0 ] && grep -qF "onion_version: ${PIN_OK}" "${fakecore}/docs/evolution/federation/members.yaml"; then
+  # (j) remoto lido e SEM carimbo ⇒ rc=2 (porta nunca materializada pelo motor)
+  _door_publish ""
+  _seal
+  if [ "${_r}" -eq 2 ] && grep -qF "NÃO traz carimbo" <<< "${_o}" && grep -qF "ffffffffffff" "${M}"; then
+    record_pass "door-seal-pin: (j) remoto sem carimbo ⇒ rc=2 e registro INTACTO"
+  else record_fail "door-seal-pin: (j)" "rc=${_r} out=${_o:0:200}"; fi
+
+  # (m) com source_commit E onion_version, o campo NOVO vence (o velho é forjado: se vencesse, (f) recusaria)
+  _door_publish "source_commit: ${PIN_OK}
+onion_version: deadbeefcafe
+role: hub"
+  _registry door "ffffffffffff"; _seal
+  if [ "${_r}" -eq 0 ] && grep -qF "onion_version: ${PIN_OK}" "${M}"; then
     record_pass "door-seal-pin: (m) com source_commit E onion_version, o campo NOVO vence"
   else record_fail "door-seal-pin: (m) o campo legado venceu" "rc=${_r} out=${_o:0:200}"; fi
-  unset -f _seal _doorway_stamp _registry
+
+  # (n) porta de MARKETPLACE: carimbo no provenance.json com `ref` de 40 ⇒ lido e normalizado a 12;
+  #     com o cache já nos 12, é no-op (achado do 1º dogfood: a comparação literal reescrevia o cache).
+  _door_publish ""
+  mkdir -p "${seed}/plugins/onion/.claude-plugin"
+  printf '{\n  "ref": "%s",\n  "onion_release": "1.1.0"\n}\n' "${PIN_OK40}" > "${seed}/plugins/onion/.claude-plugin/provenance.json"
+  git -C "${seed}" add -A >/dev/null 2>&1; git -C "${seed}" "${G[@]}" commit -q -m plugins 2>/dev/null || true
+  git -C "${seed}" push -q origin HEAD:main >/dev/null 2>&1 || true
+  _registry door "ffffffffffff"; _seal
+  local _n1="${_r}" _n1o="${_o}"; _seal
+  if [ "${_n1}" -eq 0 ] && grep -qE "onion_version: ${PIN_OK}( |$)" "${M}" && ! grep -qF "${PIN_OK40}" "${M}" \
+     && [ "${_r}" -eq 0 ] && grep -qF "já em dia" <<< "${_o}"; then
+    record_pass "door-seal-pin: (n) plugins: ref de 40 no provenance.json ⇒ carimba 12 e a 2ª rodada é no-op"
+  else record_fail "door-seal-pin: (n) marketplace" "rc1=${_n1} out1=${_n1o:0:200} rc2=${_r} out2=${_o:0:150}"; fi
+
+  # (o) a LIB ausente ⇒ rc=2: o SUT não reimplementa a leitura (uma leitura, um lugar)
+  mv "${fakecore}/ops/door-published-stamp.sh" "${d}/lib.bak"
+  _registry door "ffffffffffff"; _seal
+  mv "${d}/lib.bak" "${fakecore}/ops/door-published-stamp.sh"
+  if [ "${_r}" -eq 2 ] && grep -qF "não a reimplemento" <<< "${_o}" && grep -qF "ffffffffffff" "${M}"; then
+    record_pass "door-seal-pin: (o) sem ops/door-published-stamp.sh ⇒ rc=2 (não há 2ª leitura escondida)"
+  else record_fail "door-seal-pin: (o) lib ausente" "rc=${_r} out=${_o:0:200}"; fi
+
+  # (p) ls-remote LEGÍVEL e clone QUEBRADO ⇒ rc=2 nomeando `clone-failed`, nunca "sem carimbo" (passada
+  #     adversarial de 2026-10-14: um mutante que tratasse clone-failed como no-stamp passava, e no --status
+  #     isso viraria SEM-CARIMBO contado como medido). O `git` esboçado delega tudo, menos o `clone`.
+  local _realgit; _realgit="$(command -v git)"
+  mkdir -p "${d}/gitstub"
+  printf '#!/usr/bin/env bash\nfor a in "$@"; do [ "$a" = clone ] && exit 128; done\nexec "%s" "$@"\n' "${_realgit}" > "${d}/gitstub/git"
+  chmod +x "${d}/gitstub/git"
+  _registry door "ffffffffffff"
+  if _o="$(PATH="${d}/gitstub:${PATH}" bash "${fakecore}/ops/door-seal-pin.sh" doorway-teste 2>&1)"; then _r=0; else _r=$?; fi
+  if [ "${_r}" -eq 2 ] && grep -qF "estado: clone-failed" <<< "${_o}" && ! grep -qF "NÃO traz carimbo" <<< "${_o}" \
+     && grep -qF "ffffffffffff" "${M}"; then
+    record_pass "door-seal-pin: (p) ls-remote legível e clone quebrado ⇒ rc=2 nomeando clone-failed (não vira 'sem carimbo')"
+  else record_fail "door-seal-pin: (p) clone quebrado" "rc=${_r} out=${_o:0:250}"; fi
+  unset -f _seal _door_publish _registry
 }
 
 # ── ops/registry-pins.sh — o pin do ADOTANTE conferido contra o carimbo VIVO (F1.5, SAC-90) ─────
@@ -26084,8 +26866,10 @@ run_publish_selftests() {
   mkdir -p "${core}/ops" "${core}/.claude/validation" "${core}/.claude/utils/adopt" "${core}/.claude/agents" \
            "${core}/docs/evolution/federation" "${core}/payload/.claude/validation"
   cp "${sut}" "${core}/ops/publish-door.sh"
+  cp "${REPO_ROOT}/ops/door-published-stamp.sh" "${core}/ops/"   # a leitura do carimbo publicado (lib, 2026-10-14)
   cp "${REPO_ROOT}/.claude/validation/resolve-integration-branch.sh" "${core}/.claude/validation/" 2>/dev/null || true
   cp "${REPO_ROOT}/.claude/validation/door-staleness-check.sh" "${core}/.claude/validation/"
+  cp "${REPO_ROOT}/.claude/validation/door-leak-scan.sh" "${core}/.claude/validation/"   # o (5a) mora aqui desde 2026-10-14
   cp "${REPO_ROOT}/.claude/utils/adopt/vendor-manifest.sh" "${core}/.claude/utils/adopt/"
   printf '# agente\n' > "${core}/.claude/agents/a.md"
   # o materializador ESBOÇADO: mesma interface do real (<dest> --role R [--from X] [--force-role-change])
@@ -26212,6 +26996,11 @@ STUB
      && grep -q 'CONFERIDO no remoto' <<< "${_o}" && [ "$(_snap)" = "${snap0}" ]; then
     record_pass "publish: (b) --push publica, confere o remoto, carimba ${NEWPIN} e não toca o core"
   else record_fail "publish: (b)" "rc=${_r} pin=$(_door_pin) esperado=${NEWPIN} out=${_o:0:300}"; fi
+  # (b2) depois do push, a DICA do cache do registro (comando exato, pela porta publicada) — só a dica:
+  #      o motor não escreve no members.yaml nem abre PR (regra da ponte; PR #1100 de 2026-10-14)
+  if grep -qF "bash ops/door-seal-pin.sh porta-a --dry-run" <<< "${_o}" && [ "$(_snap)" = "${snap0}" ]; then
+    record_pass "publish: (b2) --push termina com o comando exato do cache do registro, sem tocar o core"
+  else record_fail "publish: (b2) sem a dica do cache" "out=${_o:0:300}"; fi
 
   # (c) --status lê o carimbo do REMOTO, não o cache do registro (que aqui mente: diz OLDPIN)
   _pub_members standalone "${OLDPIN}"
@@ -26499,8 +27288,10 @@ run_publish_release_selftests() {
   mkdir -p "${core}/ops" "${core}/.claude/validation" "${core}/.claude/utils/adopt" "${core}/.claude/agents" \
            "${core}/.claude/commands/x" "${core}/.claude/utils/marketplace" "${core}/docs/evolution/federation"
   cp "${sut}" "${core}/ops/publish-door.sh"
+  cp "${REPO_ROOT}/ops/door-published-stamp.sh" "${core}/ops/"   # a leitura do carimbo publicado (lib, 2026-10-14)
   cp "${REPO_ROOT}/.claude/validation/resolve-integration-branch.sh" "${core}/.claude/validation/" 2>/dev/null || true
   cp "${REPO_ROOT}/.claude/validation/door-staleness-check.sh" "${core}/.claude/validation/"
+  cp "${REPO_ROOT}/.claude/validation/door-leak-scan.sh" "${core}/.claude/validation/"   # o (5a) mora aqui desde 2026-10-14
   cp "${REPO_ROOT}/.claude/validation/projection-safety.sh" "${core}/.claude/validation/"
   cp "${REPO_ROOT}/.claude/utils/adopt/vendor-manifest.sh" "${core}/.claude/utils/adopt/"
   cp "${REPO_ROOT}/.claude/utils/adopt/write-stamp.sh" "${core}/.claude/utils/adopt/"
@@ -27411,6 +28202,7 @@ _family run_census_seal_selftests
 _family run_sdaal_workflows_selftests
 _family run_drive_selftests
 _family run_seal_exception_selftests
+_family run_drive_automate_selftests
 _family run_plugin_runtime_selftests
 _family run_kg_yaml_validity_selftests
 _family run_site_derivation_selftests
@@ -27506,6 +28298,9 @@ case "${_args}" in
   # SAC-80: o SUT lê os arquivos do PR antes de tudo (fail-closed se não ler). Aqui o PR não toca
   # .kg.yaml, então a guarda de provenance cala e esta família segue medindo só a dispensa.
   *"pulls/"*"/files"*)          echo "ops/pr-merge-verified.sh" ;;
+  # strict local (FASE 0 de D_POSTMERGE_PROJECTION_WRITER_2026_10): a base e a distância do head até a ponta
+  *"--json baseRefName"*)       echo "main" ;;
+  *"/compare/"*)                echo 0 ;;
   *check-runs*)                 printf '%s\n' "${STUB_RUNS}" ;;
   "pr checks"*)                 printf '%s\n' "${STUB_CHECKS}" ;;
   *statusCheckRollup*)          printf '%s\n' "${STUB_VERDICT}" ;;
@@ -30318,6 +31113,176 @@ EOF_MUT
 }
 _family run_direct_provider_api_selftests
 
+# Família door_leak_scan — REGRA 106 (Superfície que viaja passa pela varredura de vazamento da publicação).
+# DANO MEDIDO (2026-10-13, dois ensaios de `/meta:publish --all` na mesma noite): três portas reprovadas
+# no (5a) do motor por caminho de máquina (#1096) e por id `onion-*` de adotante (#1097) que entraram com
+# o lint verde. A guarda é o MESMO código do (5a), extraído para door-leak-scan.sh. A bancada roda o
+# lint REAL num sandbox (modo cheio = CI; `--only` = pre-commit), com contas e ids DERIVADOS de um
+# registro falso: nenhum nome real aqui (a família vive em .claude/validation/, que viaja).
+# Casos: (a) id onion-<adotante> num arquivo que viaja → HARD · (b) caminho de máquina num comentário que
+# viaja → HARD · (c) porte/porta (kind port/door) e id maior que contém o id → passa · (d) placeholder
+# /home/<user>/, /home/conta/, $HOME → passa · (e) o mesmo termo em docs/evolution e docs/analysis →
+# passa · (f) adotante sem registro, e porta → passa calado · (g) fonte sem registro → SOFT NAO-VERIFICADO
+# e o caminho de máquina AINDA é HARD · (h) PARIDADE: tudo que o motor acusa, o lint acusa (REGRA 106 ou
+# REGRA 36) · (i) o motor não tem varredura própria. (m) mutantes, um por cura.
+run_door_leak_scan_selftests() {
+  local dls="${REPO_ROOT}/.claude/validation/door-leak-scan.sh"
+  local lint="${REPO_ROOT}/.claude/validation/lint-artifacts.sh"
+  [ -f "${dls}" ] && [ -f "${lint}" ] || { record_fail "door-leak-scan" "helper ou lint ausente"; return; }
+  command -v python3 >/dev/null 2>&1 || { record_skip "door-leak-scan: python3 ausente"; return; }
+  local sd; sd="$(TMPDIR=/tmp mktemp -d)"
+  mkdir -p "${sd}/.claude/utils" "${sd}/.claude/commands/x" "${sd}/docs/evolution/federation" "${sd}/docs/analysis"
+  cp -a "${REPO_ROOT}/.claude/validation" "${sd}/.claude/"
+  cp -a "${REPO_ROOT}/.claude/utils/adopt" "${sd}/.claude/utils/"
+  # a própria bancada cita os nomes inventados desta família: na cópia ela seria um achado legítimo e
+  # embaralharia a contagem exata do caso (e). A bancada não é o objeto aqui; as fixtures plantadas são.
+  rm -f "${sd}/.claude/.onion-version" "${sd}/.claude/validation/lint-selftest.sh"
+  # o registro falso: a conta `fulanox` só existe por ele (local_path) — é assim que o motor deriva contas
+  local M="${sd}/docs/evolution/federation/members.yaml"
+  { printf 'members:\n'
+    printf '  - id: onion-acme\n    kind: adopter\n    local_path: "/home/fulanox/onion-acme"\n'
+    printf '  - id: acmefake\n    kind: adopter\n    local_path: "/home/fulanox/acmefake"\n'
+    printf '  - id: onion-portx\n    kind: port\n'
+    printf '  - id: onion-doorx\n    kind: door\n'
+  } > "${M}"
+  local X="${sd}/.claude/commands/x"
+  printf 'credito: sinal do onion-acme\n' > "${X}/leak-id.md"
+  mkdir -p "${sd}/.claude/validation/fixtures/dls"
+  printf '#!/usr/bin/env bash\n# medido em /home/fulanox/repo/x\n' > "${sd}/.claude/validation/fixtures/dls/leak-home.sh"
+  printf 'o porte onion-portx e a porta onion-doorx, em github.com/dono/onion-portx; e onion-acmexyz\n' > "${X}/public.md"
+  printf 'exemplo /home/<user>/x, /home/conta/x e $HOME/x\n' > "${X}/placeholder.md"
+  printf 'sinal do onion-acme em /home/fulanox/x\n' > "${sd}/docs/evolution/n.md"
+  printf 'sinal do onion-acme em /home/fulanox/x\n' > "${sd}/docs/analysis/n.md"
+  printf 'case da Megafakecorp\n' > "${X}/name.md"
+  printf 'crédito ao acmefake\n' > "${X}/subid.md"
+  local T; T="$(TMPDIR=/tmp mktemp)"; printf 'Megafakecorp\n' > "${T}"
+  ( cd "${sd}" && git init -q . && git add -A ) >/dev/null 2>&1
+  local o rc n
+  _dls_full() { o="$(cd "${sd}" && ONION_CLIENT_TERMS_FILE="${T}" LC_ALL=C bash .claude/validation/lint-artifacts.sh 2>&1)" || true; }
+  _dls_only() { o="$(cd "${sd}" && ONION_CLIENT_TERMS_FILE="${T}" LC_ALL=C bash .claude/validation/lint-artifacts.sh --only="$1" 2>&1)" || true; }
+  _r106() { grep -F 'REGRA 106 (Superfície que viaja passa pela varredura de vazamento da publicação)' <<< "${o}" || true; }
+
+  # ── modo CHEIO (o do CI): uma passada julga (a)–(e) de uma vez ─────────────────────────────────
+  _dls_full; local full="${o}" r; r="$(_r106)"
+  if grep -qF '.claude/commands/x/leak-id.md: REGRA 106' <<< "${r}" && grep -qF "[id-onion] linha(s) 1: id de adotante 'onion-acme'" <<< "${r}"; then
+    record_pass "door-leak-scan: (a) id onion-<adotante> num arquivo que viaja ⇒ REGRA 106 HARD (modo cheio)"
+  else record_fail "door-leak-scan: (a) id onion-* passou" "$(head -3 <<< "${r}" | tr '\n' '|')"; fi
+  if grep -qF 'fixtures/dls/leak-home.sh: REGRA 106' <<< "${r}" && grep -qF '[caminho-de-maquina] linha(s) 2:' <<< "${r}" && ! grep -q 'fulanox' <<< "${r}"; then
+    record_pass "door-leak-scan: (b) caminho de máquina num comentário de fixture que viaja ⇒ HARD, sem imprimir a conta"
+  else record_fail "door-leak-scan: (b) caminho de máquina" "$(head -3 <<< "${r}" | tr '\n' '|')"; fi
+  if ! grep -qF 'public.md' <<< "${r}"; then
+    record_pass "door-leak-scan: (c) porte e porta (kind port/door), em URL pública, e id maior que contém o id ⇒ passam"
+  else record_fail "door-leak-scan: (c) público acusado" "$(grep -F public.md <<< "${r}" | head -2 | tr '\n' '|')"; fi
+  if ! grep -qF 'placeholder.md' <<< "${r}"; then
+    record_pass "door-leak-scan: (d) /home/<user>/, /home/conta/ e \$HOME ⇒ passam (conta inventada é dado de teste)"
+  else record_fail "door-leak-scan: (d) placeholder acusado" "$(grep -F placeholder.md <<< "${r}" | head -2 | tr '\n' '|')"; fi
+  if ! grep -qE 'docs/(evolution|analysis)/n.md' <<< "${r}" && [ "$(grep -c . <<< "${r}")" -eq 2 ]; then
+    record_pass "door-leak-scan: (e) o mesmo id e a mesma conta em docs/evolution e docs/analysis (core-only) ⇒ passam; exatamente 2 HARD"
+  else record_fail "door-leak-scan: (e) core-only acusado ou contagem" "n=$(grep -c . <<< "${r}") $(grep -E 'docs/' <<< "${r}" | head -2 | tr '\n' '|')"; fi
+
+  # ── (h) PARIDADE com o motor: o helper chamado COMO O MOTOR o chama (todas as famílias + termos) ──
+  local roots=() rr mo mrc miss=""
+  while IFS= read -r rr; do [ -n "${rr}" ] && [ -e "${sd}/${rr}" ] && roots+=("${sd}/${rr}"); done < <(bash "${sd}/.claude/utils/adopt/vendor-manifest.sh" --repo "${sd}" --emit-scrub-roots 2>/dev/null)
+  if mo="$(LC_ALL=C bash "${dls}" --members "${M}" --terms-file "${T}" -- "${roots[@]}" 2>&1)"; then mrc=0; else mrc=$?; fi
+  _dls_parity() {  # $1 = saída do motor · $2 = saída do lint → arquivos do motor que o lint NÃO acusou
+    local f
+    while IFS= read -r f; do
+      [ -n "${f}" ] || continue
+      grep -qE "^VIOLATION: ${f#${sd}/}: REGRA (106|36)|^VIOLATION: ${f#${sd}/}: .*\[vendor-scrub\]" <<< "$2" || printf '%s ' "${f#${sd}/}"
+    done < <(awk -F'\t' '{print $2}' <<< "$1" | sort -u)
+  }
+  miss="$(_dls_parity "${mo}" "${full}")"
+  if [ "${mrc}" -eq 1 ] && [ "$(awk -F'\t' '{print $1}' <<< "${mo}" | sort -u | tr '\n' ',')" = "home,sub,word," ] && [ -z "${miss}" ]; then
+    record_pass "door-leak-scan: (h) paridade — as 3 famílias que o motor acusa (sub/word/home) o lint acusa (REGRA 106 ou REGRA 36)"
+  else record_fail "door-leak-scan: (h) PARIDADE quebrada" "motor rc=${mrc} famílias=$(awk -F'\t' '{print $1}' <<< "${mo}" | sort -u | tr '\n' ',') lint não acusou: ${miss}"; fi
+
+  # ── (j) o CONTRATO do helper nos modos que a produção consome (lint: --families; motor: --terms-file) ──
+  local j1 j2 j3 jr1=0 jr2=0 jr3=0
+  j1="$(LC_ALL=C bash "${dls}" --members "${M}" --families word,home -- "${roots[@]}" 2>&1)" || jr1=$?
+  j2="$(LC_ALL=C bash "${dls}" --families home -- "${roots[@]}" 2>&1)" || jr2=$?
+  j3="$(LC_ALL=C bash "${dls}" --members "${sd}/nao-existe.yaml" --families word,home -- "${roots[@]}" 2>&1)" || jr3=$?
+  if [ "${jr1}" -eq 1 ] && [ "$(awk -F'\t' '{print $1}' <<< "${j1}" | sort -u | tr '\n' ',')" = "home,word," ] \
+     && [ "${jr2}" -eq 0 ] && [ -z "${j2}" ] \
+     && [ "${jr3}" -eq 2 ] && [ "$(bash "${dls}" --members "${M}" --emit-members-tsv | awk -F'\037' '$1=="onion-portx" {print $2}')" = "port" ]; then
+    record_pass "door-leak-scan: (j) contrato: --families filtra; sem registro a conta que só o registro conhece não é vista (teto) e word não roda; registro ilegível ⇒ rc 2 (não é limpo), --emit-members-tsv lê o kind"
+  else record_fail "door-leak-scan: (j) contrato do helper" "rc=${jr1}/${jr2}/${jr3} j1=$(awk -F'\t' '{print $1}' <<< "${j1}" | sort -u | tr '\n' ',') j2=$(awk -F'\t' '{print $1}' <<< "${j2}" | sort -u | tr '\n' ',')"; fi
+
+  # ── (i) o motor não tem varredura própria: chama o helper e não reescreve o grep ────────────────
+  local motor="${REPO_ROOT}/ops/publish-door.sh"
+  if [ ! -f "${motor}" ]; then record_skip "door-leak-scan: (i) motor de publicação ausente (adotante/porta) → pulado"
+  elif grep -qF 'bash "${LEAK_SCAN}" --members "${MEMBERS}" --terms-file' "${motor}" && grep -qF -- '--emit-members-tsv' "${motor}" \
+       && ! grep -qE 'grep -r[a-zA-Z]*w[a-zA-Z]*F|/home/\(\$\{_accts\}\)' "${motor}"; then
+    record_pass "door-leak-scan: (i) o (5a) do motor chama o helper (registro e varredura), sem grep próprio"
+  else record_fail "door-leak-scan: (i) o motor voltou a varrer por conta própria" "duas lógicas = paridade sem garantia"; fi
+
+  # ── modo --only (o do pre-commit) ──────────────────────────────────────────────────────────────
+  _dls_only "${X}/leak-id.md"
+  if grep -qF "[id-onion]" <<< "$(_r106)"; then record_pass "door-leak-scan: (a2) --only no arquivo que viaja ⇒ HARD"
+  else record_fail "door-leak-scan: (a2) --only" "$(_r106 | head -2 | tr '\n' '|')"; fi
+  _dls_only "${sd}/docs/evolution/n.md"
+  if [ -z "$(_r106)" ]; then record_pass "door-leak-scan: (e2) --only em arquivo core-only ⇒ não julga"
+  else record_fail "door-leak-scan: (e2) --only core-only" "$(_r106 | head -2 | tr '\n' '|')"; fi
+
+  # ── (f) adotante sem registro, e porta: declara pela regra e passa ─────────────────────────────
+  mv "${M}" "${M}.off"
+  printf 'framework: onion\nrole: adopted\n' > "${sd}/.claude/.onion-version"
+  _dls_only "${X}/leak-id.md"; local f1; f1="$(_r106)"
+  _dls_only "${sd}/.claude/validation/fixtures/dls/leak-home.sh"; f1="${f1}$(_r106)"
+  printf 'framework: onion\nrole: standalone\nkind: door\n' > "${sd}/.claude/.onion-version"
+  _dls_only "${sd}/.claude/validation/fixtures/dls/leak-home.sh"; f1="${f1}$(_r106)"
+  if [ -z "${f1}" ]; then record_pass "door-leak-scan: (f) adotante sem registro e porta ⇒ a regra não julga (o registro seria o do core; a porta é varrida na publicação)"
+  else record_fail "door-leak-scan: (f) adotante/porta acusado" "$(head -2 <<< "${f1}" | tr '\n' '|')"; fi
+  # ── (g) FONTE sem registro: declara NAO-VERIFICADO e o caminho de máquina continua HARD ────────
+  rm -f "${sd}/.claude/.onion-version"
+  printf '# medido em /home/%s/repo\n' "$(id -un)" > "${sd}/.claude/validation/fixtures/dls/leak-home.sh"
+  _dls_full; r="$(_r106)"
+  if grep -qF '[NAO-VERIFICADO] registro da federação ausente' <<< "${r}" && grep -qF '[caminho-de-maquina]' <<< "${r}" && ! grep -qF '[id-onion]' <<< "${r}"; then
+    record_pass "door-leak-scan: (g) fonte sem registro ⇒ SOFT NAO-VERIFICADO declarado; conta de quem roda ainda é HARD"
+  else record_fail "door-leak-scan: (g) fonte sem registro" "$(head -3 <<< "${r}" | tr '\n' '|')"; fi
+  printf '#!/usr/bin/env bash\n# medido em /home/fulanox/repo/x\n' > "${sd}/.claude/validation/fixtures/dls/leak-home.sh"
+  mv "${M}.off" "${M}"
+
+  # ── (m) MUTANTES — revertem cada cura na CÓPIA do sandbox e EXIGEM que o caso reprove ───────────
+  # linha: alvo@@@velho@@@novo@@@modo@@@arquivo-ou-caso
+  local line tgt old new mode arg rest dst bak bit
+  while IFS= read -r line; do
+    [ -n "${line}" ] || continue
+    tgt="${line%%@@@*}"; rest="${line#*@@@}"; old="${rest%%@@@*}"; rest="${rest#*@@@}"; new="${rest%%@@@*}"; rest="${rest#*@@@}"
+    mode="${rest%%@@@*}"; arg="${rest#*@@@}"
+    if [ "${tgt}" = scan ]; then dst="${sd}/.claude/validation/door-leak-scan.sh"; else dst="${sd}/.claude/validation/lint-artifacts.sh"; fi
+    bak="${dst}.orig"; cp "${dst}" "${bak}"
+    if ! python3 -I -B -c 'import sys; p,a,b=sys.argv[1:4]; s=open(p,encoding="utf-8").read(); sys.exit(3) if s.count(a)!=1 else open(p,"w",encoding="utf-8").write(s.replace(a,b))' "${dst}" "${old}" "${new}"; then
+      record_fail "door-leak-scan: (m) mutante não aplicou" "${tgt}: ${old:0:60}"; mv "${bak}" "${dst}"; continue
+    fi
+    bit=0
+    case "${mode}" in
+      only-hit)    _dls_only "${sd}/${arg}"; [ -z "$(_r106 | grep -F '[')" ] && bit=1 ;;       # o HARD esperado SUMIU
+      only-silent) _dls_only "${sd}/${arg}"; [ -n "$(_r106)" ] && bit=1 ;;                    # o inocente foi acusado
+      adopter)     printf 'framework: onion\nrole: adopted\n' > "${sd}/.claude/.onion-version"
+                   _dls_only "${sd}/${arg}"; [ -n "$(_r106)" ] && bit=1; rm -f "${sd}/.claude/.onion-version" ;;
+      full-silent) _dls_full; grep -qE "${arg}" <<< "$(_r106)" && bit=1 ;;
+      parity)      _dls_full; [ -n "$(_dls_parity "${mo}" "${o}")" ] && bit=1 ;;
+    esac
+    mv "${bak}" "${dst}"
+    # lint que ABORTOU não é mordida: o HARD esperado "sumiria" por morte, não pela cura revertida
+    grep -qF '=== Sumário ===' <<< "${o}" || bit=2
+    if [ "${bit}" -eq 1 ]; then record_pass "door-leak-scan: (m) mutante morde → ${tgt}: ${old:0:50}"
+    elif [ "${bit}" -eq 2 ]; then record_fail "door-leak-scan: (m) mutante ABORTOU o lint (não prova nada)" "${tgt}: ${old:0:60}"
+    else record_fail "door-leak-scan: (m) mutante NÃO morde" "${tgt}: ${old:0:60} (${mode} ${arg})"; fi
+  done <<'EOF_MUT'
+scan@@@($2=="adopter"||$2=="method") && $1 ~ /^onion-/ {print $1}@@@0 {print $1}@@@only-hit@@@.claude/commands/x/leak-id.md
+scan@@@grep -rHnoE --exclude-dir=.git "/home/(${_accts})/"@@@grep -rHnoE --exclude-dir=.git "/home/(nobody-zz)/"@@@only-hit@@@.claude/validation/fixtures/dls/leak-home.sh
+scan@@@($2=="adopter"||$2=="method") && $1 ~ /^onion-/ {print $1}@@@$1 ~ /^onion-/ {print $1}@@@only-silent@@@.claude/commands/x/public.md
+scan@@@grep -rHnoiwF --exclude-dir=.git -f@@@grep -rHnoiF --exclude-dir=.git -f@@@only-silent@@@.claude/commands/x/public.md
+scan@@@"/home/(${_accts})/" -- "${PATHS[@]}"@@@"/home/[^/ ]+/" -- "${PATHS[@]}"@@@only-silent@@@.claude/commands/x/placeholder.md
+lint@@@{ [ "${IS_DERIVED}" -eq 1 ] || [ "$(_role)" != "source" ]; } && return 0   # só a FONTE@@@:   # só a FONTE@@@adopter@@@.claude/commands/x/leak-id.md
+lint@@@&& targets+=("${REPO_ROOT}/${r}"); done   # SÓ o que viaja@@@&& :; done; targets=("${REPO_ROOT}")   # SÓ o que viaja@@@full-silent@@@docs/(evolution|analysis)/n.md
+lint@@@local members="${REPO_ROOT}/docs/evolution/federation/members.yaml" _fam="word,home"@@@local members="${REPO_ROOT}/docs/evolution/federation/members.yaml" _fam="home"@@@parity@@@-
+EOF_MUT
+  rm -rf "${sd}" "${T}"
+}
+_family run_door_leak_scan_selftests
+
 # Modo kg-migrate-v3 — SAC-73 parte 1: a ferramenta de migração do corpus ao contrato v3
 # (.claude/utils/kg/kg-migrate-v3.py) cita datas, deriva provenance SÓ de fonte que o nó já traz,
 # nunca corta label, --check não escreve, e a 2ª aplicação é no-op. O risco que a família vigia é a
@@ -31901,7 +32866,13 @@ case "$a" in
   *"pr view"*headRepositoryOwner*) echo "owner/repo"; exit 0 ;;
   *"pr view"*headRefName*)         echo "feat/x"; exit 0 ;;
   *"pr view"*baseRefName*)         echo "main"; exit 0 ;;
-  *"pr view"*statusCheckRollup*)   echo "SUCCESS"; exit 0 ;;
+  *"pr view"*statusCheckRollup*)
+      # MSC_MOVE_ON_ROLLUP: o main anda DURANTE os gates (outro merge entra enquanto o verificado lê o veredito)
+      if [ -n "${MSC_MOVE_ON_ROLLUP:-}" ]; then
+        t="$(git --git-dir="${MSC_ORIGIN}" -c user.email=t@t -c user.name=t commit-tree "refs/heads/main^{tree}" -p refs/heads/main -m "outro merge")" \
+          && git --git-dir="${MSC_ORIGIN}" update-ref refs/heads/main "${t}"
+      fi
+      echo "SUCCESS"; exit 0 ;;
   *"pr view"*state,mergedAt*)
       n=$(cat "${MSC_D}/n" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "${MSC_D}/n"
       if [ "$n" -eq 1 ] || [ -z "${MSC_MERGED:-}" ]; then echo "OPEN|null"; else echo "MERGED|$(date -u +%Y-%m-%dT%H:%M:%SZ)"; fi
@@ -31915,12 +32886,18 @@ case "$a" in
       [ "${a#*commits/$(cat "${MSC_D}/old")}" != "$a" ] && printf '901\tsuccess\n'; exit 0 ;;
   *"check-runs/"*"/annotations"*) exit 0 ;;
   *"api "*"commits/"*check-runs*)
-      # só o head ANTERIOR tem CI; o head novo (recém-empurrado) não tem nenhum
-      if [ "${a#*commits/$(cat "${MSC_D}/old")}" != "$a" ]; then printf '%b' "${MSC_OLD_RUNS}"; fi
+      # só o head ANTERIOR tem CI; o head novo (recém-empurrado) não tem nenhum — salvo MSC_NEW_GREEN=1,
+      # que simula o CI do head novo tendo nascido e terminado verde
+      if [ "${a#*commits/$(cat "${MSC_D}/old")}" != "$a" ]; then printf '%b' "${MSC_OLD_RUNS}"
+      elif [ -n "${MSC_NEW_GREEN:-}" ]; then printf 'selftest-gate\tcompleted\tsuccess\nlint-onion-artifacts\tcompleted\tsuccess\n'; fi
       exit 0 ;;
+  # strict local (FASE 0 de D_POSTMERGE_PROJECTION_WRITER_2026_10): o forge diz quantos commits da base o
+  # head NÃO tem — aqui medido de verdade no remoto bare, como o compare do GitHub mede
+  *"api "*"compare/main..."*)
+      git --git-dir="${MSC_ORIGIN}" rev-list --count refs/heads/feat/x..refs/heads/main; exit 0 ;;
   *"api "*pulls*files*)   echo "src/pr.txt"; exit 0 ;;
   *"api "*pulls*commits*) echo 1; exit 0 ;;
-  *"pr checks"*)          printf 'selftest-gate\tpending\t0\turl\n'; exit 0 ;;
+  *"pr checks"*)          printf '%b' "${MSC_PR_CHECKS:-selftest-gate\tpending\t0\turl\n}"; exit 0 ;;
   *"pr merge"*)
       printf '%s\n' "$a" >> "${MSC_D}/margs"
       [ "${MSC_MERGE_RC:-0}" -eq 0 ] && echo "merged" || echo "X Pull request is not mergeable: base branch policy prohibits the merge"
@@ -31940,15 +32917,24 @@ GH
     git init -q --bare -b main "${MSC_ORIGIN}"
     ( git clone -q "${MSC_ORIGIN}" "${MSC_REPO}" 2>/dev/null; cd "${MSC_REPO}" && git config user.email t@t && git config user.name t \
       && mkdir -p src docs/onion && seq 1 20 > src/pr.txt && echo o > src/outro.txt && echo p0 > docs/onion/testing-inventory.md \
+      && printf 'count: 2\n- a0\n#\n#\n#\n#\n- b0\n' > docs/backlog.md \
       && git add -A && git commit -qm base && git push -q origin HEAD:main \
       && git checkout -qb feat/x && sed -i '1s/.*/pr/' src/pr.txt && echo p-pr > docs/onion/testing-inventory.md \
+      && { [ "$1" != two ] || printf 'count: 3\n- a0\n#\n#\n#\n#\n- b0\n- b\n' > docs/backlog.md; } \
       && git commit -qam pr && git push -q origin feat/x && git checkout -q main \
       && git worktree add -q "${MSC_WT}" feat/x ) >/dev/null 2>&1
     git -C "${MSC_REPO}" rev-parse feat/x > "${d}/old"
+    #   bl  → a main acrescenta um item ao backlog (projeção que o PR NÃO toca): sem conflito, PR atrás
+    #   two → o 478/479: o PR (B) e a main (A, já mergeado) fazem o MESMO "count: 2→3" no cabeçalho e cada um
+    #         acrescenta um item em ponto distante — o merge textual é LIMPO e dá 4 itens com "count: 3"
+    #   tip → a main não anda: o PR está na ponta
     ( cd "${MSC_REPO}" && case "$1" in
         pr)    sed -i '20s/.*/main/' src/pr.txt ;;
         proj)  echo p-main > docs/onion/testing-inventory.md ;;
         ren)   git mv src/pr.txt src/pr2.txt ;;
+        bl)    printf 'count: 3\n- a0\n#\n#\n#\n#\n- b0\n- m\n' > docs/backlog.md ;;
+        two)   printf 'count: 3\n- a0\n- a\n#\n#\n#\n#\n- b0\n' > docs/backlog.md ;;
+        tip)   exit 0 ;;
         *)     echo outro2 > src/outro.txt ;;
       esac && git commit -qam main-anda && git push -q origin HEAD:main ) >/dev/null 2>&1
     mkdir -p "${MSC_WT}/ops"
@@ -31959,7 +32945,18 @@ echo "$*" >> "${MSC_D}/pflog"
 git fetch -q origin || exit 1
 git -c user.email=t@t -c user.name=t rebase -q -X theirs origin/main >/dev/null 2>&1 || { git rebase --abort; exit 1; }
 [ -n "${MSC_PF_PROJ:-}" ] && echo "PR-FINALIZE: conflito de projeção resolvido em ${MSC_PF_PROJ} (a regeneração refaz)"
+# a REGENERAÇÃO na árvore combinada, como o _regen do motor: count = gerador de verdade do cabeçalho do
+# backlog (conta os itens); bump = um gerador que muda a projeção do PR na combinação
+case "${MSC_PF_REGEN:-}" in
+  count) n="$(grep -c '^- ' docs/backlog.md)"; sed -i "1s/.*/count: ${n}/" docs/backlog.md ;;
+  bump)  echo regen >> docs/onion/testing-inventory.md ;;
+esac
+git diff --quiet || git -c user.email=t@t -c user.name=t commit -qam "docs: projeções geradas regeneradas"
 git push -q -f origin HEAD:refs/heads/feat/x || exit 1
+# o main que NÃO PARA de andar: outro merge entra logo depois de cada rebase
+if [ -n "${MSC_PF_MAIN_MOVES:-}" ]; then
+  t="$(git -c user.email=t@t -c user.name=t commit-tree "origin/main^{tree}" -p origin/main -m "outro merge")" && git push -q origin "${t}:refs/heads/main"
+fi
 echo "PR-FINALIZE: enviado feat/x @ $(git rev-parse --short HEAD)"
 PF
   }
@@ -31968,7 +32965,9 @@ PF
     : > "${d}/margs"; : > "${d}/comments"; : > "${d}/pflog"; echo 0 > "${d}/n"; echo 0 > "${d}/mk"
     _o="$(cd "${MSC_REPO}" && PATH="${d}/bin:${PATH}" MSC_D="${d}" MSC_ORIGIN="${MSC_ORIGIN}" \
           MSC_OLD_RUNS="${MSC_OLD_RUNS:-${GREEN}}" MSC_MERGED="${MSC_MERGED:-}" MSC_PF_MODE="${MSC_PF_MODE:-}" MSC_PF_PROJ="${MSC_PF_PROJ:-}" \
-          MSC_ALARM="${MSC_ALARM:-}" MSC_ALARM_RC="${MSC_ALARM_RC:-}" MSC_MERGE_RC="${MSC_MERGE_RC:-}" MSC_MERGEABLE_SEQ="${MSC_MERGEABLE_SEQ:-}" ONION_MERGE_POLL_SECS=0 ONION_MERGE_WAIT_SECS=2 \
+          MSC_ALARM="${MSC_ALARM:-}" MSC_ALARM_RC="${MSC_ALARM_RC:-}" MSC_MERGE_RC="${MSC_MERGE_RC:-}" MSC_MERGEABLE_SEQ="${MSC_MERGEABLE_SEQ:-}" \
+          MSC_PF_REGEN="${MSC_PF_REGEN:-}" MSC_PF_MAIN_MOVES="${MSC_PF_MAIN_MOVES:-}" MSC_NEW_GREEN="${MSC_NEW_GREEN:-}" MSC_PR_CHECKS="${MSC_PR_CHECKS:-}" MSC_MOVE_ON_ROLLUP="${MSC_MOVE_ON_ROLLUP:-}" \
+          ONION_MERGE_POLL_SECS=0 ONION_MERGE_WAIT_SECS=2 \
           ONION_MERGE_HEAD_SYNC_TRIES=3 ONION_MERGE_HEAD_SYNC_POLL=0 LC_ALL=C bash "${_sutx:-${sut}}" 999 "$@" 2>&1)"; _rc=$?
   }
   _newhead() { git --git-dir="${MSC_ORIGIN}" rev-parse refs/heads/feat/x; }
@@ -32019,7 +33018,8 @@ json.dump(d,open(sys.argv[2],"w",encoding="utf-8"))' "${REPO_ROOT}/ops/github-ru
 
   # (d) check EXIGIDO vermelho no head anterior ⇒ espera (rc 4), sem merge
   _msc_setup outro; MSC_OLD_RUNS='selftest-gate\tcompleted\tfailure\nlint-onion-artifacts\tcompleted\tsuccess\n' _msc --no-wait-after-rebase
-  if [ "${_rc}" -eq 4 ] && [ ! -s "${d}/margs" ] && grep -qF "o check exigido 'selftest-gate' não está verde" <<< "${_o}"; then
+  if [ "${_rc}" -eq 4 ] && [ ! -s "${d}/margs" ] && grep -qF "o check exigido 'selftest-gate' não está verde" <<< "${_o}" \
+     && ! grep -qF "não tem check-run nenhum" <<< "${_o}"; then
     record_pass "merge-skip-ci: (d) check exigido vermelho no head anterior ⇒ espera o CI, sem merge"
   else record_fail "merge-skip-ci: (d) vermelho" "rc=${_rc} margs=[$(cat "${d}/margs")] out=${_o}"; fi
   # (d2) exigidos verdes mas OUTRO check falho (não dispensado) ⇒ espera
@@ -32027,6 +33027,14 @@ json.dump(d,open(sys.argv[2],"w",encoding="utf-8"))' "${REPO_ROOT}/ops/github-ru
   if [ "${_rc}" -eq 4 ] && [ ! -s "${d}/margs" ] && grep -qF "check falho não dispensado no head anterior" <<< "${_o}"; then
     record_pass "merge-skip-ci: (d2) outro check falho no head anterior ⇒ espera, sem merge"
   else record_fail "merge-skip-ci: (d2) outro falho" "rc=${_rc} out=${_o}"; fi
+  # (d3) head anterior com ZERO check-runs (total_count: 0 — o PR nasceu/foi empurrado já em conflito, o #1092
+  #      de 2026-10-13) ⇒ espera, com mensagem PRÓPRIA, nunca a do vermelho. '\n' = stub sem nenhuma linha
+  #      (vazio cairia no default GREEN). Mutante: fundir as duas mensagens (qualquer direção) reprova (d) ou (d3).
+  _msc_setup outro; MSC_OLD_RUNS='\n' _msc --no-wait-after-rebase
+  if [ "${_rc}" -eq 4 ] && [ ! -s "${d}/margs" ] && grep -qF "não tem check-run nenhum — o caso típico é o PR aberto/empurrado já em conflito" "${d}/comments" \
+     && ! grep -qF "não está verde" <<< "${_o}"; then
+    record_pass "merge-skip-ci: (d3) head anterior sem check-run nenhum ⇒ espera o CI, com mensagem própria (não a do vermelho)"
+  else record_fail "merge-skip-ci: (d3) zero check-runs" "rc=${_rc} margs=[$(cat "${d}/margs")] com=[$(cat "${d}/comments")] out=${_o}"; fi
 
   # (e) alarme de main quebrado ABERTO ⇒ recusa o pulo (rc 4) nomeando a issue; ilegível também espera
   _msc_setup outro; MSC_ALARM=77 _msc --no-wait-after-rebase
@@ -32065,6 +33073,104 @@ json.dump(d,open(sys.argv[2],"w",encoding="utf-8"))' "${REPO_ROOT}/ops/github-ru
   if [ "${_rc}" -eq 4 ] && [ ! -s "${d}/margs" ] && grep -qF "o head novo está 'CONFLICTING', não MERGEABLE" <<< "${_o}"; then
     record_pass "merge-skip-ci: (i) head novo não MERGEABLE ⇒ espera, sem merge"
   else record_fail "merge-skip-ci: (i) mergeable" "rc=${_rc} out=${_o}"; fi
+
+  # ── STRICT LOCAL (FASE 0 de D_POSTMERGE_PROJECTION_WRITER_2026_10, 2026-10-14) ─────────────────────
+  # O ruleset tem strict=false: o forge mergeia PR ATRÁS do main com a árvore combinada que o CI nunca viu.
+  # O verificado passa a exigir a base na PONTA (compare do forge → behind_by), rebaseando o PR atrás sem
+  # conflito pelo mesmo auto-rebase, e o caminho rápido fica condicionado às projeções regeneradas na
+  # árvore combinada serem byte-idênticas às do head anterior. Mutantes no resíduo
+  # docs/evolution/review/feat-merge-requires-base-at-tip.md — cada um reprova o(s) caso(s) dele.
+  local _ok_pass='selftest-gate\tpass\t1s\turl\nlint-onion-artifacts\tpass\t1s\turl\n'
+  # (s1) PR ATRÁS do main, SEM conflito (MERGEABLE), e a combinação muda uma projeção ⇒ rebase, regenera, espera
+  _msc_setup bl; MSC_MERGEABLE_SEQ=MERGEABLE MSC_PF_REGEN=count _msc --no-wait-after-rebase
+  if [ "${_rc}" -eq 4 ] && [ ! -s "${d}/margs" ] && grep -qF -- "--rebase --push" "${d}/pflog" \
+     && grep -qF "O PR estava ATRÁS de \`main\` (1 commit(s)) sem conflito" "${d}/comments" \
+     && grep -qF "a regeneração na árvore combinada mudou projeção(ões) que o head anterior trazia: docs/backlog.md" "${d}/comments" \
+     && git --git-dir="${MSC_ORIGIN}" merge-base --is-ancestor refs/heads/main refs/heads/feat/x; then
+    record_pass "merge-skip-ci: (s1) PR atrás do main sem conflito ⇒ auto-rebase para a ponta, regenera, espera o CI do head novo (rc 4), nomeando a projeção"
+  else record_fail "merge-skip-ci: (s1) atrás sem conflito" "rc=${_rc} pf=[$(cat "${d}/pflog")] margs=[$(cat "${d}/margs")] com=[$(cat "${d}/comments")] out=${_o}"; fi
+
+  # (s2) PR NA PONTA ⇒ segue como hoje: nenhum rebase, nenhum rastro, merge normal (sem bypass)
+  _msc_setup tip; MSC_MERGEABLE_SEQ=MERGEABLE MSC_MERGED=1 MSC_PR_CHECKS="${_ok_pass}" _msc
+  if [ "${_rc}" -eq 0 ] && [ ! -s "${d}/pflog" ] && [ ! -s "${d}/comments" ] && grep -qF -- "--rebase" "${d}/margs" \
+     && ! grep -qF -- "--admin" "${d}/margs" && ! grep -q "atrás de" <<< "${_o}"; then
+    record_pass "merge-skip-ci: (s2) PR na ponta do main ⇒ sem rebase nem rastro, merge pelos gates de sempre (sem --admin)"
+  else record_fail "merge-skip-ci: (s2) na ponta" "rc=${_rc} pf=[$(cat "${d}/pflog")] margs=[$(cat "${d}/margs")] out=${_o}"; fi
+
+  # (s3) a regeneração na árvore combinada MUDA a projeção do PR ⇒ sem caminho rápido (todas as outras valem)
+  _msc_setup outro; MSC_MERGED=1 MSC_PF_REGEN=bump _msc --no-wait-after-rebase
+  if [ "${_rc}" -eq 4 ] && [ ! -s "${d}/margs" ] \
+     && grep -qF "mudou projeção(ões) que o head anterior trazia: docs/onion/testing-inventory.md" "${d}/comments"; then
+    record_pass "merge-skip-ci: (s3) regeneração mudou projeção ⇒ sem merge sem CI (rc 4), nomeando a projeção"
+  else record_fail "merge-skip-ci: (s3) regen muda" "rc=${_rc} margs=[$(cat "${d}/margs")] com=[$(cat "${d}/comments")] out=${_o}"; fi
+
+  # (s4) PR atrás sem conflito e a regeneração IDÊNTICA ⇒ o caminho rápido continua permitido
+  _msc_setup outro; MSC_MERGEABLE_SEQ=MERGEABLE MSC_MERGED=1 _msc --no-wait-after-rebase
+  if [ "${_rc}" -eq 0 ] && grep -qF -- "--rebase --admin --match-head-commit $(_newhead)" "${d}/margs" \
+     && grep -qF "projeções regeneradas na árvore combinada idênticas às do head anterior" "${d}/comments" \
+     && grep -qF "O PR estava ATRÁS de" "${d}/comments"; then
+    record_pass "merge-skip-ci: (s4) atrás sem conflito + regeneração idêntica ⇒ rebase e caminho rápido (--admin --match-head-commit no head novo)"
+  else record_fail "merge-skip-ci: (s4) regen idêntica" "rc=${_rc} margs=[$(cat "${d}/margs")] com=[$(cat "${d}/comments")] out=${_o}"; fi
+
+  # (s5) O 478/479 REPRODUZIDO: dois PRs (A já no main, B = este) fazem o MESMO "count: 2→3" no cabeçalho do
+  #      backlog e cada um acrescenta um item. O merge TEXTUAL é limpo e sai velho (4 itens, "count: 3") — a
+  #      prova de que a reprodução é real vem do próprio git. B está MERGEABLE e com o CI verde: antes da cura
+  #      ele entrava assim. Agora: rebase, regenera ("count: 4"), e o merge NÃO acontece sem o CI do head novo;
+  #      quando o CI do head novo chega verde, entra o head REGENERADO, nunca a projeção velha.
+  _msc_setup two
+  local _mt _mtrc _mtbl
+  _mt="$(git --git-dir="${MSC_ORIGIN}" merge-tree --write-tree refs/heads/main refs/heads/feat/x 2>/dev/null)"; _mtrc=$?
+  _mtbl="$(git --git-dir="${MSC_ORIGIN}" show "$(head -1 <<< "${_mt}"):docs/backlog.md" 2>/dev/null)"
+  MSC_MERGEABLE_SEQ=MERGEABLE MSC_PF_REGEN=count MSC_PR_CHECKS="${_ok_pass}" _msc
+  local _bl; _bl="$(git --git-dir="${MSC_ORIGIN}" show refs/heads/feat/x:docs/backlog.md 2>/dev/null)"
+  if [ "${_mtrc}" -eq 0 ] && [ "$(head -1 <<< "${_mtbl}")" = "count: 3" ] && [ "$(grep -c '^- ' <<< "${_mtbl}")" -eq 4 ] \
+     && [ "${_rc}" -ne 0 ] && [ ! -s "${d}/margs" ] && [ "$(head -1 <<< "${_bl}")" = "count: 4" ] \
+     && grep -qF "não nasceram/terminaram" <<< "${_o}"; then
+    _msc_setup two; MSC_MERGEABLE_SEQ=MERGEABLE MSC_PF_REGEN=count MSC_PR_CHECKS="${_ok_pass}" MSC_NEW_GREEN=1 MSC_MERGED=1 _msc
+    _bl="$(git --git-dir="${MSC_ORIGIN}" show refs/heads/feat/x:docs/backlog.md 2>/dev/null)"
+    if [ "${_rc}" -eq 0 ] && grep -qF -- "--rebase" "${d}/margs" && ! grep -qF -- "--admin" "${d}/margs" \
+       && [ "$(head -1 <<< "${_bl}")" = "count: 4" ] && [ "$(grep -c '^- ' <<< "${_bl}")" -eq 4 ]; then
+      record_pass "merge-skip-ci: (s5) 478/479 reproduzido (merge textual limpo e velho: 4 itens, count 3) ⇒ o merge NÃO sai com a projeção velha; com o CI do head novo verde, entra o head regenerado (count 4)"
+    else record_fail "merge-skip-ci: (s5) 478/479 com CI do head novo" "rc=${_rc} margs=[$(cat "${d}/margs")] bl=[${_bl}] out=${_o}"; fi
+  else record_fail "merge-skip-ci: (s5) 478/479" "mt_rc=${_mtrc} mt=[${_mtbl}] rc=${_rc} margs=[$(cat "${d}/margs")] bl=[${_bl}] out=${_o}"; fi
+
+  # (s6) TETO: o main NÃO PARA de andar (outro merge entra depois de cada rebase) ⇒ para em ONION_MERGE_REBASE_MAX
+  #      (2) rebases, nomeando o estado, sem merge — o laço infinito de rebase é o modo de falha
+  _msc_setup outro; MSC_MERGEABLE_SEQ=MERGEABLE MSC_PF_REGEN=bump MSC_PF_MAIN_MOVES=1 _msc
+  if [ "${_rc}" -eq 1 ] && [ ! -s "${d}/margs" ] && [ "$(grep -c -- '--rebase --push' "${d}/pflog")" -eq 2 ] \
+     && grep -qF "segue atrás de 'main' (1 commit(s), sem conflito) depois de 2 rebase(s)" <<< "${_o}"; then
+    record_pass "merge-skip-ci: (s6) main que não para de andar ⇒ para em 2 rebases, sem merge (teto do laço)"
+  else record_fail "merge-skip-ci: (s6) teto" "rc=${_rc} pf=$(grep -c -- '--rebase' "${d}/pflog") margs=[$(cat "${d}/margs")] out=${_o}"; fi
+
+  # (s7) o main anda logo DEPOIS do rebase e o caminho rápido valeria ⇒ a condição (9) manda esperar, e o
+  #      rastro no PR diz isso (não anuncia um merge sem CI que não vai acontecer); série: rc 4, sem merge
+  _msc_setup outro; MSC_MERGEABLE_SEQ=MERGEABLE MSC_MERGED=1 MSC_PF_MAIN_MOVES=1 _msc --no-wait-after-rebase
+  if [ "${_rc}" -eq 4 ] && [ ! -s "${d}/margs" ] && grep -qF "espera: o main andou 1 commit(s) depois do rebase" "${d}/comments" \
+     && ! grep -qF "SEM esperar o CI" "${d}/comments"; then
+    record_pass "merge-skip-ci: (s7) main andou depois do rebase ⇒ sem caminho rápido (condição 9), o rastro diz que espera, rc 4 sem merge"
+  else record_fail "merge-skip-ci: (s7) condição 9" "rc=${_rc} margs=[$(cat "${d}/margs")] com=[$(cat "${d}/comments")] out=${_o}"; fi
+
+  # (s7b) PR na ponta, e o main anda DURANTE os gates (outro merge entra enquanto o verificado lê o veredito) ⇒ a
+  #       última leitura antes do merge recusa: direto para sem merge (rc 1); na série, rc 4 (volta à fila)
+  _msc_setup tip; MSC_MERGEABLE_SEQ=MERGEABLE MSC_MERGED=1 MSC_PR_CHECKS="${_ok_pass}" MSC_MOVE_ON_ROLLUP=1 _msc
+  if [ "${_rc}" -eq 1 ] && [ ! -s "${d}/margs" ] && grep -qF "o main andou 1 commit(s) desde a leitura" <<< "${_o}"; then
+    _msc_setup tip; MSC_MERGEABLE_SEQ=MERGEABLE MSC_MERGED=1 MSC_PR_CHECKS="${_ok_pass}" MSC_MOVE_ON_ROLLUP=1 _msc --no-wait-after-rebase
+    if [ "${_rc}" -eq 4 ] && [ ! -s "${d}/margs" ] && grep -qF "o main andou 1 commit(s) depois da leitura" <<< "${_o}"; then
+      record_pass "merge-skip-ci: (s7b) main andou durante os gates ⇒ a leitura logo antes do merge recusa (direto rc 1, série rc 4), sem merge"
+    else record_fail "merge-skip-ci: (s7b) série" "rc=${_rc} margs=[$(cat "${d}/margs")] out=${_o}"; fi
+  else record_fail "merge-skip-ci: (s7b) direto" "rc=${_rc} margs=[$(cat "${d}/margs")] out=${_o}"; fi
+
+  # (s8) compare ILEGÍVEL ⇒ não mergeia (fail-closed), e --merge-commit com PR atrás ⇒ recusa sem rebasear
+  local x8="${d}/bin8"; mkdir -p "${x8}"
+  printf '#!/usr/bin/env bash\ncase "$*" in *compare/*) echo "gh: HTTP 502" >&2; exit 1 ;; esac\nexec %q "$@"\n' "${d}/bin/gh" > "${x8}/gh"; chmod +x "${x8}/gh"
+  _msc_setup tip; _o="$(cd "${MSC_REPO}" && PATH="${x8}:${d}/bin:${PATH}" MSC_D="${d}" MSC_ORIGIN="${MSC_ORIGIN}" MSC_OLD_RUNS="${GREEN}" \
+       MSC_MERGEABLE_SEQ=MERGEABLE LC_ALL=C bash "${sut}" 999 2>&1)"; _rc=$?
+  if [ "${_rc}" -eq 1 ] && grep -qF "compare do forge ilegível" <<< "${_o}"; then
+    _msc_setup outro; MSC_MERGEABLE_SEQ=MERGEABLE _msc --merge-commit
+    if [ "${_rc}" -eq 1 ] && [ ! -s "${d}/pflog" ] && [ ! -s "${d}/margs" ] && grep -qF "o modo é --merge-commit" <<< "${_o}"; then
+      record_pass "merge-skip-ci: (s8) compare ilegível ⇒ não mergeia; --merge-commit com PR atrás ⇒ recusa sem rebasear (linearizaria o merge)"
+    else record_fail "merge-skip-ci: (s8) --merge-commit" "rc=${_rc} pf=[$(cat "${d}/pflog")] out=${_o}"; fi
+  else record_fail "merge-skip-ci: (s8) compare ilegível" "rc=${_rc} out=${_o}"; fi
 
   # (l) ops/apply-ruleset-main.sh: toda label do script tem descrição ≤ 100 CARACTERES (a API dá 422 acima),
   #     e o script RECUSA (rc 2, antes de qualquer chamada) uma descrição longa — o mutante é a de 101 de 2026-10-13

@@ -1,8 +1,8 @@
 framework: onion-standalone
-source_commit: 668cac66a12b
-source_commit_date: 2026-10-13
+source_commit: 6e6deab1c443
+source_commit_date: 2026-10-14
 role: standalone
 adopted_from: onion-standalone
 kind: door
 materialized_at: 2026-10-14
-release: 1.1.0
+release: 1.2.0
