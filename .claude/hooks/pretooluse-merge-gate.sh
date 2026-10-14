@@ -28,23 +28,40 @@ input=$(cat)
 # `cwd` do JSON é o diretório ONDE o comando roda — numa worktree de agente é a worktree, não a raiz
 # (`CLAUDE_PROJECT_DIR`). Julgar pela raiz vetava `git push -u origin HEAD` de agente e deixava passar
 # force-push de um checkout sentado na main (Elenxo, 2ª passada, 2026-10-05).
+# `errors=backslashreplace` e `tool_input` não-dict (passada adversarial, 2026-10-11): um surrogate solto no JSON
+# (`\ud800`) derrubava o print, e o hook caía no modo sem python — vetando um push honesto.
 parsed=$(printf '%s' "$input" | python3 -c 'import json,sys
+sys.stdout.reconfigure(errors="backslashreplace")
 try: d=json.load(sys.stdin)
 except Exception: d={}
 d=d if isinstance(d,dict) else {}
-print(str(d.get("cwd") or "").replace("\n"," ")); print((d.get("tool_input") or {}).get("command",""))' 2>/dev/null)
+ti=d.get("tool_input"); ti=ti if isinstance(ti,dict) else {}
+print(str(d.get("cwd") or "").replace("\n"," ")); print(str(ti.get("command") or ""))' 2>/dev/null) && nopy=0 || nopy=1
 hcwd=${parsed%%$'\n'*}; cmd=${parsed#*$'\n'}; [ "$cmd" = "$parsed" ] && cmd=""
+# shellcheck source=lib/invocation-lines.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/invocation-lines.sh"
+# SEM python3 (ausente ou morto) o comando saía vazio e o veto ABRIA por dentro — exit 0, que o
+# `onFailure: block` não cobre. Agora o JSON é lido sem python e, se o campo nem for achado, julga-se o
+# JSON cru: errar aqui só pode fechar, nunca abrir (fix/vetos-fail-closed, 2026-10-11).
+if [ "$nopy" = 1 ]; then
+  hcwd=$(printf '%s' "$input" | onion_json_string_field cwd) || hcwd=""
+  cmd=$(printf '%s' "$input" | onion_json_string_field command) || cmd="$input"
+fi
 [ -d "$hcwd" ] || hcwd=$PWD
 [ -z "$cmd" ] && exit 0
 root="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null)}"
 [ -f "${root}/ops/pr-merge-verified.sh" ] || exit 0
+# SEM python3 não há tokenizador: fecha SÓ o que pode tocar a main (recorte medido, ver a lib).
+if [ "$nopy" = 1 ]; then
+  onion_nopy_touches merge-gate "$cmd" || exit 0
+  echo "GUARDA-PRETOOLUSE: python3 ausente ou quebrado — o veto não consegue analisar este comando, que tem forma de merge ou push (git push, gh pr merge, gh api com rota de merge/contents/refs/graphql, gh repo sync). Fechado por segurança: o host não protege a main neste repo. Instale python3 (o tokenizador dos vetos); o merge segue pelo caminho verificado, bash ops/pr-merge-verified.sh <PR> --sync (core-only)." >&2
+  exit 2
+fi
 
 # Reduz a string do modelo a linhas de invocação (heredoc fora, operadores partidos, invólucros
 # `command`/`\`/`env`/`exec`/`sh -c` e opções globais do git removidos). A normalização mora na lib
 # porque o buraco foi medido nos DOIS vetos ao mesmo tempo (auditoria 2026-09-02): `command gh pr
 # merge 1` e `bash -c "git push -f origin main"` passavam com rc=0 em ambos.
-# shellcheck source=lib/invocation-lines.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib/invocation-lines.sh"
 inv=$(ONION_CWD="$hcwd" onion_invocation_lines "$cmd")
 [ -z "$inv" ] && exit 0
 
@@ -96,14 +113,14 @@ push_lines=$(printf '%s\n' "$inv" | grep -E '^git[[:space:]]+push([[:space:]]|$)
 [ -z "$push_lines" ] && exit 0
 while IFS= read -r line; do
   [ -z "$line" ] && continue
-  # refspec explícito: `main` como token final, `HEAD:main`, `algo:main`, `refs/heads/main`
+  # refspec explícito: `main` como token final, `HEAD:main`, `algo:main`, `refs/heads/main` — `main` é o
+  # NOME do ramo protegido: a lib converte nele o ramo de produção resolvido (paridade com o protect-main)
   if grep -qE '([[:space:]]|:)(refs/heads/)?main([[:space:]]|$)' <<< "$line"; then
     deny "'git push' com alvo MAIN negado ($line)"
   fi
   # push NU (só flags) sentado em main
   if grep -qE '^git[[:space:]]+push([[:space:]]+-[^[:space:]]+)*[[:space:]]*$' <<< "$line"; then
-    cur=$(git -C "$hcwd" branch --show-current 2>/dev/null)
-    [ "$cur" = "main" ] && deny "'git push' nu sentado em MAIN negado"
+    onion_on_protected_branch "$hcwd" && deny "'git push' nu sentado no ramo de PRODUÇÃO negado"
   fi
 done <<< "$push_lines"
 exit 0

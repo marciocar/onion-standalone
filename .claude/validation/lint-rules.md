@@ -31,7 +31,7 @@ São as regras que o gate mecânico do Onion aplica a **todo repo da rede**: o m
 lint roda no core e em cada adotante. **HARD** bloqueia o merge; **SOFT** avisa, mas não
 bloqueia o CI.
 
-**89 regras** no total — **77 HARD**, **32 SOFT**.
+**97 regras** no total — **85 HARD**, **37 SOFT**.
 
 ## Frontmatter & conformidade de artefato
 
@@ -46,6 +46,7 @@ Campos obrigatórios, válidos e bem-formados no frontmatter de agentes e comand
 | 17 | Frontmatter: valor escalar com ': ' não-aspado | HARD | YAML de frontmatter quebrado por escalar com ': ' não-aspado |
 | 23 | Frontmatter: category: em agentes (a metade 'model: em comandos' foi REVOGADA pela REGRA 71) | HARD | agente sem category: — o roteamento/inventário dependem dele. Até 2026-09-03 esta regra também EXIGIA |
 | 51 | Agentes branch-* documentam a distinção vs o par geral | SOFT | par de agentes com overlap invisível — dispatcher que roteia por description não escolhe |
+| 102 | Chave de frontmatter de agente pertence à allowlist (oficiais + as da casa) | HARD + SOFT | typo de chave de agente (`tool:` no lugar de `tools:`, `modle:`) que o Claude Code ignora em silêncio |
 
 ## Higiene de artefato
 
@@ -64,6 +65,7 @@ Tamanho saudável, nomes kebab-case, dialeto puro e links que resolvem.
 | 71 | Comando não declara model: no frontmatter — segue a escada da sessão | HARD | o Claude Code 2.1.259 passou a HONRAR model: de comando em sessão interativa (radar E3 rodada 2, l.17): |
 | 74 | Caminho .claude/ NU dentro de plugin só resolve no core, com catraca | HARD + SOFT | baseline de passivo crescendo calado — um PR transformava ref NOVA (HARD) em PASSIVO (SOFT) acrescentando linha |
 | 94 | MUTANTE esquecido na árvore | HARD + SOFT | teste de mutação que morre no meio e deixa o repo PIOR que antes |
+| 98 | Diretiva de injeção escrita como CITAÇÃO não pode estar VIVA | HARD | exemplo de documentação que o harness lê como diretiva e EXECUTA a cada invocação do comando. |
 
 ## Fronteiras & contratos de arquitetura
 
@@ -85,6 +87,9 @@ O consumidor fala com a abstração, nunca com o provider direto.
 |---:|-------|:----------:|---------------|
 | 10 | SDAAL: sem chamada direta a provider no consumidor | HARD | consumidor chamando o provider direto, furando a abstração SDAAL |
 | 11 | Método de abstração usado no consumidor deve existir na interface | HARD | consumidor chama método de abstração que não existe na interface |
+| 103 | Adapter do task-manager declara todas as capacidades da interface, com fonte | HARD | capacidade declarada que o adapter não exerce, e célula "medida" sem fonte nenhuma. |
+| 104 | Executável do adapter e declaração de capacidades listam os mesmos verbos | HARD | executável do task-manager que exerce verbo declarado not_implemented (ou não declarado), e medição adapter: que nenhum executável roda. |
+| 105 | Script rastreado não chama a API do provedor de task manager por fora do adapter | HARD | o cliente do provedor reescrito fora do adapter (o script avulso da sessão promovido a ops/), que contorna o tm.sh e a declaração de capacidades. |
 
 ## SSOT anti-drift
 
@@ -141,6 +146,7 @@ Conhecimento nasce no grafo e não morre em prosa; proveniência com catraca (po
 | 87 | PR que EDITA um `.kg.yaml` enxergou os `confirmed` dele | SOFT | propor contra o próprio corpus — o defeito medido em 2026-09-19 |
 | 89 | Rodada de radar selada reconcilia o corpus que superou (Aufhebung), com catraca | HARD + SOFT | a UNICA divida deste corpus que piora sozinha — rodada de radar selada como baseline sem |
 | 93 | KB de terceiro declara a QUE VERSÃO se aplica | HARD + SOFT | documentação que caduca sem dizer para qual versão ela valia |
+| 99 | Nó de .kg.yaml sem caminho de máquina, julgado pela classe | HARD + SOFT | caminho de máquina voltando ao corpus depois de a migração de provenance tirá-lo (com catraca). |
 
 ## Automação Graduada
 
@@ -176,10 +182,11 @@ O que pode sair para superfícies públicas ou vendorizadas — nome de cliente 
 | 33 | Segurança de projeção no HISTÓRICO DE FEDERAÇÃO (mailbox-aware) | HARD | nome privado vazando no histórico de federação (mailbox) |
 | 34 | Site: a derivação nunca vira fonte | HARD + SOFT | o build do site (derivação) entrando no git como se fosse fonte |
 | 35 | Site público não linka deep-link do repo PRIVADO (404 garantido) | HARD | site público linkando deep-link de repo privado — 404 garantido |
-| 36 | Superfície VENDORIZADA sem nome comercial de cliente | HARD | nome comercial de cliente vazando em superfície vendorizada |
+| 36 | Superfície VENDORIZADA sem nome comercial de cliente | HARD + SOFT | nome comercial de cliente vazando em superfície vendorizada |
 | 45 | Link vendorizado não aponta caminho core-privado, com catraca | HARD + SOFT | link vivo em superfície vendorizada para caminho core-privado — morto no adotante |
 | 61 | Fronteira de MOAT: manifesto de plugin publicável não vaza adoção, federação nem grafo privado | HARD | publicar a ADOÇÃO e a FEDERAÇÃO (adopt/federation-*/co-*/marketplace/decouple) ou o SSOT PRIVADO |
 | 64 | Compose sem bind local ou com segredo em fallback literal | HARD + SOFT | porta publicada em todas as interfaces (o Docker ignora o firewall do HOST — ufw/iptables |
+| 100 | Superfície que viaja não cita ops/ como se o destinatário o tivesse | HARD + SOFT | porta/adotante recebendo instrução que aponta para ops/, que não viaja (com catraca). |
 
 ## Processo com resíduo
 
@@ -191,10 +198,11 @@ O trabalho PROPOSTO carrega rastro material de ter sido revisado — o gate cria
 
 ## Integridade do próprio gate
 
-As demais categorias perguntam 'achei violação?'. Esta pergunta 'eu cheguei a olhar?' — porque varredura cega devolve zero violações, que é indistinguível de conformidade. Categoria nova em 2026-08-04, quando o lint rodou de dentro de um worktree de harness e varreu 0 dos 51 agentes sem emitir uma linha de aviso. A REGRA 86 entrou aqui em 2026-09-17 pelo mesmo motivo, um andar acima: um workflow que não PARSEIA não é um gate que falhou, é um gate que nunca rodou — e o repo o contava como existente. A REGRA 88 entrou em 2026-09-20 pela versão mais perversa da classe: o gate rodava, mas sem árvore — `bash <script do repo>` saía 127, o job reprovava TODO PR e a mensagem culpava o código revisado. Gate que nunca olhou, acusando.
+As demais categorias perguntam 'achei violação?'. Esta pergunta 'eu cheguei a olhar?' — porque varredura cega devolve zero violações, que é indistinguível de conformidade. Categoria nova em 2026-08-04, quando o lint rodou de dentro de um worktree de harness e varreu 0 dos 51 agentes sem emitir uma linha de aviso. A REGRA 86 entrou aqui em 2026-09-17 pelo mesmo motivo, um andar acima: um workflow que não PARSEIA não é um gate que falhou, é um gate que nunca rodou — e o repo o contava como existente. A REGRA 88 entrou em 2026-09-20 pela versão mais perversa da classe: o gate rodava, mas sem árvore — `bash <script do repo>` saía 127, o job reprovava TODO PR e a mensagem culpava o código revisado. Gate que nunca olhou, acusando. A REGRA 101 entrou em 2026-10-11 pela versão do veto: o hook que nem roda (script ausente, rc=127) deixava a ação passar — veto que não executou, contado como veto.
 
 | Nº | Regra | Severidade | O que previne |
 |---:|-------|:----------:|---------------|
 | 54 | A varredura ENXERGA o que existe (guarda-das-guardas) | HARD | gate que varre ZERO arquivo e mesmo assim reporta OK — verde sem ter olhado |
 | 86 | Workflow de CI PARSEIA como YAML | HARD | workflow inexecutável passando por existente, e guarda morta por sintaxe |
 | 88 | Job de workflow que EXECUTA arquivo do repo faz checkout | HARD + SOFT | job sem `actions/checkout` invocando script versionado; o bash sai 127 e o `rc != 0` |
+| 101 | Veto PreToolUse por exit 2 declara onFailure: block | HARD + SOFT | veto que falha ABERTO quando o hook nem roda (script ausente sai 127 e a ação passa). |

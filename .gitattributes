@@ -1,0 +1,7 @@
+# EOL fixado em LF nos executáveis (Onion, SAC-107): checkout Windows com autocrlf quebraria o bash.
+# Gerado na materialização da porta (projeção do core): não edite aqui.
+*.sh text eol=lf
+*.awk text eol=lf
+*.py text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf

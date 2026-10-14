@@ -119,6 +119,8 @@ CLAUDE_DIR="${REPO_ROOT}/.claude"
 _stamp_has() { grep -qE "$1" "${REPO_ROOT}/.claude/.onion-version" 2>/dev/null; }
 _ROLE_TAIL='[[:space:]]*(#.*)?$'
 # ⚠️ `standalone` NAO ENTRA AQUI, E A TENTATIVA FOI MEDIDA E REVERTIDA NO MESMO PR (2026-09-18).
+# (Isto vale para a PORTA standalone, a que carrega `kind: door`. O ADOTANTE standalone, sem `kind: door`,
+# entra no porteiro desde 2026-10-13 pelo bloco logo abaixo do IS_LEAF — a pergunta "sou porta?" é do `kind:`.)
 # `IS_DERIVED` nao e "que papel e este" — e um PORTEIRO: dezenove sitios o consomem, dezessete deles
 # como `[ "${IS_DERIVED}" -eq 1 ] && return 0`. Acrescentar um papel aqui DESLIGA dezessete guardas
 # de uma vez. Medido: a mesma arvore, trocando SO o carimbo `standalone`→`source`, vai de 0 HARD
@@ -139,6 +141,25 @@ IS_DERIVED=0; _stamp_has "^([[:space:]]*role:[[:space:]]*(adopted|hub)${_ROLE_TA
 # a distingue do core é `kind: door`, escrito só pelo materializador.
 _stamp_has "^[[:space:]]*role:[[:space:]]*source${_ROLE_TAIL}" && _stamp_has '^[[:space:]]*kind:[[:space:]]*door([[:space:]]|$)' && IS_DERIVED=1
 IS_LEAF=0;    _stamp_has "^[[:space:]]*role:[[:space:]]*adopted${_ROLE_TAIL}" && IS_LEAF=1
+# ── ADOTANTE `standalone` NÃO É PORTA `standalone` (2026-10-13): o MODO PORTA vem de `kind: door` ──
+# O aviso acima continua de pé para a PORTA: `onion-standalone` (carimbo `role: standalone` +
+# `kind: door`) segue IS_DERIVED=0 e é julgada inteira. O que mudou é o ADOTANTE. O `role:` do
+# carimbo responde a DUAS perguntas — o CORTE de transporte (o `--update` lê o papel para não trazer
+# de volta os ~70 arquivos de adoção e federação) e, aqui, "sou porta?". As duas se contradiziam:
+# `/meta:adopt --role standalone` grava `role: standalone` de propósito (o corte), e este porteiro o
+# lia como porta e julgava o adotante como a fonte. Medido em 2026-10-13: a mesma árvore de um adotante,
+# trocando SÓ o carimbo `adopted`→`standalone`, ia de 0 a 16 HARD (REGRAS 16, 19, 22 e 37 cobrando
+# do produto dele contagens e plugins do core). Destino já selado pelo maestro em 2026-10-11:
+# `kind: door` = PORTA; sem ele = ADOTADO. Então `standalone` SEM `kind: door` é adotado-folha com o
+# corte standalone — o corte segue lendo `role:` (vendor-manifest.sh, load-manifest.sh), a
+# identidade passa a ler `kind:`. Folha também: um standalone não leva a maquinaria de adoção e não
+# vendoriza para ninguém, como o `adopted` (REGRA 36 (Superfície VENDORIZADA sem nome comercial de
+# cliente)). Quem escrever `kind: door` num adotante para fugir de guarda ganha o CONTRÁRIO: volta a
+# ser julgado como porta, mais guardas e não menos.
+if _stamp_has "^[[:space:]]*role:[[:space:]]*standalone${_ROLE_TAIL}" \
+   && ! _stamp_has '^[[:space:]]*kind:[[:space:]]*door([[:space:]]|$)'; then
+  IS_DERIVED=1; IS_LEAF=1
+fi
 
 # ---------------------------------------------------------------------------
 # Contadores de violações
@@ -1482,6 +1503,13 @@ check_harness_inventory_drift() {
 # célula sem comando não é impressa · métrica sem produtor imprime ⊘ NÃO MEDIDO · zero produtor
 # vivo derruba o gerador · o painel não imprime "hoje" (artefato catracado com data de hoje
 # produz uma HARD por dia, e guarda que grita sem motivo ensina a ser ignorada).
+#
+# DESDE 2026-10-13 (passo A de D_MERGE_PROCESS_ONION_2026_10): o versionado é a saída de `--markdown`,
+# em que os contadores que todo PR muda (resíduos da REGRA 56, asserções, famílias, regras) saem como
+# `↻ ao vivo` — o número é calculado na hora por `testing-state.sh --live`, nunca commitado NESTE arquivo. A garantia
+# desta regra NÃO afrouxa: o byte-a-byte segue contra `--markdown`, então gravar a saída de `--live` no
+# arquivo, ou digitar um número numa célula `↻`, reprova igual. O que mudou é que o painel deixou de ser
+# alterado por PR (medido: entrava em 59 de 60 PRs) e dois PRs paralelos não colidem mais nele.
 # ===========================================================================
 check_testing_state_drift() {
   # REGRA DE REPO, NÃO DE ARQUIVO (mesma razão da REGRA 80) — e aqui pesa mais: o painel chama
@@ -1500,7 +1528,10 @@ check_testing_state_drift() {
   local tmp; tmp="$(mktemp)"
   if _gen_into "${tmp}" "${tracked}" "docs/onion/testing-state.md" -- bash "${gen}" --markdown &&
      ! diff -q "${tracked}" "${tmp}" >/dev/null 2>&1; then
-    violation "HARD" "${tracked}" "painel de estado desatualizado vs os produtores — regenere com 'bash .claude/validation/testing-state.sh --markdown > docs/onion/testing-state.md'. O painel anterior deste repo publicava 'Coverage: 85%' sem produtor nenhum; a catraca existe para que um número digitado à mão não sobreviva a um lint."
+    local _why="painel de estado desatualizado vs os produtores"
+    # diagnóstico nomeado do erro provável desde o modo --live: o número vivo foi versionado
+    grep -q 'SAÍDA AO VIVO' "${tracked}" 2>/dev/null && _why="o painel versionado é a saída de --live (números vivos não moram no git)"
+    violation "HARD" "${tracked}" "${_why} — regenere com 'bash .claude/validation/testing-state.sh --markdown > docs/onion/testing-state.md'. O painel anterior deste repo publicava 'Coverage: 85%' sem produtor nenhum; a catraca existe para que um número digitado à mão não sobreviva a um lint."
   fi
   rm -f "${tmp}"
 }
@@ -1559,7 +1590,28 @@ check_harvest_names_removed_nodes() {
   # continua no grafo (falso positivo medido em 2026-10-07, ao colher uma fila e inserir nós antes
   # das arestas: o último nó "saiu" e "voltou" no diff, e o HARD pedia para nomear um id vivo).
   local _kgdiff added
-  _kgdiff="$(git -C "${REPO_ROOT}" diff --no-ext-diff --no-color "${base}" HEAD -- '*.kg.yaml' 2>/dev/null || true)"
+  # GRAFO RETIRADO DA ÁRVORE (2026-10-13): o grafo INTEIRO apagado, declarado por linha de CAMINHO (sem
+  # `::`) no ledger `docs/evolution/kg-retired-from-tree.tsv`, não é colheita a nomear — nomear os ids no
+  # resíduo republicaria, num repo PÚBLICO, o que a retirada tirou (o caso que a pagou: grafos de dados
+  # pessoais, ids incluídos). Mesmo espírito do `x_renamed_from` abaixo: isenta por DECLARAÇÃO no dado,
+  # nunca por omissão. Duas travas: o arquivo tem de estar AUSENTE da árvore (grafo vivo segue cobrado) e
+  # a isenção é DECLARADA em SOFT no ramo que apaga (nunca silêncio).
+  local _ret_ledger="${REPO_ROOT}/docs/evolution/kg-retired-from-tree.tsv" _ret_excl=() _rp _nret=0
+  if [ -f "${_ret_ledger}" ]; then
+    while IFS= read -r _rp; do
+      [ -n "${_rp}" ] || continue
+      case "${_rp}" in *::*) continue ;; esac
+      [ -e "${REPO_ROOT}/${_rp}" ] && continue
+      _ret_excl+=(":(exclude)${_rp}")
+      if [ -n "$(git -C "${REPO_ROOT}" diff --name-only --diff-filter=D "${base}" HEAD -- "${_rp}" 2>/dev/null || true)" ]; then
+        _nret=$((_nret + 1))
+      fi
+    done < <(grep -vE '^[[:space:]]*(#|$)' "${_ret_ledger}" 2>/dev/null | cut -f1 | sort -u || true)
+  fi
+  if [ "${_nret}" -gt 0 ]; then
+    violation "SOFT" "docs/evolution/kg-retired-from-tree.tsv" "REGRA 63: ${_nret} grafo(s) INTEIRO(s) retirado(s) da árvore neste ramo por decisão registrada no ledger — os ids deles NÃO são cobrados no resíduo (nomeá-los republicaria o que saiu). Declarado, não verificado: confira o ledger no diff"
+  fi
+  _kgdiff="$(git -C "${REPO_ROOT}" diff --no-ext-diff --no-color "${base}" HEAD -- '*.kg.yaml' ${_ret_excl[@]+"${_ret_excl[@]}"} 2>/dev/null || true)"
   removed="$(grep -E '^-[[:space:]]*-[[:space:]]*id:' <<< "${_kgdiff}" \
              | sed -E 's/^-[[:space:]]*-[[:space:]]*id:[[:space:]]*//; s/[[:space:]]*$//' | sort -u || true)"
   added="$(grep -E '^[+][[:space:]]*-[[:space:]]*id:' <<< "${_kgdiff}" \
@@ -4010,7 +4062,8 @@ check_kg_view_sync() {
 #   script seria o próprio vazamento).
 #   Hub de privacidade: as REGRAS 33 e 36 derivam desta (threat models distintos).
 #   P7 (SAC-99, 2026-10-11): também IDS DE NÓ e CAMINHOS DE GRAFO de todo o corpus em docs/, com os
-#   termos do client-terms.txt — o id e o caminho saem para as projeções geradas de qualquer grafo.
+#   termos da fonte privada (P8, fora da árvore desde 2026-10-13) — o id e o caminho saem para as
+#   projeções geradas de qualquer grafo.
 # ===========================================================================
 check_projection_safety() {
   local helper="${SCRIPT_DIR}/projection-safety.sh"
@@ -4018,7 +4071,7 @@ check_projection_safety() {
   # Honra --only com a MESMA semântica do _find (mantém o selftest O(fixtures × 1)).
   if [ -n "${ONLY_PATH}" ]; then
     case "${ONLY_PATH}" in
-      "${REPO_ROOT}"/site/*|"${REPO_ROOT}"/docs/onion/graph/*|*/federation-console.html|*/members.yaml|"${REPO_ROOT}"/docs/*.kg.yaml|*/client-terms.txt) : ;;
+      "${REPO_ROOT}"/site/*|"${REPO_ROOT}"/docs/onion/graph/*|*/federation-console.html|*/members.yaml|"${REPO_ROOT}"/docs/*.kg.yaml) : ;;
       *) return 0 ;;
     esac
   fi
@@ -4227,10 +4280,36 @@ check_vendored_surface_clean() {
   # para o console e o mapa públicos — registrar um cliente sob NDA ali trocaria um vazamento por
   # outro. Aqui o nome entra para ser PROCURADO, nunca exibido. E o arquivo vive em
   # `docs/evolution/`, que NÃO viaja: uma lista de nomes de cliente que viajasse seria o vazamento.
-  local _ct="${REPO_ROOT}/docs/evolution/federation/client-terms.txt"
-  if [ -f "${_ct}" ]; then
+  # ⚠️ DESDE 2026-10-13 A LISTA MORA FORA DA ÁRVORE (o core ficou PÚBLICO, decisão do maestro): o
+  # `client-terms.txt` versionado era, num repo público, o próprio vazamento — "não viaja no adopt" deixou
+  # de bastar quando a própria árvore passou a ser vitrine. A fonte agora é a P8 do projection-safety.sh
+  # (`ONION_CLIENT_TERMS_FILE` ou ~/.config/onion/client-terms.txt; no CI, o secret ONION_CLIENT_TERMS),
+  # lida por `--emit-declared`. SEM a fonte: SOFT NAO-VERIFICADO nomeado (nunca verde mudo, nunca reprovar
+  # tudo). E a lista que VOLTAR à árvore é HARD: é a regressão exata que esta mudança fecha.
+  local _ct_legacy="${REPO_ROOT}/docs/evolution/federation/client-terms.txt" _decl="" _decl_rc=0
+  if [ -z "${ONLY_PATH}" ] && [ -e "${_ct_legacy}" ]; then
+    violation "HARD" "${_ct_legacy}" "[vendor-scrub/LISTA-NA-ARVORE] a lista de nomes privados voltou para a ÁRVORE do core, que é PÚBLICA — ela é o próprio vazamento. Mova o conteúdo para ONION_CLIENT_TERMS_FILE ou ~/.config/onion/client-terms.txt (0600) e tire o arquivo do índice"
+  fi
+  # P9 (2026-10-13, medido no update de um adotante hub): o default `~/.config/...` SÓ vale na FONTE. A
+  # lista é a dos clientes DO CORE; lida em qualquer repo da máquina, acusou 6 HARD em arquivos PRÓPRIOS do
+  # adotante (a KB das integrações dele, onde o parceiro dele é legítimo). Fora da fonte, sem lista explícita,
+  # o helper devolve rc 4 e a varredura por nome privado não se aplica (o recorte é o da LISTA: os ids de
+  # adotante abaixo continuam varridos). Lista EXPLÍCITA fora da fonte é ato deliberado: entra, e é DECLARADA.
+  local _ct_state=""
+  _ct_state="$(bash "${helper}" --ct-state 2>/dev/null || true)"
+  if [ "${_ct_state}" = "explicit" ] && [ "$(_role)" != "source" ]; then
+    violation "SOFT" "${REPO_ROOT}/docs/evolution/federation/members.yaml" "[vendor-scrub/LISTA-EXTERNA] papel '$(_role)': a varredura por nome privado está lendo uma lista EXTERNA passada explicitamente (ONION_CLIENT_TERMS_FILE ou --client-terms) — fora da fonte o default ~/.config/onion/client-terms.txt não vale (P9); acusação aqui é contra a lista que você escolheu passar"
+  fi
+  _decl="$(bash "${helper}" --emit-declared 2>/dev/null)" || _decl_rc=$?
+  if [ "${_decl_rc}" -eq 4 ]; then
+    :   # P9: papel sem default e sem lista explícita — a lista do core não é objeto deste repo
+  elif [ "${_decl_rc}" -eq 3 ]; then
+    violation "SOFT" "${REPO_ROOT}/docs/evolution/federation/members.yaml" "[vendor-scrub/NAO-VERIFICADO] fonte privada de termos AUSENTE (ONION_CLIENT_TERMS_FILE ou ~/.config/onion/client-terms.txt; no CI, o secret ONION_CLIENT_TERMS) — a superfície vendorizada NÃO foi varrida pelos nomes privados; só pelos ids de adotante"
+  elif [ "${_decl_rc}" -ne 0 ]; then
+    violation "SOFT" "${REPO_ROOT}/docs/evolution/federation/members.yaml" "[vendor-scrub/NAO-VERIFICADO] a fonte privada de termos não respondeu (rc=${_decl_rc}) — varredura por nome privado NÃO feita"
+  else
     terms="${terms}
-$(grep -vE '^[[:space:]]*(#|$)' "${_ct}" || true)"
+${_decl}"
   fi
   # (2) IDS de ADOTANTE — o id também identifica o cliente (um id pode ser nome de pessoa, ou mapear direto na marca).
   #     Derivados do members.yaml, EXCLUINDO os nomes do PRÓPRIO framework (onion-*) e do maestro (marcio*).
@@ -4246,19 +4325,33 @@ $(grep -vE '^[[:space:]]*(#|$)' "${_ct}" || true)"
   # grep -v não casa nada → exit 1 → sob 'set -euo pipefail' abortaria o LINT INTEIRO. O core
   # nunca vê isso (sempre tem termos), mas todo adotante greenfield veria — achado ao rodar o
   # lint DENTRO da cópia de um adotante (a lição de campo: o core é o pior oráculo do que viaja).
-  terms="$(printf '%s\n%s\n' "${terms}" "${ids}" | grep -v '^[[:space:]]*$' | sort -u || true)"
-  [ -n "${terms}" ] || return 0
-  while IFS= read -r term; do
-    [ -n "${term}" ] || continue
-    while IFS= read -r f; do
-      [ -n "${f}" ] || continue
-      # Fixtures NÃO são exceção: um nome real de cliente num fixture VENDORIZA p/ todo adotante
-      # igual a qualquer outro arquivo (achado 2026-07-22: um id de adotante num comentário de
-      # crédito de fixture escapava a guarda e viajava). Os termos derivam de nomes REAIS — nenhum
-      # fixture legítimo precisa deles (os de teste usam nomes inventados: acme-adopter, selftest-*).
-      violation "HARD" "${f#${REPO_ROOT}/}" "[vendor-scrub] identificador de adotante '${term}' na superfície vendorizada — viaja p/ todo adotante (cross-tenant por adoção); generalize (o crédito nominal fica no diário privado)"
-    done < <(grep -rilF -- "${term}" "${targets[@]}" 2>/dev/null | sort -u)
-  done <<< "${terms}"
+  # Duas listas, porque o LOG do lint é público no CI de um repo público: o id de adotante é público
+  # (P2) e pode ser impresso; o nome privado NUNCA — a mensagem diz só "nome da fonte privada".
+  terms="$(printf '%s\n' "${terms}" | grep -v '^[[:space:]]*$' | sort -u || true)"
+  ids="$(printf '%s\n' "${ids}" | grep -v '^[[:space:]]*$' | sort -u || true)"
+  [ -n "${terms}${ids}" ] || return 0
+  local _kind _list
+  for _kind in private id; do
+    if [ "${_kind}" = "private" ]; then _list="${terms}"; else _list="${ids}"; fi
+    [ -n "${_list}" ] || continue
+    while IFS= read -r term; do
+      [ -n "${term}" ] || continue
+      # termo privado que é também id público já é coberto pela volta dos ids (sem duplicar a violação)
+      if [ "${_kind}" = "private" ] && grep -qxiF -- "${term}" <<< "${ids}"; then continue; fi
+      while IFS= read -r f; do
+        [ -n "${f}" ] || continue
+        # Fixtures NÃO são exceção: um nome real de cliente num fixture VENDORIZA p/ todo adotante
+        # igual a qualquer outro arquivo (achado 2026-07-22: um id de adotante num comentário de
+        # crédito de fixture escapava a guarda e viajava). Os termos derivam de nomes REAIS — nenhum
+        # fixture legítimo precisa deles (os de teste usam nomes inventados: acme-adopter, selftest-*).
+        if [ "${_kind}" = "id" ]; then
+          violation "HARD" "${f#${REPO_ROOT}/}" "[vendor-scrub] identificador de adotante '${term}' na superfície vendorizada — viaja p/ todo adotante (cross-tenant por adoção); generalize (o crédito nominal fica no diário privado)"
+        else
+          violation "HARD" "${f#${REPO_ROOT}/}" "[vendor-scrub] nome da fonte privada de termos na superfície vendorizada (o termo não é impresso: o log do CI é público) — viaja p/ todo adotante; generalize. Para achar: a lista sai do modo --emit-declared do projection-safety.sh; case-a com grep -nioF contra ${f#${REPO_ROOT}/}"
+        fi
+      done < <(grep -rilF -- "${term}" "${targets[@]}" 2>/dev/null | sort -u)
+    done <<< "${_list}"
+  done
 
 }
 
@@ -5423,7 +5516,8 @@ check_evolve_staleness() {
 check_evolve_staleness
 
 # ─────────────────────────────────────────────────────────────────────────────
-# REGRA 98 (Diretiva de injeção escrita como CITAÇÃO não pode estar VIVA) — HARD
+# REGRA 98 — Diretiva de injeção escrita como CITAÇÃO não pode estar VIVA [HARD]
+# previne: exemplo de documentação que o harness lê como diretiva e EXECUTA a cada invocação do comando.
 #   DANO CONSUMADO (2026-10-04, rodada do /meta:evolve): o /meta:create-skill EXECUTAVA git diff
 #   a cada invocação, porque dois exemplos de documentação (crase dupla; bloco cercado) casam as
 #   regex do harness 2.1.289 — que NÃO pula bloco cercado e NÃO mascara crase dupla. Era a 2ª
@@ -5457,7 +5551,8 @@ check_cited_directive_live() {
 check_cited_directive_live
 
 # ─────────────────────────────────────────────────────────────────────────────
-# REGRA 99 (Nó de .kg.yaml sem caminho de máquina, julgado pela classe) — HARD, com catraca
+# REGRA 99 — Nó de .kg.yaml sem caminho de máquina, julgado pela classe [HARD + SOFT]
+# previne: caminho de máquina voltando ao corpus depois de a migração de provenance tirá-lo (com catraca).
 #   DANO MEDIDO (SAC-103): as ondas O4 a O7 da migração de provenance (SAC-73, 2026-10-09/10) tiraram do
 #   corpus o caminho de máquina — 247 ocorrências em 180 nós no corpus de 2026-10-08, medidas pela classe
 #   desta regra — e nada impedia que ele voltasse. A régua das ondas era uma LISTA de diretórios, que errou
@@ -5491,7 +5586,8 @@ check_kg_machine_path() {
 check_kg_machine_path
 
 # ─────────────────────────────────────────────────────────────────────────────
-# REGRA 100 (Superfície que viaja não cita ops/ como se o destinatário o tivesse) — HARD, com catraca
+# REGRA 100 — Superfície que viaja não cita ops/ como se o destinatário o tivesse [HARD + SOFT]
+# previne: porta/adotante recebendo instrução que aponta para ops/, que não viaja (com catraca).
 #   DANO MEDIDO (SAC-86, 2026-10-09, materialização do onion-standalone no pin 947e69ce): a lente
 #   kg-grammar.md afirmava ao adotante que o `ops/pr-merge-verified.sh` (core-only) recusa o rebase —
 #   e `ops/` não viaja para porta nem adotante. A classe já estava publicada no pretooluse-merge-gate.sh
@@ -5530,6 +5626,184 @@ check_ops_citation_travel() {
   return 0
 }
 check_ops_citation_travel
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGRA 101 — Veto PreToolUse por exit 2 declara onFailure: block [HARD + SOFT]
+# previne: veto que falha ABERTO quando o hook nem roda (script ausente sai 127 e a ação passa).
+#   DANO MEDIDO (SAC-83, 2026-10-11, Claude Code 2.1.296, `claude -p` em sandbox): PreToolUse com script
+#   ausente saiu 127 e a ação RODOU; com `"onFailure": "block"` a mesma falha barrou. Os 3 vetos do core
+#   (env-guard, protect-main, merge-gate) falhavam ABERTO quando o hook nem rodava. Aviso (sem exit 2)
+#   não é cobrado; aviso COM block é SOFT. Lógica em veto-onfailure-check.sh.
+check_veto_onfailure() {
+  local helper="${SCRIPT_DIR}/veto-onfailure-check.sh"
+  local st="${ONION_SETTINGS_JSON:-${REPO_ROOT}/.claude/settings.json}"
+  [ -f "${helper}" ] && [ -f "${st}" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in "${st}"|*/veto-onfailure-check.sh|"${REPO_ROOT}"/.claude/hooks/*) : ;; *) return 0 ;; esac
+  fi
+  local _out _hrc=0 _err
+  _err="$(mktemp 2>/dev/null || echo /dev/null)"
+  if _out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>"${_err}")"; then _hrc=0; else _hrc=$?; fi
+  while IFS=$'\t' read -r _sev _code _path _msg; do
+    [ -n "${_code:-}" ] || continue
+    violation "${_sev:-SOFT}" "${st}" "REGRA 101 (Veto PreToolUse por exit 2 declara onFailure: block): [${_code}] ${_msg}"
+  done <<< "${_out}"
+  if [ "${_hrc}" -ne 0 ]; then
+    violation "HARD" "${helper}" "REGRA 101 (Veto PreToolUse por exit 2 declara onFailure: block): a guarda NÃO RODOU (rc=${_hrc}: $(head -1 "${_err}" 2>/dev/null)) — isto não é aprovação"
+  fi
+  [ "${_err}" = /dev/null ] || rm -f "${_err}"
+  return 0
+}
+check_veto_onfailure
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGRA 103 — Adapter do task-manager declara todas as capacidades da interface, com fonte [HARD]
+# previne: capacidade declarada que o adapter não exerce, e célula "medida" sem fonte nenhuma.
+#   DANO MEDIDO (SAC-63, 2026-10-11, depois da Onda 1 de primárias, PR #1027): o CLAUDE.md prescrevia
+#   "Bulk-first" pelo `/issue/bulk` do Jira e nenhum adapter implementava lote (o jira.md dizia "não
+#   usado aqui"); a interface publicava o mapa de prioridade do Zoho "da UI, não medido" no mesmo
+#   formato das colunas medidas. Cada `adapters/<p>.capabilities.tsv` declara as capacidades do bloco
+#   `<!-- capabilities:begin/end -->` de interface.md (required|optional, implemented|not_implemented|
+#   unverified, api_version, fonte) e a guarda confere conjunto, enum, fonte que resolve e superfície
+#   presente/ausente no adapter. Lógica e teto em task-manager-capabilities-check.sh. Roda também no
+#   derivado (o task-manager viaja); lá a ref kg: cujo grafo não viajou não é conferida.
+check_task_manager_capabilities() {
+  local helper="${SCRIPT_DIR}/task-manager-capabilities-check.sh"
+  [ -f "${helper}" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then          # --only: só quando o arquivo é do task-manager (ou a própria guarda)
+    case "${ONLY_PATH}" in
+      */fixtures/*) return 0 ;;
+      */utils/task-manager/*|*/task-manager-capabilities-check.sh) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  local _out _hrc=0 _err
+  _err="$(mktemp 2>/dev/null || echo /dev/null)"
+  if _out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>"${_err}")"; then _hrc=0; else _hrc=$?; fi
+  while IFS=$'\t' read -r _sev _code _path _msg; do
+    [ -n "${_path:-}" ] || continue
+    violation "${_sev:-HARD}" "${REPO_ROOT}/${_path#./}" "REGRA 103 (Adapter do task-manager declara todas as capacidades da interface, com fonte): [${_code}] ${_msg}"
+  done <<< "${_out}"
+  if [ "${_hrc}" -ge 2 ] || { [ "${_hrc}" -ne 0 ] && [ -z "${_out}" ]; }; then
+    violation "HARD" "${REPO_ROOT}/.claude/validation/task-manager-capabilities-check.sh" "REGRA 103 (Adapter do task-manager declara todas as capacidades da interface, com fonte): a guarda NÃO RODOU (rc=${_hrc}: $(head -1 "${_err}" 2>/dev/null)) — isto não é aprovação"
+  fi
+  [ "${_err}" = /dev/null ] || rm -f "${_err}"
+  return 0
+}
+check_task_manager_capabilities
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGRA 104 — Executável do adapter e declaração de capacidades listam os mesmos verbos [HARD]
+# previne: executável do task-manager que exerce verbo declarado not_implemented (ou não declarado), e medição adapter: que nenhum executável roda.
+#   DANO MEDIDO (SAC-65, 2026-10-11): nasceu o 1º executável (adapters/linear.py, chamado por tm.sh), e com
+#   ele duas fontes da mesma verdade — a lista de `--capabilities` e o tsv. No 1º estado da branch o
+#   executável implementava 12 verbos que o tsv declarava `unverified`, e o `comment.list` estava
+#   `implemented` sem nada que o executasse; o precedente da classe é o "Bulk-first" do CLAUDE.md (SAC-63).
+#   A guarda roda `<exe> --capabilities` com ambiente LIMPO (sem chave, sem rede) e cobra: verbo listado
+#   declarado ≠ not_implemented; `implemented` com fonte adapter: presente na lista; executável sem tsv ou
+#   mudo reprova. Lógica e teto em task-manager-executable-check.sh.
+check_task_manager_executable() {
+  local helper="${SCRIPT_DIR}/task-manager-executable-check.sh"
+  [ -f "${helper}" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      */fixtures/*) return 0 ;;
+      */utils/task-manager/*|*/task-manager-executable-check.sh) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  local _out _hrc=0 _err
+  _err="$(mktemp 2>/dev/null || echo /dev/null)"
+  if _out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>"${_err}")"; then _hrc=0; else _hrc=$?; fi
+  while IFS=$'\t' read -r _sev _code _path _msg; do
+    [ -n "${_path:-}" ] || continue
+    violation "${_sev:-HARD}" "${REPO_ROOT}/${_path#./}" "REGRA 104 (Executável do adapter e declaração de capacidades listam os mesmos verbos): [${_code}] ${_msg}"
+  done <<< "${_out}"
+  if [ "${_hrc}" -ge 2 ] || { [ "${_hrc}" -ne 0 ] && [ -z "${_out}" ]; }; then
+    violation "HARD" "${REPO_ROOT}/.claude/validation/task-manager-executable-check.sh" "REGRA 104 (Executável do adapter e declaração de capacidades listam os mesmos verbos): a guarda NÃO RODOU (rc=${_hrc}: $(head -1 "${_err}" 2>/dev/null)) — isto não é aprovação"
+  fi
+  [ "${_err}" = /dev/null ] || rm -f "${_err}"
+  return 0
+}
+check_task_manager_executable
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGRA 105 — Script rastreado não chama a API do provedor de task manager por fora do adapter [HARD]
+# previne: o cliente do provedor reescrito fora do adapter (o script avulso da sessão promovido a ops/), que contorna o tm.sh e a declaração de capacidades.
+#   DANO MEDIDO (SAC-75, 2026-10-12): 147 comandos Bash únicos das sessões tocaram host de provedor entre
+#   2026-09-23 e 2026-10-12 (~130 com cliente HTTP), e um deles DEPOIS do tm.sh existir (2026-10-12T03:21,
+#   `python3 - <<'EOF'` com urllib direto no Linear). O veto da sessão é o hook pretooluse-direct-provider-api.sh;
+#   esta regra é a metade do ARQUIVO RASTREADO, que o hook não lê (código de fora do adapter com URL `//<host>` de
+#   provider-hosts.tsv + idioma de rede). Markdown não é julgado: documentar ≠ chamar. Passivo medido na forja:
+#   ZERO, por isso nasce HARD e sem catraca. No derivado (IS_DERIVED) não roda: lá o produto do adotante pode
+#   integrar com o provedor. Lógica e teto em direct-provider-api-check.sh.
+check_direct_provider_api() {
+  local helper="${SCRIPT_DIR}/direct-provider-api-check.sh"
+  [ -f "${helper}" ] || return 0
+  [ "${IS_DERIVED}" -eq 1 ] && return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      */fixtures/*|*.md) return 0 ;;
+    esac
+  fi
+  local _out _hrc=0 _err
+  _err="$(mktemp 2>/dev/null || echo /dev/null)"
+  if _out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>"${_err}")"; then _hrc=0; else _hrc=$?; fi
+  while IFS=$'\t' read -r _sev _code _path _msg; do
+    [ -n "${_path:-}" ] || continue
+    if [ -n "${ONLY_PATH}" ] && [ "${_code}" = "chamada-direta" ]; then
+      case "${ONLY_PATH}" in "${REPO_ROOT}/${_path%:*}"|"${_path%:*}"|*/"${_path%:*}") : ;; *) continue ;; esac
+    fi
+    violation "${_sev:-HARD}" "${REPO_ROOT}/${_path%:*}" "REGRA 105 (Script rastreado não chama a API do provedor de task manager por fora do adapter): [${_code}] ${_path##*:}: ${_msg}"
+  done <<< "${_out}"
+  if [ "${_hrc}" -ge 2 ] || { [ "${_hrc}" -ne 0 ] && [ -z "${_out}" ]; }; then
+    violation "HARD" "${REPO_ROOT}/.claude/validation/direct-provider-api-check.sh" "REGRA 105 (Script rastreado não chama a API do provedor de task manager por fora do adapter): a guarda NÃO RODOU (rc=${_hrc}: $(head -1 "${_err}" 2>/dev/null)) — isto não é aprovação"
+  fi
+  [ "${_err}" = /dev/null ] || rm -f "${_err}"
+  return 0
+}
+check_direct_provider_api
+
+# ===========================================================================
+# REGRA 102 — Chave de frontmatter de agente pertence à allowlist (oficiais + as da casa) [HARD + SOFT]
+# previne: typo de chave de agente (`tool:` no lugar de `tools:`, `modle:`) que o Claude Code ignora em silêncio
+#   (com `tool:`, o agente perde a restrição de ferramentas e herda todas as da sessão, sem erro em lugar nenhum)
+#   DANO MEDIDO (SAC-106, radar E3 r9, 2026-10-11): nenhuma das regras de frontmatter (1, 3, 12, 17, 23) cobrava
+#   chave desconhecida; os 51 agentes usavam 11 chaves fora da tabela oficial em 344 ocorrências, e o --debug da
+#   2.1.296, que nomeia campo não reconhecido, não separava o typo real dessas chaves da casa. A SSOT é
+#   agent-frontmatter-keys.tsv (oficiais da doc + as da casa, cada uma com quem a lê); o juiz, em
+#   agent-frontmatter-keys-check.sh. Passivo medido na forja: ZERO, por isso nasce HARD e sem catraca. No
+#   adotante/porta (IS_DERIVED) sai SOFT: lá o agente pode ser autoria do adotante, com chave própria legítima.
+# ===========================================================================
+check_agent_frontmatter_keys() {
+  local helper="${SCRIPT_DIR}/agent-frontmatter-keys-check.sh"
+  [ -f "${helper}" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      */agents/*.md|*/agent-frontmatter-keys*|*/lint-artifacts.sh) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  local _out _hrc=0 _err _flag=""
+  [ "${IS_DERIVED}" -eq 1 ] && _flag="--derived"
+  _err="$(mktemp 2>/dev/null || echo /dev/null)"
+  if _out="$(bash "${helper}" "${REPO_ROOT}" --tsv ${_flag} 2>"${_err}")"; then _hrc=0; else _hrc=$?; fi
+  while IFS=$'\t' read -r _sev _code _path _msg; do
+    [ -n "${_path:-}" ] || continue
+    if [ "${_sev}" = "HARD" ]; then
+      violation "HARD" "${REPO_ROOT}/${_path#./}" "[${_code}] ${_msg}"
+    else
+      violation "SOFT" "${REPO_ROOT}/${_path#./}" "[${_code}] ${_msg}"
+    fi
+  done <<< "${_out}"
+  # helper >=2 ⇒ declarou que NAO pode julgar; rc!=0 sem linha também (morte calada). Nunca aprovação.
+  if [ "${_hrc}" -ge 2 ] || { [ "${_hrc}" -ne 0 ] && [ -z "${_out}" ]; }; then
+    violation "HARD" "${REPO_ROOT}/.claude/validation/agent-frontmatter-keys-check.sh" "a guarda NÃO RODOU (rc=${_hrc}: $(head -1 "${_err}" 2>/dev/null)) — as chaves de frontmatter dos agentes não foram verificadas; isto não é aprovação"
+  fi
+  [ "${_err}" = /dev/null ] || rm -f "${_err}"
+  return 0
+}
+check_agent_frontmatter_keys
 
 # ===========================================================================
 # SUMÁRIO FINAL

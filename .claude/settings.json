@@ -122,7 +122,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pretooluse-env-guard.sh\""
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pretooluse-env-guard.sh\"",
+            "onFailure": "block"
           }
         ]
       },
@@ -131,11 +132,23 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pretooluse-protect-main.sh\""
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pretooluse-protect-main.sh\"",
+            "onFailure": "block"
           },
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pretooluse-merge-gate.sh\""
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pretooluse-merge-gate.sh\"",
+            "onFailure": "block"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pretooluse-moat-gate.sh\"",
+            "onFailure": "block"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pretooluse-direct-provider-api.sh\"",
+            "onFailure": "block"
           }
         ]
       },
@@ -156,6 +169,7 @@
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/premodelswitch-guard.sh\"",
             "timeout": 5,
+            "onFailure": "block",
             "statusMessage": "Guarda de modelo da sessão (Onion): veta downgrade fora do lineup"
           }
         ]
