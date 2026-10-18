@@ -347,15 +347,22 @@ check_scan_sanity() {
 # deste arquivo, e a regra de uma mensagem sem prefixo é a da função que chamou violation() — a MESMA associação
 # que rules-registry.sh usa (o 1º `nome() {` após o cabeçalho). Mecanismo, não disciplina: quem lê o lint não
 # precisa abrir lint-rules.md para saber de que regra se trata.
-declare -A RULE_TITLE=() RULE_OF_FUNC=(); RULE_MAP_BUILT=0
+declare -A RULE_TITLE=() RULE_OF_FUNC=() RULE_APPLIES=() RULE_NA_SEEN=(); RULE_MAP_BUILT=0; NA_COUNT=0; NA_RULES=""
+
 _rule_map_build() {
   RULE_MAP_BUILT=1
-  local line n t fn pend=""
+  local line n t fn pend="" cur=""
   while IFS= read -r line; do
     case "${line}" in
       "# REGRA "[0-9]*" — "*)
         n="${line#\# REGRA }"; n="${n%% *}"; t="${line#*— }"; t="${t% \[*}"
-        RULE_TITLE["${n}"]="${t}"; pend="${n}" ;;
+        RULE_TITLE["${n}"]="${t}"; pend="${n}"; cur="${n}" ;;
+      "# aplica-se:"*)
+        # APLICABILIDADE POR PAPEL (SAC-149): os papéis em que a regra tem OBJETO, declarados no docstring
+        # (o rules-registry.sh os valida e projeta). Fora deles a regra sai como "não se aplica", nunca SOFT.
+        # só no DOCSTRING (antes do 1º `nome() {` da regra), como o rules-registry.sh lê: aceitar a linha dentro
+        # da função deixava uma 2ª declaração calar a regra no core com o registro verde (passada adversarial)
+        [ -n "${pend}" ] && { t="${line#\# aplica-se:}"; t="${t//,/ }"; RULE_APPLIES["${pend}"]="$(printf '%s' "${t}" | tr -s ' ')"; } ;;
       [a-z_]*"() {"*)
         if [ -n "${pend}" ]; then fn="${line%%(*}"; RULE_OF_FUNC["${fn}"]="${pend}"; pend=""; fi ;;
     esac
@@ -372,6 +379,33 @@ _rule_label() {   # $1 = mensagem · $2 = função chamadora → mensagem com "R
     "REGRA ${n}"*)   printf '%s' "REGRA ${n} (${t})${rule#REGRA ${n}}" ;;      # número sem título → insere
     *)               printf '%s' "REGRA ${n} (${t}): ${rule}" ;;               # sem prefixo → prefixa pela função
   esac
+}
+
+# ══ NÃO SE APLICA — aplicabilidade por papel DECLARADA (SAC-149, 2026-10-15) ═══════════════════════════
+# Medido no --update de um adotante: as REGRAS 85 e 92 saíam SOFT "não pôde julgar" porque o objeto delas (o
+# members.yaml, registro do core) não viaja — ruído que ensina a ler SOFT como ruído, e a mensagem da 85 ainda
+# mandava rodar um ops/ que o adotante não tem. O recorte por MENSAGEM abaixo (`_without_object_for_role`) só
+# rebaixa HARD para SOFT; a regra que NÃO TEM OBJETO no papel declara isso no docstring (`# aplica-se: source`),
+# e aqui ela NÃO RODA e sai contada à parte. Na fonte (`source`, sem kind: door) toda regra aplica: o
+# rules-registry.sh recusa `# aplica-se:` sem `source`, então nenhuma regra fica sem julgar no core.
+_rule_na_here() {  # $1=número da REGRA → 0 se ela NÃO se aplica ao papel deste repo
+  [ "${RULE_MAP_BUILT}" = 1 ] || _rule_map_build
+  local _ap="${RULE_APPLIES[$1]:-}"
+  [ -n "${_ap}" ] || return 1
+  case " ${_ap} " in *" $(_role) "*) return 1 ;; esac
+  return 0
+}
+_rule_na_record() {  # $1=número → conta UMA vez e imprime a linha "NÃO SE APLICA"
+  [ -n "${RULE_NA_SEEN[$1]:-}" ] && return 0
+  RULE_NA_SEEN["$1"]=1; NA_COUNT=$(( NA_COUNT + 1 )); NA_RULES="${NA_RULES:+${NA_RULES}, }$1"
+  echo "NÃO SE APLICA: REGRA $1 (${RULE_TITLE[$1]:-?}) — papel '$(_role)' fora de [${RULE_APPLIES[$1]# }] (declarado no docstring; não é aprovação nem aviso)"
+}
+# primeira linha de uma guarda com `# aplica-se:` — a guarda não roda fora do papel dela
+_na_for_role() {
+  [ "${RULE_MAP_BUILT}" = 1 ] || _rule_map_build
+  local _n="${RULE_OF_FUNC[${FUNCNAME[1]:-}]:-}"
+  [ -n "${_n}" ] && _rule_na_here "${_n}" || return 1
+  _rule_na_record "${_n}"; return 0
 }
 
 # ══ RECORTE POR PAPEL — "não pude julgar" não é a mesma coisa em todo repo ════════════════════
@@ -442,6 +476,9 @@ violation() {
   local severity="$1"   # HARD | SOFT
   local file="$2"
   local rule="$3"
+  local _vn=""
+  if [[ "${rule}" =~ ^REGRA\ ([0-9]+) ]]; then _vn="${BASH_REMATCH[1]}"; else [ "${RULE_MAP_BUILT}" = 1 ] || _rule_map_build; _vn="${RULE_OF_FUNC[${FUNCNAME[1]:-}]:-}"; fi
+  if [ -n "${_vn}" ] && _rule_na_here "${_vn}"; then _rule_na_record "${_vn}"; return 0; fi
 
   if [ "${severity}" = "HARD" ] && _without_object_for_role "${rule}"; then
     severity="SOFT"
@@ -2634,6 +2671,7 @@ check_kg_read_index_sync() {
 # ===========================================================================
 # REGRA 85 — Porta pública espelha o core, com catraca [SOFT]
 # previne: a porta MENTIR sobre o que o core é, por falta de re-materialização
+# aplica-se: source
 #   O `materialize-door.sh` resolve o COMO se publica. O QUANDO era uma frase —
 #   "toda leva mergeada em main que toque a superfície que viaja" — e frase não
 #   dispara. Medido 2026-09-17: `onion-standalone` estava 377 commits atrás na
@@ -2650,6 +2688,7 @@ check_kg_read_index_sync() {
 # ===========================================================================
 
 check_door_staleness() {
+  _na_for_role && return 0
   local sc="${SCRIPT_DIR}/door-staleness-check.sh"
   [ -f "${sc}" ] || return 0
   local out rc=0
@@ -2814,6 +2853,7 @@ check_announce_zero_claim() {
 # ===========================================================================
 # REGRA 92 — Papel da porta no registro concorda com o CARIMBO dela [HARD + SOFT]
 # previne: o materializador ler o papel ERRADO e cortar maquinaria da porta pública
+# aplica-se: source
 #   Duas fontes para o mesmo fato — `role:` no `members.yaml` (anotado à mão) e
 #   `role:` no `.claude/.onion-version` do clone (carimbado pela materialização) —
 #   e nada cobrava que concordassem. Medido em 2026-09-30: o registro dizia
@@ -2832,6 +2872,7 @@ check_announce_zero_claim() {
 #   declara NÃO-MEDIDO, nunca passa em silêncio.
 # ===========================================================================
 check_door_role_parity() {
+  _na_for_role && return 0
   local sc="${SCRIPT_DIR}/door-role-parity-check.sh"
   [ -f "${sc}" ] || return 0
   local out rc=0
@@ -5827,6 +5868,41 @@ check_door_leak_scan() {
 }
 check_door_leak_scan
 
+# ─────────────────────────────────────────────────────────────────────────────
+# REGRA 107 — Adapter SDAAL declara onde o seu contrato é cobrado [HARD + SOFT]
+# previne: adapter em prosa cujo contrato só vale se a sessão lembrar — nenhum executável, hook ou validador o cobra.
+#   DANO MEDIDO (SAC-142, 2026-10-15, decisão do maestro D_COBRAR_NA_SAIDA_E_NO_TRANSPORTE): das 5 raízes SDAAL só o
+#   task-manager declarava contrato legível por máquina; o forge não cobrava a criação de PR, e trust e
+#   de-identification não tinham cobrança nenhuma no ponto de uso. Cada raiz declara, no irmão
+#   .claude/utils/<r>/enforcement.tsv, a forma de cobrança de cada adapter (exe | hook | validator | none com gatilho); raízes e
+#   adapters são DERIVADOS do filesystem (interface.md + adapters/*.md, auxiliar marcado), nunca uma lista digitada.
+#   O passivo de none: sai SOFT. Lógica e teto em adapter-enforcement-check.sh. Roda também no derivado (os utils
+#   viajam); lá, hook não registrado e validador fora do lint descem a SOFT.
+check_adapter_enforcement() {
+  local helper="${SCRIPT_DIR}/adapter-enforcement-check.sh"
+  [ -f "${helper}" ] || return 0
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      */fixtures/*) return 0 ;;
+      */utils/*/enforcement.tsv|*/utils/*/adapters/*|*/adapter-enforcement-check.sh|*/settings.json) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  local _out _hrc=0 _err
+  _err="$(mktemp 2>/dev/null || echo /dev/null)"
+  if _out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>"${_err}")"; then _hrc=0; else _hrc=$?; fi
+  while IFS=$'\t' read -r _sev _code _path _msg; do
+    [ -n "${_path:-}" ] || continue
+    violation "${_sev:-HARD}" "${REPO_ROOT}/${_path#./}" "REGRA 107 (Adapter SDAAL declara onde o seu contrato é cobrado): [${_code}] ${_msg}"
+  done <<< "${_out}"
+  if [ "${_hrc}" -ne 0 ]; then
+    violation "HARD" "${REPO_ROOT}/.claude/validation/adapter-enforcement-check.sh" "REGRA 107 (Adapter SDAAL declara onde o seu contrato é cobrado): a guarda NÃO RODOU (rc=${_hrc}: $(head -1 "${_err}" 2>/dev/null)) — isto não é aprovação"
+  fi
+  [ "${_err}" = /dev/null ] || rm -f "${_err}"
+  return 0
+}
+check_adapter_enforcement
+
 # ===========================================================================
 # REGRA 102 — Chave de frontmatter de agente pertence à allowlist (oficiais + as da casa) [HARD + SOFT]
 # previne: typo de chave de agente (`tool:` no lugar de `tools:`, `modle:`) que o Claude Code ignora em silêncio
@@ -5869,6 +5945,36 @@ check_agent_frontmatter_keys() {
 check_agent_frontmatter_keys
 
 # ===========================================================================
+# REGRA 108 — Pin do grafo de adoção concorda com o carimbo [HARD + SOFT]
+# previne: o grafo que o warm-up manda ler PRIMEIRO mentir sobre a versão do Onion instalada
+#   O nó ONION_INSTALLED da semente do KG (docs/onion/graph/onion-adoption.kg.yaml) diz o pin instalado; o
+#   `.claude/.onion-version` diz o mesmo fato. O --update re-carimbava só o segundo, e carimbar o primeiro
+#   era passo à mão fora do procedimento (SAC-149, 2026-10-15: 2ª ocorrência medida no mesmo adotante).
+#   A cura é de ESCRITOR ÚNICO — o write-stamp.sh chama utils/kg/stamp-adoption-graph-pin.sh ao fim de todo
+#   carimbo de adoção — e esta é a catraca: divergência é HARD. Pin ilegível (nó sem x_pin e label editado
+#   pelo dono, sem "pin `<sha>`") é SOFT nomeado, nunca verde. Sem a semente (o core, a porta, o adotante
+#   que nunca a recebeu) não há objeto: nada a julgar.
+# ===========================================================================
+check_adoption_graph_pin() {
+  [ -f "${REPO_ROOT}/docs/onion/graph/onion-adoption.kg.yaml" ] || return 0
+  [ -f "${REPO_ROOT}/.claude/.onion-version" ] || return 0
+  local h="${REPO_ROOT}/.claude/utils/kg/stamp-adoption-graph-pin.sh" out rc=0
+  if [ ! -f "${h}" ]; then
+    violation "SOFT" "docs/onion/graph/onion-adoption.kg.yaml" "a guarda não pôde julgar: .claude/utils/kg/stamp-adoption-graph-pin.sh ausente — o pin do grafo de adoção NÃO foi comparado com o carimbo"
+    return 0
+  fi
+  out="$(bash "${h}" "${REPO_ROOT}" --check 2>&1)" || rc=$?
+  case "${rc}" in
+    0) : ;;
+    1) violation "HARD" "docs/onion/graph/onion-adoption.kg.yaml" "${out#stamp-adoption-graph-pin: } — re-carimbe pelo escritor do pin: bash .claude/utils/kg/stamp-adoption-graph-pin.sh ." ;;
+    3) violation "SOFT" "docs/onion/graph/onion-adoption.kg.yaml" "${out#stamp-adoption-graph-pin: } — grave o x_pin com bash .claude/utils/kg/stamp-adoption-graph-pin.sh ." ;;
+    *) violation "SOFT" "docs/onion/graph/onion-adoption.kg.yaml" "a guarda não pôde julgar (rc=${rc}): ${out:0:200}" ;;
+  esac
+  return 0
+}
+check_adoption_graph_pin
+
+# ===========================================================================
 # SUMÁRIO FINAL
 # ===========================================================================
 _LINT_SUMMARY_REACHED=1   # daqui para baixo, a saida E veredito (ver o trap no topo)
@@ -5877,6 +5983,7 @@ echo "=== Sumário ==="
 echo "  Violações HARD : ${HARD_COUNT}"
 echo "  Violações SOFT : ${SOFT_COUNT}"
 echo "  Total          : ${TOTAL_COUNT}"
+[ "${NA_COUNT}" -gt 0 ] && echo "  Não se aplica  : ${NA_COUNT} (REGRA ${NA_RULES} — papel '$(_role)'; declarado em '# aplica-se:', fora do total)"
 echo ""
 
 if [ "${HARD_COUNT}" -eq 0 ]; then

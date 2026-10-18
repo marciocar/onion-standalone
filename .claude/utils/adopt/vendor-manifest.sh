@@ -76,6 +76,7 @@ while [ $# -gt 0 ]; do
     --repo) REPO="${2:-}"; shift 2 ;;
     --kind) KIND="${2:-}"; shift 2 ;;
     --emit-scrub-roots) MODE="scrub"; shift ;;
+    --retired-excludes) MODE="retired"; shift ;;
     --check-bundle) MODE="check"; BUNDLE="${2:-}"; shift 2 ;;
     --stub-baselines) MODE="stub"; BUNDLE="${2:-}"; shift 2 ;;
     --list) MODE="list"; ROLE="${2:-}"; shift 2 ;;
@@ -103,7 +104,15 @@ esac
 # ── A LISTA, por papel ────────────────────────────────────────────────────────────────────────
 # BASE: o que TODO papel recebe. Framework + doutrina; nada de biografia.
 _base=(.claude/agents .claude/commands .claude/skills .claude/utils .claude/validation .claude/hooks
-       .claude/rules .claude/workflows docs/meta-specs docs/knowledge-base docs/sdaal)
+       .claude/rules .claude/workflows docs/meta-specs docs/knowledge-base docs/sdaal vendor/kg-ssot)
+# ⚠️ `vendor/kg-ssot` É FECHAMENTO DE DEPENDÊNCIA, não doutrina nova (SAC-149, medido em 2026-10-15 no
+#    `--update` de um adotante para 7a50fc14): o `kg-contract-check.sh` viajava e o leitor do contrato
+#    que ele importa (vendor/kg-ssot/tools/kg_gate.py) NÃO — lá ele saía SEMPRE rc 2 ("vendor do contrato
+#    ausente"), e a lente kg-grammar, o /meta:decide e o /meta:cc-update mandam rodá-lo com rc 0. O que
+#    viaja leva o que cita. Viaja a RELEASE inteira, e não um recorte de tools/ + spec/: o
+#    `.kg-ssot-version` lista o sha256 de cada arquivo dela, e um recorte faria o carimbo do vendor mentir
+#    sobre o que o adotante tem. LICENSE e NOTICE (Apache-2.0) vão dentro dela, como a licença exige.
+#    A prova é a família `adopter_shape` da bancada: monta um adotante com ESTE corte e roda o contrato.
 # ⚠️ A LICENÇA NÃO ESTÁ AQUI, E AGORA ISSO É DESENHO — não mais um defeito aberto (curado 2026-09-15).
 #
 # Ela chega ao alvo pelo `emit-licenses.sh`, com NOME PRÓPRIO: `LICENSE-ONION` e `LICENSE-ONION-DOCS`.
@@ -616,6 +625,44 @@ fi
 # este é sobre QUEM o bundle nomeia, e a resposta é a mesma nos três papéis.
 _IDENTITY_EXCLUDES=(':(exclude).claude/utils/federation-transport/jwks/*.pem')
 
+# ── O CONTRATO DO .kg.yaml É DO ALVO QUANDO O ALVO JÁ TEM O SEU (SAC-149, passada adversarial de 2026-10-15) ──
+# `vendor/kg-ssot` viaja como fechamento de dependência do kg-contract-check.sh. Mas há adotante que vendoriza o
+# KG-SSOT POR CONTA PRÓPRIA, num pin dele (medido: um adotante em 4.7.2, 316 arquivos, contra o 4.7.3 do core): o
+# merge de três vias do --update dava 13 conflitos, e cada update passaria a sobrescrever a escolha do dono. E o
+# próprio PRODUTO KG-SSOT (tools/kg_validate.py na raiz) receberia uma cópia vendorizada de si mesmo, que o
+# selador do /meta:decide preferiria ao leitor dele. Com ONION_TARGET apontando o alvo, o vendor NÃO viaja quando
+# o alvo é o produto ou já tem vendor/kg-ssot que NÃO veio pelo Onion (a branch onion/vendor dele não o tem).
+# O kg-contract-check.sh lê o vendor do alvo do mesmo jeito: o fechamento continua valendo.
+_target_owns_contract() {
+  local _t="${ONION_TARGET:-}"
+  [ -n "${_t}" ] && [ -d "${_t}" ] || return 1
+  [ -f "${_t}/tools/kg_validate.py" ] && return 0
+  [ -e "${_t}/vendor/kg-ssot" ] || return 1
+  git -C "${_t}" cat-file -e "onion/vendor:vendor/kg-ssot/.kg-ssot-version" 2>/dev/null && return 1
+  return 0
+}
+
+# ── CORE-ONLY NÃO VIAJA PARA ADOÇÃO, em NENHUM papel (2026-10-17, E_SKILL_CORE_ONLY_VIAJOU) ─────────
+# A skill onion-publish conduz o /meta:publish, que só roda na FONTE (role: source): o motor dela, o
+# publicador de portas, é core-only e não vendoriza. Medido: o manifesto de papel adopted, extraído por git archive,
+# entregava .claude/skills/onion-publish, porque o `_role_cut` só a corta em standalone|plugins — a
+# skill chegava MORTA a todo adotante adopted e hub. Fica FORA do `_role_cut` de propósito: um corte não
+# vazio ali LIGA o corte de comandos do roles.yaml (`_emit_command_excludes`), que tiraria a meta-fábrica
+# do adotante, decisão separada que ninguém tomou. Vale só no destino adoção: a porta onion-core é o
+# core das empresas e leva a skill (o materializador escolhe o papel; a doutrina das portas decide).
+# 2026-10-18: o comando /meta:publish e as duas peças que só existem por ele (a lente e a doutrina, que
+# a própria lente declara "seguem o comando"). Os companheiros não saem sozinhos aqui: o derivador
+# (_emit_companion_excludes) só roda quando há corte de PAPEL, e este corte não é de papel.
+_CORE_ONLY_ADOPTION_EXCLUDES=(':(exclude).claude/skills/onion-publish'
+                              ':(exclude).claude/commands/meta/publish.md'
+                              ':(exclude).claude/rules/publish-lens.md'
+                              ':(exclude).claude/commands/common/prompts/publish-doctrine.md')
+# --retired-excludes: o vendor-branch.sh pergunta QUAIS exclusões são APOSENTADORIA (o core deixou de
+# mandar algo que mandava) para tirá-las só do lado antigo do delta de remoção. As outras exclusões
+# (identidade, contrato do próprio alvo, corte de papel) têm outro significado e nunca entram aqui: medir o
+# lado antigo sem elas estenderia a remoção do --update aos cortes de papel, decisão separada.
+if [ "${MODE}" = "retired" ]; then printf '%s\n' "${_CORE_ONLY_ADOPTION_EXCLUDES[@]}"; exit 0; fi
+
 if [ "${MODE}" = "manifest" ]; then
   git -C "${REPO}" rev-parse HEAD >/dev/null 2>&1 || {
     echo "ERRO: '${REPO}' não é repositório git com HEAD — o manifesto de transporte é declarado ∩ HEAD; use --emit-scrub-roots para a superfície declarada" >&2; exit 2; }
@@ -629,6 +676,7 @@ if [ "${MODE}" = "manifest" ]; then
     done
   fi
   while IFS= read -r local_p; do [ -n "${local_p}" ] && _spec+=("${local_p}"); done < <(_emit_role_excludes "${REPO}" "${ROLE}")
+  [ "${KIND}" = adoption ] && _spec+=("${_CORE_ONLY_ADOPTION_EXCLUDES[@]}")   # antes dos companheiros: eles derivam do que já saiu
   # o rc do corte de comandos É LIDO: `< <(…)` o engolia, e foi assim que o fail-open passou calado.
   _cmd_out="$(_emit_command_excludes "${REPO}" "${ROLE}")" || exit 3
   while IFS= read -r local_p; do [ -n "${local_p}" ] && _spec+=("${local_p}"); done <<< "${_cmd_out}"
@@ -666,6 +714,10 @@ if [ "${MODE}" = "manifest" ]; then
   # Só AGORA a exclusão de identidade entra: ela subtrai superfície, e subtrair de um conjunto
   # vazio de positivos é o que produzia o "copia tudo".
   _spec+=("${_IDENTITY_EXCLUDES[@]}")
+  if _target_owns_contract; then
+    _spec+=(':(exclude)vendor/kg-ssot')
+    echo "AVISO: o alvo (${ONION_TARGET}) já tem o próprio contrato do .kg.yaml (vendor/kg-ssot fora da linha do Onion, ou o produto KG-SSOT) — o do core NÃO viaja; o kg-contract-check.sh lê o do alvo." >&2
+  fi
 
   # `git ls-tree` recusa magia de pathspec; `git diff-tree` (comando de diff) a aceita — contra a
   # ÁRVORE VAZIA ele lista exatamente os arquivos que o `git archive` copiaria.
