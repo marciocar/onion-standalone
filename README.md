@@ -33,4 +33,4 @@ Depois, `/warm-up` para o contexto e `/onion` para a orientação. As guardas ro
 
 ---
 
-Materializado do core no pin `4722d1af78c9` · papel `standalone`.
+Materializado do core no pin `9648da70bdb0` · papel `standalone`.

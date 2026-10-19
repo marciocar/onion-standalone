@@ -14030,6 +14030,15 @@ run_prettierignore_selftests() {
   else record_fail "prettierignore: complete" "mutou um alvo já completo"; fi
   rm -rf "${d}"
 
+  # (d2) complete GRANDE (>64 KB depois dos caminhos) → no-op. Força deterministicamente o EPIPE que o
+  # `printf | grep -q` sob pipefail sofria só às vezes no CI: o grep acha cedo, o printf fica escrevendo.
+  d="$(mktemp -d)"; { cat "${tpl}"; for _i in $(seq 1 3000); do printf 'padding/linha-%05d/arquivo-qualquer.md\n' "${_i}"; done; } > "${d}/.prettierignore"
+  before="$(cksum < "${d}/.prettierignore")"; bash "${helper}" "${d}" >/dev/null 2>&1
+  after="$(cksum < "${d}/.prettierignore")"
+  if [ "${before}" = "${after}" ]; then record_pass "prettierignore: complete GRANDE é no-op (sem EPIPE sob pipefail)"
+  else record_fail "prettierignore: complete GRANDE" "mutou um alvo já completo (EPIPE do printf|grep -q sob pipefail)"; fi
+  rm -rf "${d}"
+
   # (e) complete-no-header → 5 paths soltos (espelha um caso real de campo): no-op, NÃO injeta cabeçalho órfão
   d="$(mktemp -d)"
   # (vendor/kg-ssot/ entrou no template em 2026-10-15, SAC-149: o alvo "completo" passou a ter os 6 caminhos)
@@ -34471,6 +34480,27 @@ run_door_role_parity_selftests() {
   if [ "${_drpa_rc}" = "1" ] && grep -q 'adotante/CARIMBO-AUSENTE' <<< "${_drpa_out}"; then
     record_pass "door-role-parity: (g5) adotante com clone e SEM carimbo é nomeado (não passa calado)"
   else record_fail "door-role-parity: (g5)" "clone sem carimbo passou calado (rc=${_drpa_rc}): $(_emit "${_drpa_out}" | head -c 200)"; fi
+  # (g6) O CARIMBO É O DA INTEGRAÇÃO (2026-10-19, medido num adotante real): clone vivo e adotado, parado numa
+  # branch de trabalho sem `.claude/` rastreado, com o carimbo na `develop`. A guarda acusava
+  # CARIMBO-AUSENTE num membro em dia. Ler a integração cala (g6); sem carimbo em lugar nenhum, segue
+  # nomeado (g6b). Voltar a ler só a árvore de trabalho reprova (g6).
+  local gw="${d}/clone-git"; rm -rf "${gw}"; mkdir -p "${gw}/.claude"
+  git -C "${gw}" init -q -b develop 2>/dev/null || { git -C "${gw}" init -q && git -C "${gw}" checkout -q -b develop; }
+  printf 'role: adopted\n' > "${gw}/.claude/.onion-version"
+  git -C "${gw}" add -A && git -C "${gw}" -c user.email=t@t -c user.name=t commit -qm carimbo
+  git -C "${gw}" checkout -q --orphan trabalho && git -C "${gw}" rm -rqf . && rm -rf "${gw}/.claude"
+  printf 'x\n' > "${gw}/x" && git -C "${gw}" add x && git -C "${gw}" -c user.email=t@t -c user.name=t commit -qm trabalho
+  { echo 'members:'; echo '  - id: adotante-de-teste'; echo '    kind: adopter'
+    echo '    role: standalone'; echo "    local_path: \"${gw}\"" ; } > "${d}/docs/evolution/federation/members.yaml"
+  if _drpa_out="$(bash "${sut}" "${d}" 2>&1)"; then _drpa_rc=0; else _drpa_rc=$?; fi
+  if [ "${_drpa_rc}" = "0" ] && ! grep -q 'adotante/' <<< "${_drpa_out}"; then
+    record_pass "door-role-parity: (g6) clone em branch de trabalho SEM carimbo, carimbo na integração → lido de lá, SILENCIOSO"
+  else record_fail "door-role-parity: (g6)" "acusou membro vivo pelo checkout da branch de trabalho (rc=${_drpa_rc}): $(_emit "${_drpa_out}" | head -c 200)"; fi
+  git -C "${gw}" branch -qD develop
+  if _drpa_out="$(bash "${sut}" "${d}" 2>&1)"; then _drpa_rc=0; else _drpa_rc=$?; fi
+  if [ "${_drpa_rc}" = "1" ] && grep -q 'adotante/CARIMBO-AUSENTE' <<< "${_drpa_out}"; then
+    record_pass "door-role-parity: (g6b) clone git sem carimbo nem na árvore nem na integração segue NOMEADO"
+  else record_fail "door-role-parity: (g6b)" "clone sem carimbo em lugar nenhum passou calado (rc=${_drpa_rc}): $(_emit "${_drpa_out}" | head -c 200)"; fi
   mkdir -p "${d}/porta/.claude"
 
   # (h) YAML LEGAL com ASPAS não pode cegar a guarda. A 1ª versão lia por regex: `kind: "door"` fazia a

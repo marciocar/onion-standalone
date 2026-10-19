@@ -47,8 +47,11 @@ import subprocess
 import sys
 
 sys.dont_write_bytecode = True  # num vendor, rodar o gate não pode sujar o diretório carimbado
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import kg_validate  # noqa: E402
+if __package__:  # no pacote kg_ssot, o vizinho vem pelo pacote, sem mexer no sys.path de quem importa
+    from . import kg_validate
+else:  # script ou vendor
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    import kg_validate  # noqa: E402
 
 DEFAULT_BASELINE = ".kg-ssot/gate.json"
 DEFAULT_EXCLUDE = ("*/fixtures/*", "docs/materials/*")
@@ -220,6 +223,21 @@ def read_base(path):
     return base
 
 
+def _utf8_stdio():
+    """A saída que vai para pipe ou arquivo sai em UTF-8 (no Windows, o padrão seria cp1252, que derruba o ✓ e entrega
+    a quem consome o JSON outra codificação); no terminal, fica a do console, trocando o caractere que ela não tem."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                tty = stream.isatty()
+            except ValueError:
+                continue
+            if tty:
+                stream.reconfigure(errors="replace")
+            else:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", default=".", help="o repo cujos grafos são medidos (default: .)")
@@ -235,6 +253,7 @@ def main(argv=None):
                     help="com --update: troca a granularidade da dívida SHOULD (graph, o padrão, ou node); sem ela, vale"
                          " a da base")
     args = ap.parse_args(argv)
+    _utf8_stdio()
     if args.granularity and not args.update:
         print("GATE QUEBRADO  --granularity só vale com --update (a base lembra a granularidade)")
         return 2
