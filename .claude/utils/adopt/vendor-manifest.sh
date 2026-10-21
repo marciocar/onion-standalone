@@ -552,7 +552,7 @@ if [ "${MODE}" = "list" ]; then
     docs       "$(_count '^docs/')" \
     total      "$(grep -c . <<< "${_lfiles}" || true)"
   # O MINI É ALLOWLIST: o que os arquivos dele citam e não viaja é ponteiro morto na porta didática.
-  # Desde a F5 (SAC-94) o detector é UM SÓ, o door-mini-check.sh — o mesmo que o motor do /meta:publish
+  # Desde a F5 (SAC-94) o detector é UM SÓ, o door-mini-check.sh — o mesmo que o motor do /meta:publish (core-only)
   # roda no bundle montado. Aqui ele mede uma montagem temporária do HEAD (manifesto + overlays), sem a
   # conferência de allowlist exata (que só faz sentido no que o materializador escreveu). Até a F5 a
   # detecção vivia inline aqui, e uma segunda cópia do detector seria a duplicação que este arquivo
@@ -569,7 +569,7 @@ if [ "${MODE}" = "list" ]; then
         _dmo="$(bash "${_dmc}" --bundle "${_mt}" --source "${REPO}" --no-exact 2>&1)" || _dmrc=$?
         case "${_dmrc}" in
           0) printf '%s\n' "${_dmo}" | sed 's/^/── /' ;;
-          1) echo "AVISO: o mini, montado do HEAD com os overlays, tem achado(s) que o motor do /meta:publish REPROVA:" >&2
+          1) echo "AVISO: o mini, montado do HEAD com os overlays, tem achado(s) que o motor do /meta:publish (core-only) REPROVA:" >&2
              printf '%s\n' "${_dmo}" >&2 ;;
           *) echo "AVISO: door-mini-check não mediu (rc=${_dmrc}): ${_dmo:0:200}" >&2 ;;
         esac
@@ -643,20 +643,29 @@ _target_owns_contract() {
 }
 
 # ── CORE-ONLY NÃO VIAJA PARA ADOÇÃO, em NENHUM papel (2026-10-17, E_SKILL_CORE_ONLY_VIAJOU) ─────────
-# A skill onion-publish conduz o /meta:publish, que só roda na FONTE (role: source): o motor dela, o
+# A skill onion-publish conduz o /meta:publish (core-only), que só roda na FONTE (role: source): o motor dela, o
 # publicador de portas, é core-only e não vendoriza. Medido: o manifesto de papel adopted, extraído por git archive,
 # entregava .claude/skills/onion-publish, porque o `_role_cut` só a corta em standalone|plugins — a
 # skill chegava MORTA a todo adotante adopted e hub. Fica FORA do `_role_cut` de propósito: um corte não
 # vazio ali LIGA o corte de comandos do roles.yaml (`_emit_command_excludes`), que tiraria a meta-fábrica
 # do adotante, decisão separada que ninguém tomou. Vale só no destino adoção: a porta onion-core é o
 # core das empresas e leva a skill (o materializador escolhe o papel; a doutrina das portas decide).
-# 2026-10-18: o comando /meta:publish e as duas peças que só existem por ele (a lente e a doutrina, que
+# 2026-10-18: o comando /meta:publish (core-only) e as duas peças que só existem por ele (a lente e a doutrina, que
 # a própria lente declara "seguem o comando"). Os companheiros não saem sozinhos aqui: o derivador
 # (_emit_companion_excludes) só roda quando há corte de PAPEL, e este corte não é de papel.
 _CORE_ONLY_ADOPTION_EXCLUDES=(':(exclude).claude/skills/onion-publish'
                               ':(exclude).claude/commands/meta/publish.md'
                               ':(exclude).claude/rules/publish-lens.md'
-                              ':(exclude).claude/commands/common/prompts/publish-doctrine.md')
+                              ':(exclude).claude/commands/common/prompts/publish-doctrine.md'
+                              ':(exclude).claude/validation/claude-md-size-ceiling.txt'
+                              ':(exclude).claude/utils/kg/kg-migrate-v3.py')
+# 2026-10-20 (D_U1_MIGRADOR_NO_KG_SSOT): o kg-migrate-v3.py é o migrador do corpus DO CORE (routing TSV, planilhas
+# julgadas, METHOD_CLASSES fixo no código) e viajava para todo adotante, onde nenhum corpus tem aquela forma. Um
+# hub migrou o próprio corpus ao contrato v4 à mão sem achá-lo (sinal de 2026-10-20). O migrador de adotante nasce
+# no kg-ssot (kg_migrate.py + perfil); este sai da adoção e o --update o remove de quem já o tinha (--retired-excludes).
+# 2026-10-19 (D_TETO_NAO_VIAJA_NO_TRANSPORTE): o teto em bytes do CLAUDE.md é o número DESTE repositório;
+# no adotante ele não teria objeto (o lint se cala em papel derivado) e diria um tamanho que não é o dele.
+# A guarda (claude-md-size-check.sh) viaja e, sem o arquivo de teto, cala por desenho.
 # --retired-excludes: o vendor-branch.sh pergunta QUAIS exclusões são APOSENTADORIA (o core deixou de
 # mandar algo que mandava) para tirá-las só do lado antigo do delta de remoção. As outras exclusões
 # (identidade, contrato do próprio alvo, corte de papel) têm outro significado e nunca entram aqui: medir o

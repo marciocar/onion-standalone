@@ -204,7 +204,7 @@ SELFTEST_LOCAL=0; SELFTEST_FULL="${ONION_SELFTEST_FULL:-0}"; SELFTEST_LOCAL_WHY=
 SELFTEST_FIXTURES_LANE="${ONION_SELFTEST_FIXTURES_LANE:-}"
 # papel do repo (core | adopted): lido do stamp; ausente = core. Famílias/fixtures core-only pulam com ⊘ no adotante.
 SELFTEST_ROLE="$(awk -F': *' '/^role:/{print $2; exit}' "${REPO_ROOT}/.claude/.onion-version" 2>/dev/null || true)"
-SELFTEST_CORE_ONLY_FAMILIES="testing_state,ci_evidence,selftest_series,harness_inventory,resolve_target,kg_coverage,backlog_projection,radar_staleness,members_registry,research_lens,research_workflow,reconcile_inputs,regen_baselines,capability,role_bundle,outbox_channel,moat_boundary,moat_gate,a2a_invite_live,a2a_queue_live,bridge_hardening,materialize_repo,rules_registry,ops_citation_travel,gitattributes_eol,eol_gitattributes"
+SELFTEST_CORE_ONLY_FAMILIES="testing_state,ci_evidence,selftest_series,harness_inventory,resolve_target,kg_coverage,backlog_projection,radar_staleness,members_registry,research_lens,research_workflow,reconcile_inputs,regen_baselines,capability,role_bundle,outbox_channel,moat_boundary,moat_gate,a2a_invite_live,a2a_queue_live,bridge_hardening,stt_service,materialize_repo,rules_registry,ops_citation_travel,gitattributes_eol,eol_gitattributes,kg_migrate_v3"
 # HERMÉTICA POR CONSTRUÇÃO (mesma doutrina do unset de GIT_DIR acima): as variáveis de worker foram CONSUMIDAS;
 # se ficassem exportadas, uma família que invoca a bancada (selftest_lanes) herdaria fila/shard/child do pai e a
 # bancada aninhada viraria um worker mudo — foi o que matou o worker 4 no 3º dogfood (2026-09-03).
@@ -384,15 +384,24 @@ _family() {
   if [ -n "${SELFTEST_FAMILIES}" ]; then
     case ",${SELFTEST_FAMILIES}," in *",${name},"*) ;; *) return 0 ;; esac
   fi
-  # FILA (faixa paralela): cada worker percorre o script e REIVINDICA a família com mkdir atômico; quem pegou
+  # FILA (faixa paralela): cada worker percorre o script e REIVINDICA a família pelo open exclusivo do bash (noclobber); quem pegou
   # uma pesada fica para trás e os outros seguem — balanceamento dinâmico sem tabela de tempos. `fixtures`
   # é fatiada (shard) e roda em todos. Ao terminar, marca done/: o pai acusa reivindicada-sem-done.
   # CORE-ONLY por DADO (Q_SELFTEST_VENDORIZADO_INSATISFAZIVEL_NO_ADOTANTE, cura (a), 2026-09-03): mapa família-a-família na
   # cópia de um adotante greenfield com o .claude/ atual e role: adopted — 118 passam; estas 12 reprovam porque testam
   # SSOT/maquinaria que SÓ o core tem (radar-baselines, members.yaml, radar-sources, marketplace, moat, outbox, bundling,
   # registro de regras). No adotante pulam com ⊘ VISÍVEL; no core rodam. Re-medir ao adicionar família nova.
+  # ⚠️ A REIVINDICAÇÃO É O `open(O_CREAT|O_EXCL)` DO PRÓPRIO BASH (noclobber), NUNCA O BINÁRIO `mkdir`.
+  #    Medido em 2026-10-20: o runner ubuntu-26.04 troca o coreutils pelo uutils 0.10.0, cujo `mkdir`
+  #    confere a existência ANTES de criar e devolve rc=0 aos DOIS processos que chegam juntos (480 de
+  #    1000 corridas com 2 núcleos no harness de subshell; 37–77 de 1000 noutro harness; o GNU, 0 sempre).
+  #    Os dois workers rodavam a MESMA família, o pai somava 3 ou 4 com exit 0 (reprodução local) e o caso
+  #    (h) da selftest_lanes caía só no CI (PRs #1226 e #1238) — e em toda faixa paralela do runner
+  #    alguma família podia rodar em dobro em silêncio (medido: vendor_manifest 2× num job do #1238).
+  #    A atomicidade da trava não pode depender de qual implementação de coreutils a imagem traz:
+  #    o noclobber do bash abre o arquivo com O_EXCL no kernel, sem binário externo no caminho.
   if [ -n "${SELFTEST_QUEUE:-}" ] && [ "${name}" != "fixtures" ]; then
-    mkdir "${SELFTEST_QUEUE}/claimed/${name}" 2>/dev/null || return 0
+    ( set -C; : > "${SELFTEST_QUEUE}/claimed/${name}" ) 2>/dev/null || return 0
   fi
   # PREDICADO: "não é o core", não "é adopted". A forma antiga era CEGA para `hub` e `standalone`,
   # que também CONSOMEM o framework sem autorá-lo. Medido por dogfood em 2026-09-30, atualizando um
@@ -1405,12 +1414,20 @@ if [ "${SELFTEST_JOBS}" -gt 1 ] && [ "${SELFTEST_CHILD}" = "0" ] && [ "${SELFTES
     done
     for _fam in "${_fams[@]}"; do
       [ "${_fam}" = "fixtures" ] && continue
-      if [ ! -d "${_tdir}/q/claimed/${_fam}" ]; then
+      if [ ! -e "${_tdir}/q/claimed/${_fam}" ]; then
         FAIL=$((FAIL + 1)); FAILED_CASES+=("família ${_fam} NUNCA foi reivindicada por worker nenhum")
       elif [ ! -f "${_tdir}/q/done/${_fam}" ]; then
         FAIL=$((FAIL + 1)); FAILED_CASES+=("família ${_fam} reivindicada e NÃO concluída (worker morreu no meio dela)")
       fi
     done
+    # DUPLA EXECUÇÃO é falha, não detalhe: a trava da fila deixou de ser atômica no runner (uutils,
+    # 2026-10-20) e uma família rodou nos dois workers com rc=0 e nenhum ✗ — a soma inflada só era
+    # vista pelo (h) da própria selftest_lanes. Cada worker emite uma linha por família que RODOU;
+    # mais de uma linha para o mesmo nome (fora `fixtures`, fatiada de propósito em todos) acusa.
+    while read -r _dn _dfam; do
+      [ -n "${_dfam:-}" ] || continue
+      FAIL=$((FAIL + 1)); FAILED_CASES+=("família ${_dfam} rodou ${_dn} vezes (a reivindicação da fila não foi exclusiva)")
+    done < <(for _r in "${REPORT_ROWS[@]}"; do printf '%s\n' "${_r%%$'\t'*}"; done | LC_ALL=C sort | uniq -c | awk '$1 > 1 && $2 != "fixtures"')
     rm -rf "${_tdir}"
     echo ""; echo "=== faixa paralela: ${_n} famílias / ${_j} workers (fila dinâmica) em $(( SECONDS - _t0 ))s ==="
     echo "  Arranque : ${_startup_shared}/${_j} worker(s) com retrato e inventário do pai (os demais fizeram o próprio)"
@@ -1944,6 +1961,114 @@ run_kg_freshness_selftests() {
     record_fail "kg-freshness: (k) (MUT)" "a mutação NÃO foi aplicada — o teste não prova nada"
   fi
 
+  # ── STALE-EXPIRED: vencimento por cadência, CONSUMIDO do kg-ssot --due (kg-ssot.due/1) ──────
+  # Decisão de origem: D_AUDIT_VOCAB_CONTRACT_VS_CORE_SPLIT_1021 (opção A). O radar não calcula a
+  # data: lê o relatório do leitor de referência. Fora do veredito; fail-closed como NÃO MEDIDO.
+  # Os casos com STUB rodam sempre (independem da versão do vendor); os com o leitor REAL pulam,
+  # declarados, quando o vendor/kg-ssot do repo não tem --due.
+  local dv="${REPO_ROOT}/vendor/kg-ssot/tools/kg_validate.py"
+  local fxd="${fx}/reverify-due.kg.yaml" fxf="${fx}/reverify-fresh.kg.yaml"
+  local dsb; dsb="$(mktemp -d)"
+  # (d-due) vendor sem --due: stub com a recusa EXATA do argparse da 4.13.1 (medida).
+  printf 'import sys\nsys.stderr.write("usage: kg_validate.py [-h]\\nkg_validate.py: error: unrecognized arguments: --due\\n")\nsys.exit(2)\n' > "${dsb}/old.py"
+  rc=0; out=$(ONION_KG_DUE_VALIDATOR="${dsb}/old.py" bash "${radar}" "${fxd}" --freshness 2>&1) || rc=$?
+  if [ "${rc}" -eq 0 ] && grep -q 'STALE-EXPIRED NÃO MEDIDO' <<<"${out}" \
+     && grep -q 'vendor anterior à 4.15.0, sem --due' <<<"${out}" \
+     && ! grep -q 'STALE-EXPIRED: ' <<<"${out}" && ! grep -q 'cadência por nó' <<<"${out}"; then
+    record_pass "kg-freshness: (d-due) vendor sem --due ⇒ STALE-EXPIRED NÃO MEDIDO com o porquê, nunca 0 vencidos"
+  else record_fail "kg-freshness: (d-due) vendor sem --due" "rc=${rc} out=${out}"; fi
+  # (d2-due) leitor que morre MUDO (rc 1, stderr vazio — SIGKILL/OOM): sob set -e + pipefail o grep -v
+  #          vazio matava o radar com rc 1 e saída zero (achado do refutador, 2026-10-21).
+  printf 'import sys\nsys.exit(1)\n' > "${dsb}/silent.py"
+  rc=0; out=$(ONION_KG_DUE_VALIDATOR="${dsb}/silent.py" bash "${radar}" "${fxd}" --all 2>&1) || rc=$?
+  if [ "${rc}" -eq 0 ] && grep -q 'STALE-EXPIRED NÃO MEDIDO.*rc 1.*stderr vazio' <<<"${out}" && grep -q '══ INTEGRIDADE' <<<"${out}"; then
+    record_pass "kg-freshness: (d2-due) leitor que morre mudo ⇒ NÃO MEDIDO e o radar segue inteiro (rc 0, INTEGRIDADE impressa)"
+  else record_fail "kg-freshness: (d2-due) leitor mudo" "rc=${rc} out=${out}"; fi
+  # (e-due) forma nova (due/2) e due/1 sem as listas do schema não são lidos no chute.
+  printf 'import json\nprint(json.dumps({"schema_version": "kg-ssot.due/2", "as_of": "2026-10-21", "due": [], "unstamped": [], "event": [], "broken": []}))\n' > "${dsb}/due2.py"
+  printf 'import json\nprint(json.dumps({"schema_version": "kg-ssot.due/1"}))\n' > "${dsb}/nolists.py"
+  local o2 o3
+  o2=$(ONION_KG_DUE_VALIDATOR="${dsb}/due2.py" bash "${radar}" "${fxd}" --freshness 2>&1 || true)
+  o3=$(ONION_KG_DUE_VALIDATOR="${dsb}/nolists.py" bash "${radar}" "${fxd}" --freshness 2>&1 || true)
+  if grep -q 'STALE-EXPIRED NÃO MEDIDO.*kg-ssot.due/2' <<<"${o2}" && grep -q 'STALE-EXPIRED NÃO MEDIDO.*sem a lista' <<<"${o3}" \
+     && ! grep -q '✅' <<<"${o3}"; then
+    record_pass "kg-freshness: (e-due) relatório due/2 ou due/1 sem as listas ⇒ NÃO MEDIDO nomeando o porquê (nunca ✅)"
+  else record_fail "kg-freshness: (e-due) formato" "due2=${o2} nolists=${o3}"; fi
+  # (c-due) grafo SEM reverify_*: o leitor nem é chamado (stub que acusaria) e nada muda.
+  rc=0; out=$(ONION_KG_DUE_VALIDATOR="${dsb}/old.py" bash "${radar}" "${fx}/fresh-verified.kg.yaml" --all 2>&1) || rc=$?
+  if [ "${rc}" -eq 0 ] && ! grep -qE 'STALE-EXPIRED|CADENCE-|cadência por nó' <<<"${out}"; then
+    record_pass "kg-freshness: (c-due) grafo sem reverify_every ⇒ nenhuma linha nova e o leitor não é chamado"
+  else record_fail "kg-freshness: (c-due) sem cadência" "rc=${rc} out=${out}"; fi
+  # (g-due) o LADO AWK com um due/1 fixo (stub): formato da linha, superseded fora e contado,
+  #          MALFORMED vindo do veredito do contrato, exit intacto. Roda sem depender do vendor.
+  cat > "${dsb}/happy.py" <<'PYEOF'
+import json, sys
+if "--due" in sys.argv:
+    print(json.dumps({"schema_version": "kg-ssot.due/1", "as_of": sys.argv[sys.argv.index("--due") + 1],
+        "due": [{"file": "f", "id": i, "verified_at": "2020-01-01", "reverify_every": "P30D", "due_on": "2020-01-31", "days_late": 9, "reverify_on": None} for i in ("E_VENCIDO", "E_MORTO")],
+        "unstamped": [{"file": "f", "id": "E_SEM_CARIMBO", "reverify_every": "P1M"}],
+        "event": [{"file": "f", "id": "E_EVENTO", "reverify_on": "x"}], "broken": []}))
+else:
+    print(json.dumps({"schema_version": "kg-ssot.verdict/1", "results": [{"occurrences": [
+        {"code": "form.pattern.node.reverify_every", "place": "nó E_EM_DIA"},
+        {"code": "form.type.node.reverify_every", "place": "nó E_EM_DIA"}]}]}))
+    sys.exit(1)
+PYEOF
+  rc=0; out=$(ONION_KG_DUE_VALIDATOR="${dsb}/happy.py" bash "${radar}" "${fxd}" --all 2>&1) || rc=$?
+  if [ "${rc}" -eq 0 ] \
+     && grep -q 'STALE-EXPIRED: E_VENCIDO (verificado em 2020-01-01, reverify_every P30D, venceu em 2020-01-31, 9 dia(s) de atraso' <<<"${out}" \
+     && ! grep -q 'STALE-EXPIRED: E_MORTO' <<<"${out}" \
+     && [ "$(grep -c 'CADENCE-MALFORMED: E_EM_DIA' <<<"${out}")" = "1" ] \
+     && grep -q '1 vencido(s) · 1 sem carimbo · 1 fora da forma (não medido) · 1 só por evento' <<<"${out}" \
+     && grep -q '1 em nó superseded/refuted, não cobrado' <<<"${out}"; then
+    record_pass "kg-freshness: (g-due) due/1 fixo ⇒ STALE-EXPIRED formatado, superseded contado e fora, MALFORMED do contrato (1 por nó), rc 0"
+  else record_fail "kg-freshness: (g-due) lado awk" "rc=${rc} out=${out}"; fi
+
+  local dhelp; dhelp="$(python3 -I -B "${dv}" --help 2>/dev/null || true)"
+  if ! grep -q -- '--due' <<< "${dhelp}"; then
+    record_skip "kg-freshness: (a-due)/(b-due)/mutantes — o vendor/kg-ssot deste repo não tem --due (anterior à 4.15.0): a leitura real não foi exercida"
+  else
+    # (a-due) vencido ⇒ STALE-EXPIRED, e o exit NÃO muda (--all e --freshness, rc 0).
+    local rca=0 rcf=0 outf
+    out=$(ONION_KG_DUE_VALIDATOR="${dv}" bash "${radar}" "${fxd}" --all 2>&1) || rca=$?
+    outf=$(ONION_KG_DUE_VALIDATOR="${dv}" bash "${radar}" "${fxd}" --freshness 2>&1) || rcf=$?
+    if [ "${rca}" -eq 0 ] && [ "${rcf}" -eq 0 ] \
+       && grep -q 'STALE-EXPIRED: E_VENCIDO (verificado em 2020-01-01, reverify_every P30D, venceu em 2020-01-31' <<<"${out}" \
+       && grep -q 'CADENCE-UNSTAMPED: E_SEM_CARIMBO' <<<"${out}" \
+       && ! grep -qE 'STALE-EXPIRED: (E_EM_DIA|E_EVENTO|E_MORTO)' <<<"${out}" \
+       && grep -q '1 vencido(s) · 1 sem carimbo · 0 fora da forma (não medido) · 1 só por evento' <<<"${out}" \
+       && grep -q '1 em nó superseded/refuted, não cobrado' <<<"${out}" \
+       && grep -q 'STALE-EXPIRED: E_VENCIDO' <<<"${outf}"; then
+      record_pass "kg-freshness: (a-due) vencido ⇒ STALE-EXPIRED (data do kg-ssot), exit 0 em --all e --freshness; em-dia/evento/superseded fora"
+    else record_fail "kg-freshness: (a-due) vencido" "rc_all=${rca} rc_fresh=${rcf} out=${out}"; fi
+    # (b-due) cadência declarada e nada vencido ⇒ nenhuma linha de cadência.
+    rc=0; out=$(ONION_KG_DUE_VALIDATOR="${dv}" bash "${radar}" "${fxf}" --freshness 2>&1) || rc=$?
+    if [ "${rc}" -eq 0 ] && ! grep -qE 'STALE-EXPIRED|CADENCE-|cadência por nó' <<<"${out}" && grep -q '✅ 1 nó(s)' <<<"${out}"; then
+      record_pass "kg-freshness: (b-due) cadência não vencida ⇒ nada (✅ intacto)"
+    else record_fail "kg-freshness: (b-due) não vencido" "rc=${rc} out=${out}"; fi
+
+    # (MUT-due-1) desligada a leitura, o vencido SOME — (a-due) é load-bearing. O mutante tem de
+    #             RODAR (rc 0, FRESCOR impresso): sumir por queda não prova nada.
+    cp "${radar}" "${dsb}/m1.sh"; _lib_beside "${dsb}"
+    sed -i 's/^case "\$MODE" in --all|--freshness)$/case "$MODE" in --nunca)/' "${dsb}/m1.sh"
+    if ! grep -q '^case "\$MODE" in --all|--freshness)$' "${dsb}/m1.sh"; then
+      rc=0; out="$(ONION_KG_DUE_VALIDATOR="${dv}" bash "${dsb}/m1.sh" "${fxd}" --freshness 2>&1)" || rc=$?
+      if [ "${rc}" -eq 0 ] && grep -q '══ FRESCOR' <<<"${out}" && ! grep -q 'STALE-EXPIRED: E_VENCIDO' <<<"${out}"; then
+        record_pass "kg-freshness: (MUT-due-1) sem a leitura do --due o STALE-EXPIRED some (mutante roda, rc 0) — a guarda morde"
+      else record_fail "kg-freshness: (MUT-due-1)" "rc=${rc} — mutante caiu ou a leitura é vacuidade; out=${out}"; fi
+    else record_fail "kg-freshness: (MUT-due-1)" "a mutação NÃO foi aplicada — o teste não prova nada"; fi
+    # (MUT-due-2) vencimento como VEREDITO (problems++) ⇒ rc 1 — (a-due) pega pelo exit.
+    cp "${radar}" "${dsb}/m2.sh"
+    sed -i 's/ndue++; fwarns++/ndue++; fwarns++; problems++/' "${dsb}/m2.sh"
+    if grep -q 'ndue++; fwarns++; problems++' "${dsb}/m2.sh"; then
+      rc=0; ONION_KG_DUE_VALIDATOR="${dv}" bash "${dsb}/m2.sh" "${fxd}" --all >/dev/null 2>&1 || rc=$?
+      if [ "${rc}" -eq 1 ]; then
+        record_pass "kg-freshness: (MUT-due-2) vencimento como veredito vira rc 1 — (a-due) o barraria"
+      else record_fail "kg-freshness: (MUT-due-2)" "esperava rc 1, veio rc=${rc}"; fi
+    else record_fail "kg-freshness: (MUT-due-2)" "a mutação NÃO foi aplicada — o teste não prova nada"; fi
+  fi
+  rm -rf "${dsb}"
+
   # ── --freshness-tsv: a FILA de re-verificação (insumo de /meta:kg-freshness) ──────────────
   # Contrato de máquina: se as colunas variarem, o consumidor quebra em silêncio.
   local tsv; tsv="$(bash "${radar}" "${fxu}" --freshness-tsv 2>/dev/null || true)"
@@ -1985,13 +2110,13 @@ run_kg_freshness_selftests() {
   # (m) ESCOPO — nó com verdict OK ENTRA na fila. É a decisão que carrega o fluxo: o caso que
   # o motivou (C_ancestor_cap_zeroes_floors, no grafo do M2) tem carimbo do dia, alvo declarado,
   # os três vereditos passam — e mente. Filtrar por flagado nasceria cego ao caso fundador.
-  if printf '%s\n' "${tsv}" | awk -F'\t' '$1=="C_ANCORADA" && $11=="OK"' | grep -q . \
-     && printf '%s\n' "${tsv}" | awk -F'\t' '$1=="C_AFIRMA" && $11=="UNANCHORED"' | grep -q .; then
+  if grep -q . <<< "$(printf '%s\n' "${tsv}" | awk -F'\t' '$1=="C_ANCORADA" && $11=="OK"')" \
+     && grep -q . <<< "$(printf '%s\n' "${tsv}" | awk -F'\t' '$1=="C_AFIRMA" && $11=="UNANCHORED"')"; then
     record_pass "kg-freshness: (m) a fila inclui nó com verdict OK (escopo ≠ 'o que o radar flagou')"
   else record_fail "kg-freshness: (m) escopo da fila" "C_ANCORADA(OK) e/ou C_AFIRMA(UNANCHORED) ausentes"; fi
 
   # (n) o que é HISTÓRIA fica fora — mesmo racional do FRESCOR humano.
-  if ! printf '%s\n' "${tsv}" | awk -F'\t' '$4=="superseded" || $4=="refuted"' | grep -q .; then
+  if ! grep -q . <<< "$(printf '%s\n' "${tsv}" | awk -F'\t' '$4=="superseded" || $4=="refuted"')"; then
     record_pass "kg-freshness: (n) superseded/refuted fora da fila (história não se re-verifica)"
   else record_fail "kg-freshness: (n) exclusão de história" "nó reconciliado apareceu na fila"; fi
 
@@ -2233,6 +2358,18 @@ PY
     if [ "${_n}" -gt "${_tol}" ]; then _new_ones="${_new_ones} ${_f}(${_n}>${_tol})"
     else _passivo=$(( _passivo + _n )); fi
   done <<< "${_current}"
+  # a catraca SÓ ENCOLHE: ponto curado e baseline não baixado deixa o ganho destravado — foi assim que
+  # 14 curas de 2026-10-19 ficaram com o baseline em 138 contra 124 reais, e a cura podia voltar calada.
+  local _stale=""
+  while IFS=$'\t' read -r _f _tol; do
+    case "${_f}" in ''|'#'*) continue ;; esac
+    _n="$(grep -F "${_f}"$'\t' <<< "${_current}" | head -1 | cut -f2 || true)"; _n="${_n:-0}"
+    [ "${_n}" -lt "${_tol}" ] && _stale="${_stale} ${_f}(${_n}<${_tol})"
+  done < "${_pvb}"
+  if [ -n "${_stale}" ]; then
+    record_fail "shell-pipefail: catraca da classe <produtor>|grep -q DESTRAVADA" \
+      "ponto(s) curado(s) com o baseline ainda tolerando o antigo — baixe: bash ${_pvc} --emit-baseline > ${_pvb}:${_stale}"
+  fi
   if [ -n "${_new_ones}" ]; then
     record_fail "shell-pipefail: VEREDITO por <produtor>|grep -q ACIMA da catraca" \
       "sítio NOVO da classe (o leitor fecha cedo, o escritor toma EPIPE, pipefail reprova com o padrão PRESENTE) — cure com here-string \`grep -q PAD <<< \"\$var\"\`:${_new_ones}"
@@ -2960,7 +3097,7 @@ run_rules_registry_selftests() {
 
   # (e) SEVERIDADE = corpo ∪ tag — guarda de severidade dinâmica + tag declarada → HARD + SOFT
   printf '# REGRA 29 — dinamica [HARD + SOFT]\n# previne: z\ncheck_d() {\n  violation "${sev}" "x" "y"\n  violation "SOFT" "b" "c"\n}\n' > "${tmp}/sev.sh"
-  if RULES_LINT_SRC="${tmp}/sev.sh" bash "${gen}" 2>/dev/null | grep -qE '^\| 29 \|.*HARD \+ SOFT'; then
+  if grep -qE '^\| 29 \|.*HARD \+ SOFT' <<< "$(RULES_LINT_SRC="${tmp}/sev.sh" bash "${gen}" 2>/dev/null)"; then
     record_pass "rules-registry: (e) severidade = corpo ∪ tag (dinâmica declarada vira HARD + SOFT)"
   else record_fail "rules-registry: (e)" "união corpo∪tag não produziu HARD + SOFT"; fi
 
@@ -6502,7 +6639,7 @@ run_vendor_branch_selftests() {
   _vb_core "$core" 3
   local rc=0; bash "${helper}" update "$t" "$core" "$(git -C "$core" rev-parse --short=12 HEAD)" "$ib" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -eq 10 ] && grep -q CUSTOMIZADO "$t/.claude/commands/foo.md" \
-     && git -C "$t" diff --name-only --diff-filter=U 2>/dev/null | grep -q foo.md; then
+     && grep -q foo.md <<< "$(git -C "$t" diff --name-only --diff-filter=U 2>/dev/null)"; then
     record_pass "vendor-branch: customização local → CONFLITO (exit 10), não clobada"
   else record_fail "vendor-branch: conflito" "exit=$rc ou customização clobada/sem conflito"; fi
   git -C "$t" merge --abort 2>/dev/null || true
@@ -6870,8 +7007,8 @@ run_compose_settings_selftests() {
   else record_fail "compose-settings: determinismo" "composição varia entre execuções"; fi
   # --provenance é alias de --show-scope (formato novo: <scope>\t<path>=<valor> + sobreposição)
   local TAB=$'\t'
-  if bash "${helper}" --provenance "$d/fw.json" "$d/person.json" 2>/dev/null \
-       | grep -qxF "person.json${TAB}theme=\"light\"${TAB}# sobrepõe: fw.json"; then
+  if grep -qxF "person.json${TAB}theme=\"light\"${TAB}# sobrepõe: fw.json" \
+       <<< "$(bash "${helper}" --provenance "$d/fw.json" "$d/person.json" 2>/dev/null)"; then
     record_pass "compose-settings: proveniência (theme ← person sobrepõe fw)"
   else record_fail "compose-settings: proveniência" "proveniência incorreta"; fi
   printf '%s' '{bad' > "$d/bad.json"
@@ -6923,6 +7060,35 @@ _research_primaries_anchoring_form() {
   grep -qF 'Abra o documento você mesmo' "${f}" || { echo "prompt do ancorador não manda REABRIR o documento (independência do leitor)"; return 1; }
   grep -qF 'Default na dúvida: NAO-ENCONTRADA' "${f}" || { echo "prompt do ancorador sem o default NAO-ENCONTRADA"; return 1; }
   return 0
+}
+
+# ── (o2) o campo de AGENTE chega inteiro ao escritor: acha a função que embrulha cada campo no prompt,
+# monta a definição dela com as dependências de topo (linhas `const X = ...` de uma linha) e a EXECUTA
+# sobre 3000 chars com controles. Imprime OK ou o motivo. Nomes não importam; o comportamento, sim.
+_research_agent_text_whole() {
+  node -e '
+  const fs = require("fs"); const src = fs.readFileSync(process.argv[1], "utf8"); const lines = src.split("\n")
+  const defs = new Map(); lines.forEach(l => { const m = l.match(/^const ([A-Za-z_$][\w$]*) = /); if (m && !defs.has(m[1])) defs.set(m[1], l) })
+  const fields = [["elenxo.recommendation", "Recomendação (INTEIRA"], ["report.market", "### Mercado (do sintetizador)"]]
+  const bad = []
+  for (const [field, anchor] of fields) {
+    const line = lines.find(l => l.includes(anchor) && l.includes(field))
+    if (!line) { bad.push(field + ": a linha do prompt do escritor com a âncora \"" + anchor + "\" sumiu"); continue }
+    const esc = field.replace(/\./g, "\\.")
+    const m = line.match(new RegExp("([A-Za-z_$][\\w$]*)?\\(?" + esc + "\\)?((?:\\s*\\.[A-Za-z]+\\([^)]*\\))*)"))
+    if (/\.(slice|substring|substr)\(/.test(m[2] || "")) { bad.push(field + ": cortado direto no prompt (" + m[2].trim() + ")"); continue }
+    const fn = m[1]; if (!fn || fn === "String") { bad.push(field + ": passado cru ao escritor (sem a sanitização de controles)"); continue }
+    if (!defs.has(fn)) { bad.push(field + ": embrulhado por " + fn + "(), sem definição de topo para executar"); continue }
+    const need = new Set([fn]); let grew = true
+    while (grew) { grew = false; for (const n of [...need]) for (const id of (defs.get(n).match(/[A-Za-z_$][\w$]*/g) || [])) if (defs.has(id) && !need.has(id)) { need.add(id); grew = true } }
+    const code = [...defs.keys()].filter(k => need.has(k)).map(k => defs.get(k)).join("\n")
+    const input = "\u0007inicio " + "x ".repeat(1495) + "FIM_DO_TEXTO"
+    let out; try { out = String(new Function(code + "\nreturn " + fn)()(input)) } catch (e) { bad.push(field + ": " + fn + "() não executou isolada: " + e); continue }
+    if (!out.endsWith("FIM_DO_TEXTO")) bad.push(field + ": " + fn + "() devolveu " + out.length + " de " + input.length + " chars (truncou)")
+    else if (/[\u0000-\u001f]/.test(out)) bad.push(field + ": " + fn + "() deixou passar caractere de controle (sanitização perdida)")
+  }
+  console.log(bad.length ? bad.join(" | ") : "OK")
+' "$1" 2>&1
 }
 
 # ── roda o CORPO do workflow com stubs e IMPRIME o JSON devolvido ──
@@ -7681,7 +7847,7 @@ run_research_workflow_selftests() {
     grep -q "^export const meta = {" "${wf}" && grep -q "name: 'onion-research'" "${wf}" && record_pass "research-workflow: (b) meta literal com name onion-research" || record_fail "research-workflow: (b)" "meta ausente/alterado"
     rm -rf "${d}"
   fi
-  if awk '/^---$/{c++; next} c==1' "${sk}" | grep -q "^description:"; then record_pass "research-workflow: (c) SKILL.md tem description (auto-ativação)"
+  if grep -q "^description:" <<< "$(awk '/^---$/{c++; next} c==1' "${sk}")"; then record_pass "research-workflow: (c) SKILL.md tem description (auto-ativação)"
   else record_fail "research-workflow: (c)" "SKILL.md sem description no frontmatter"; fi
   grep -q "argument-hint" "${sk}" && record_fail "research-workflow: (d)" "argument-hint não é aceito em SKILL.md (2.1.258)" || record_pass "research-workflow: (d) SKILL.md sem chave proibida argument-hint"
   grep -q "MODE === 'decision'" "${wf}" && grep -q "const ELENXO_SCHEMA" "${wf}" && grep -q "kind: { enum: \['finding', 'discarded-by-evidence', 'discarded-by-comodismo'\] }" "${wf}" \
@@ -7805,6 +7971,23 @@ run_research_workflow_selftests() {
   if grep -nE 'JSON\.stringify\((pElenxo|elenxo)[^)]*\)[^+;]*\.slice\(' "${wf}" >/dev/null; then
     record_fail "research-workflow: (o)" "o JSON do Elenxo é cortado antes do write(KG): $(grep -nE 'JSON\.stringify\((pElenxo|elenxo)[^)]*\)[^+;]*\.slice\(' "${wf}" | head -2)"
   else record_pass "research-workflow: (o) o Elenxo chega inteiro ao write(KG) (sem .slice sobre o JSON)"; fi
+  # (o2) a RECOMENDAÇÃO do Elenxo e o MERCADO do sintetizador chegam INTEIROS ao escritor. Medido em
+  #      2026-10-21 (run wf_1b66acda-ac8): o prompt prometia "INTEIRA" e passava webText(...), cujo teto
+  #      de 600 é do dado web; 2786 chars viraram 600 e o escritor marcou TRUNCADO. A cura de 2026-10-11
+  #      tirou um .slice(0, 1500) que nunca mordia, porque o corte real morava DENTRO da função. Por isso
+  #      a guarda não lê nomes: EXECUTA a função que embrulha o campo (com as dependências de topo) sobre
+  #      3000 chars e exige o sentinela do fim; e reprova .slice/.substring/.substr colado no campo.
+  if command -v node >/dev/null 2>&1; then
+    local o2; o2="$(_research_agent_text_whole "${wf}")"
+    if [ "${o2}" = "OK" ]; then record_pass "research-workflow: (o2) recomendação do Elenxo e mercado chegam INTEIROS ao escritor (função executada sobre 3000 chars)"
+    else record_fail "research-workflow: (o2)" "${o2}"; fi
+    local m2; m2="$(mktemp -d)"
+    sed 's/+ agentText(elenxo\.recommendation) +/+ webText(elenxo.recommendation) +/' "${wf}" > "${m2}/wf.js"
+    if cmp -s "${wf}" "${m2}/wf.js"; then record_fail "research-workflow: (o2m)" "o mutante NÃO foi plantado (a linha da recomendação mudou de forma)"
+    elif [ "$(_research_agent_text_whole "${m2}/wf.js")" = "OK" ]; then record_fail "research-workflow: (o2m)" "MUTANTE com webText na recomendação passou em (o2)"
+    else record_pass "research-workflow: (o2m) mutante que devolve o webText à recomendação reprova em (o2)"; fi
+    rm -rf "${m2}"
+  else record_skip "research-workflow: (o2) node ausente → inteireza da recomendação não verificada"; fi
   # (p) o write(KG) nasce no CONTRATO v3 (2026-10-08, SAC-71): desde o #967 o gate do contrato no CI
   #     reprova grafo NOVO que suba a dívida SHOULD, e o escritor saía com data sem aspas, confirmed sem
   #     provenance e label longo (curado à mão no #967 e no #968). Os DOIS prompts de write(KG) — o do modo
@@ -7878,7 +8061,7 @@ run_research_lens_selftests() {
     record_pass "research-lens: (f) kg-corpus-grep acha por termo no label e conta o corpus"
   else record_fail "research-lens: (f)" "rc=${rc}: ${out:0:200}"; fi
   out="$(ONION_KG_CORPUS_FILES="${files}" bash "${cg}" premodelswitch 2>&1)"
-  if ! grep -q "C_Z" <<< "${out}"&& ONION_KG_CORPUS_FILES="${files}" bash "${cg}" premodelswitch --all-status 2>&1 | grep -q "C_Z"; then
+  if ! grep -q "C_Z" <<< "${out}"&& grep -q "C_Z" <<< "$(ONION_KG_CORPUS_FILES="${files}" bash "${cg}" premodelswitch --all-status 2>&1)"; then
     record_pass "research-lens: (g) superseded escondido por default, visível com --all-status"
   else record_fail "research-lens: (g)" "filtro de status errado: ${out:0:200}"; fi
   rc=0; ONION_KG_CORPUS_FILES= ONION_KG_CORPUS_ROOT="${d}/vazio" bash "${cg}" x >/dev/null 2>&1 || rc=$?
@@ -8177,6 +8360,47 @@ PYF
   r="$(env ONION_CC_BIN= ONION_CURRENCY_PY= ONION_CURRENCY_SDK_TARGETS= ONION_CURRENCY_CACHE_DIR="${d}/cache" bash "${sut}" "${d}/r2" --fresh 2>/dev/null </dev/null | awk -F'\t' '{print $1"|"$4}')"
   [ "${r}" = "base:trunk|em-dia" ] && record_pass "currency-census: (h5) branch padrão trunk lida pelo symref ⇒ base:trunk em dia" \
     || record_fail "currency-census: (h5) branch padrão" "veio: ${r}"
+  # (h6) C8 (2026-10-20, sinal de campo de um hub adotante): a base é a branch de INTEGRAÇÃO do Onion, pelo
+  #      resolve-integration-branch.sh, não a padrão do origin. Fixture: o origin tem a padrão `develop` (a de
+  #      produto, que anda) e a integração `onion/develop` (gitflow.branch.develop); o checkout está na ponta da
+  #      integração. Antes da cura: "5 commits atrás de origin/develop" no hub, rebase sobre a branch errada.
+  #      Polaridades: integração em dia ⇒ em-dia mesmo com a padrão à frente; a integração anda ⇒ defasada citando
+  #      origin/onion/develop; integração fora do origin ⇒ não medida (nunca a padrão). Mutantes: o resolvedor
+  #      ausente (env) e a cura desligada no código têm de devolver o falso positivo.
+  ${g} init -q --bare "${d}/o6.git"; git -C "${d}/o6.git" symbolic-ref HEAD refs/heads/develop
+  ${g} clone -q "${d}/o6.git" "${d}/r6" 2>/dev/null; ${g} -C "${d}/r6" checkout -q -b develop 2>/dev/null
+  ${g} -C "${d}/r6" commit -q --allow-empty -m produto; ${g} -C "${d}/r6" push -q origin develop 2>/dev/null
+  ${g} -C "${d}/r6" checkout -q -b onion/develop 2>/dev/null; ${g} -C "${d}/r6" commit -q --allow-empty -m onion
+  ${g} -C "${d}/r6" push -q origin onion/develop 2>/dev/null; git -C "${d}/r6" config gitflow.branch.develop onion/develop
+  ${g} clone -q "${d}/o6.git" "${d}/r6b" 2>/dev/null
+  ${g} -C "${d}/r6b" commit -q --allow-empty -m p2; ${g} -C "${d}/r6b" push -q origin develop 2>/dev/null
+  _c3() { local s="$1"; shift; env ONION_CC_BIN= ONION_CURRENCY_PY= ONION_CURRENCY_SDK_TARGETS= ONION_CURRENCY_NPM= ONION_CURRENCY_KG_SSOT_REMOTE= \
+            ONION_CURRENCY_CACHE_DIR="${d}/cache" "$@" bash "${s}" "${d}/r6" --fresh 2>/dev/null </dev/null | awk -F'\t' '$1 ~ /^base/{print $1"|"$4"|"$5}'; }
+  local h6a h6m1 h6m2 h6b h6c
+  h6a="$(_c3 "${sut}")"
+  h6m1="$(_c3 "${sut}" ONION_CURRENCY_RESOLVER="${d}/nao-existe.sh")"
+  sed 's/if \[ -n "\${ib}" \] && \[ -z "\${ibe}" \]; then/if false; then/' "${sut}" > "${d}/census-mut.sh"
+  cp "$(dirname "${sut}")/resolve-integration-branch.sh" "${d}/resolve-integration-branch.sh"
+  h6m2="$(_c3 "${d}/census-mut.sh")"
+  ${g} clone -q -b onion/develop "${d}/o6.git" "${d}/r6c" 2>/dev/null
+  ${g} -C "${d}/r6c" commit -q --allow-empty -m o2; ${g} -C "${d}/r6c" push -q origin onion/develop 2>/dev/null
+  git -C "${d}/r6" fetch -q origin 2>/dev/null
+  h6b="$(_c3 "${sut}")"
+  git -C "${d}/r6" config gitflow.branch.develop onion/nao-publicada
+  h6c="$(_c3 "${sut}")"
+  # (h6d) passada adversarial: integration_branch entre aspas no stamp volta com as aspas — não medida e nomeada,
+  #       nunca o recuo calado para a padrão (que é o falso positivo que a cura fecha)
+  mkdir -p "${d}/r6/.claude"; printf 'integration_branch: "onion/develop"\n' > "${d}/r6/.claude/.onion-version"
+  local h6d; h6d="$(_c3 "${sut}")"; rm -f "${d}/r6/.claude/.onion-version"
+  case "${h6d}" in "base|nao-medida|"*"não é um nome de branch"*) ;; *) h6c="FALHOU(aspas: ${h6d})" ;; esac
+  case "${h6a}" in "base:onion/develop|em-dia|-") ;; *) h6a="FALHOU(${h6a})" ;; esac
+  case "${h6m1}" in "base:develop|defasada|"*) ;; *) h6m1="MUTANTE-VIVO(${h6m1})" ;; esac
+  case "${h6m2}" in "base:develop|defasada|"*) ;; *) h6m2="MUTANTE-VIVO(${h6m2})" ;; esac
+  case "${h6b}" in "base:onion/develop|defasada|"*"origin/onion/develop"*) ;; *) h6b="FALHOU(${h6b})" ;; esac
+  case "${h6c}" in "base:onion/nao-publicada|nao-medida|"*"não está no origin"*) ;; *) h6c="FALHOU(${h6c})" ;; esac
+  if [[ "${h6a}${h6m1}${h6m2}${h6b}${h6c}" != *FALHOU* && "${h6a}${h6m1}${h6m2}${h6b}${h6c}" != *VIVO* ]]; then
+    record_pass "currency-census: (h6) a base é a integração do Onion (onion/develop) e não a padrão do origin: em dia, defasada pela integração, fora do origin não medida; 2 mutantes mordem"
+  else record_fail "currency-census: (h6) base pela integração" "a=${h6a} m1=${h6m1} m2=${h6m2} b=${h6b} c=${h6c}"; fi
   # (i) conta root, caminho com .. e symlink ⇒ recusados (não medido), nunca lidos
   printf 'bridge\troot\t%s\t-\n' "${d}/srv/node_modules/@anthropic-ai/claude-agent-sdk/package.json" > "${d}/t-root.tsv"
   printf 'bridge\t-\t%s/srv/../srv/node_modules/@anthropic-ai/claude-agent-sdk/package.json\t-\n' "${d}" > "${d}/t-dots.tsv"
@@ -9017,6 +9241,11 @@ run_moat_gate_selftests() {
   if [ -f "${REPO_ROOT}/ops/chat-runner.sh" ]; then
     _cr_ok=1; _mg_map "${REPO_ROOT}/ops/chat-runner.sh" > "${d}/proj/ops/chat-runner.sh"
   fi
+  # o wrapper do STT em lote (2026-10-17), RASTREADO e com os caminhos mapeados como o TSV
+  local _st_ok=0
+  if [ -f "${REPO_ROOT}/ops/stt-service.sh" ]; then
+    _st_ok=1; _mg_map "${REPO_ROOT}/ops/stt-service.sh" > "${d}/proj/ops/stt-service.sh"
+  fi
   git init -q -b main "${d}/adotante"
   git -C "${d}/adotante" remote add origin https://github.com/onion-bancada/adotante.git
   mkdir -p "${d}/adotante/docs/evolution/inbound"
@@ -9045,6 +9274,8 @@ EOF
   # a cópia do wrapper do runner reduzida ao que só a regra da CÓPIA pega: escreve por ARRAY (o juiz não segue array —
   # teto declarado) e o nome do wrapper no código; a cópia inteira fecha antes por outro caminho (sudo com opção de runtime)
   [ "${_cr_ok}" = 1 ] && printf '#!/usr/bin/env bash\nNAME=chat-runner\nU=/etc/systemd/system/onion-chat@.service\na=(install -m 0644 unit.service)\n"${a[@]}" "$U"\n' > "${d}/scratch/cr-copia.sh"
+  # idem para o wrapper do STT em lote: só a regra da CÓPIA a pega (escrita por ARRAY + o nome do wrapper no código)
+  [ "${_st_ok}" = 1 ] && printf '#!/usr/bin/env bash\nNAME=stt-service\nU=/etc/systemd/system/onion-vps-stt.service\na=(install -m 0644 unit.service)\n"${a[@]}" "$U"\n' > "${d}/scratch/st-copia.sh"
   # a cópia NÃO rastreada do wrapper da fila e o script mínimo com função que embrulha sudo (2026-10-15)
   if [ "${_queue_ok}" = 1 ]; then
     cp "${d}/proj/ops/a2a-queue-live.sh" "${d}/scratch/queue-copia.sh"
@@ -9423,7 +9654,7 @@ EOF" "${L}" \
       '_moat_emit("inanalisavel", "ONION_BRIDGE_HARDENING_TEST",' '(lambda *a: None)("inanalisavel", "ONION_BRIDGE_HARDENING_TEST",'
     _mgcase "(b5) CÓPIA do wrapper fora do projeto → FECHA (o nome do wrapper + alvo no corpo)" "2:cópia não versionada de um wrapper" "${P}" \
       "bash ${d}/scratch/bh-copia.sh install --apply" "${J}" \
-      '_MOAT_WRAPPER_COPIES = ("a2a-queue-live", "bridge-hardening", "chat-runner")' '_MOAT_WRAPPER_COPIES = ("a2a-queue-live", "chat-runner")'
+      '_MOAT_WRAPPER_COPIES = ("a2a-queue-live", "bridge-hardening", "chat-runner", "stt-service")' '_MOAT_WRAPPER_COPIES = ("a2a-queue-live", "chat-runner", "stt-service")'
     fi
   else
     record_skip "moat-gate: (b*) sem ops/bridge-hardening.sh — casos do drop-in de integridade pulados"
@@ -9449,10 +9680,34 @@ EOF" "${L}" \
       '_moat_emit("inanalisavel", "ONION_CHAT_RUNNER_TEST",' '(lambda *a: None)("inanalisavel", "ONION_CHAT_RUNNER_TEST",'
     _mgcase "(m6) CÓPIA do wrapper fora do projeto → FECHA (o nome do wrapper + alvo no corpo)" "2:cópia não versionada de um wrapper" "${P}" \
       "bash ${d}/scratch/cr-copia.sh install --apply" "${J}" \
-      '_MOAT_WRAPPER_COPIES = ("a2a-queue-live", "bridge-hardening", "chat-runner")' '_MOAT_WRAPPER_COPIES = ("a2a-queue-live", "bridge-hardening")'
+      '_MOAT_WRAPPER_COPIES = ("a2a-queue-live", "bridge-hardening", "chat-runner", "stt-service")' '_MOAT_WRAPPER_COPIES = ("a2a-queue-live", "bridge-hardening", "stt-service")'
     fi
   else
     record_skip "moat-gate: (m*) sem ops/chat-runner.sh — casos do runner do convidado pulados"
+  fi
+  # ── o STT em lote (2026-10-17): só o wrapper escreve a unit, a área /opt, o token e o backup ──
+  if [ "${_st_ok}" = 1 ]; then
+    local STU STO; STU="$(awk -F'\t' '$4=="ops/stt-service.sh" && $3 ~ /onion-vps-stt\.service$/ {print $3; exit}' "${P}/ops/moat-targets.tsv")"
+    STO="$(awk -F'\t' '$4=="ops/stt-service.sh" && $3 ~ /^\/opt\// {print $3; exit}' "${P}/ops/moat-targets.tsv")"
+    if [ -z "${STU}" ] || [ -z "${STO}" ]; then record_fail "moat-gate: (s0)" "ops/moat-targets.tsv sem as linhas do ops/stt-service.sh (core-only)"
+    else
+    _mgcase "(s1) tee direto na unit do STT → VETO nomeando o wrapper (mais específico que /etc/systemd)" "2:ops/stt-service.sh" "${P}" \
+      "sudo tee ${STU} < unit.service" "${J}" '            if best is None or len(pat) > len(best[1]):' '            if best is None:'
+    _mgcase "(s2) modelo copiado à mão para a área do STT → VETO nomeando o wrapper" "2:ops/stt-service.sh" "${P}" \
+      "sudo cp encoder.onnx ${STO}/models/x/encoder.onnx" "${J}" '_MOAT_WRITE_DEST = {"cp", "install", "rsync",' '_MOAT_WRITE_DEST = {"install", "rsync",'
+    _mgcase "(s3) restart da unit do STT → VETO nomeando o wrapper" "2:ops/stt-service.sh" "${P}" \
+      'sudo systemctl restart onion-vps-stt' "${J}" $'    if verb not in _MOAT_UNIT_MUTATE:\n        return' $'    if True:\n        return'
+    _mgcase "(s4) o wrapper VERSIONADO → passa" 0 "${P}" \
+      "bash ops/stt-service.sh install --apply && echo \"unit em ${STU}\"" "${J}" '    if _moat_versioned(p) and not copied:' '    if False:'
+    _mgcase "(s5) modo de teste do wrapper na linha de comando → FECHA" "2:modo de teste do wrapper do STT em lote" "${P}" \
+      "export ONION_STT_SERVICE_TEST=1; ONION_STT_SERVICE_ROOT=/tmp/x bash ops/stt-service.sh show" "${J}" \
+      '_moat_emit("inanalisavel", "ONION_STT_SERVICE_TEST",' '(lambda *a: None)("inanalisavel", "ONION_STT_SERVICE_TEST",'
+    _mgcase "(s6) CÓPIA do wrapper fora do projeto → FECHA (o nome do wrapper + alvo no corpo)" "2:cópia não versionada de um wrapper" "${P}" \
+      "bash ${d}/scratch/st-copia.sh install --apply" "${J}" \
+      '_MOAT_WRAPPER_COPIES = ("a2a-queue-live", "bridge-hardening", "chat-runner", "stt-service")' '_MOAT_WRAPPER_COPIES = ("a2a-queue-live", "bridge-hardening", "chat-runner")'
+    fi
+  else
+    record_skip "moat-gate: (s*) sem ops/stt-service.sh — casos do STT em lote pulados"
   fi
   # ── adotante e modo degradado ──────────────────────────────────────────────────────────────────
   _mgcase "(x1) adotante SEM ops/moat-targets.tsv: crontab - → passa (hook desarmado)" 0 "${d}/sem-tsv" \
@@ -10708,6 +10963,508 @@ PY
 }
 
 # ---------------------------------------------------------------------------
+# stt-service (2026-10-17, D_MC_STT_PARAKEET_ADAPTADOR_CORE_1017): o STT em LOTE do core. Duas metades:
+#   (a) o núcleo puro e a prova do verify (ops/stt/selftest.py, só stdlib, roda sem o motor): token fail-closed,
+#       Bearer/Token, 401 do AuthGate antes da rota, 413 do teto de corpo (declarado e chunked), palavras e tempos, as
+#       formas OpenAI/Deepgram, e o smoke.py REPROVANDO servidor falso sem auth, com tempos inválidos, recall baixo
+#       ou código diferente. CONTAGEM travada (caso apagado = falha). (m) UM MUTANTE POR CASO, plantado por
+#       ops/mutate-and-restore.sh numa CÓPIA (o arquivo vivo nunca é mutado), com --until no caso que tem de cair.
+#   (w) o wrapper ops/stt-service.sh em MODO DE TESTE com systemctl, systemd-run, ss, curl e ffmpeg FALSOS no PATH:
+#       a unit renderizada (loopback, sandbox, sem rede de saída, teto de memória, token por credencial), o uso
+#       inválido, o ensaio que não escreve nada, os pins conferidos contra a fonte (Hugging Face e PyPI falsos), a
+#       porta ocupada, o verify (loopback, MemoryMax, código servido, unit divergente, prova que reprova ou não mede) e
+#       o --apply (token 0600 que nunca aparece na saída; prova pré-troca que reprova deixa a unit intocada). Cada
+#       caso tem MUTANTE numa cópia do wrapper (o arquivo vivo nunca é mutado).
+# TETOS DECLARADOS (mutante sobrevive por defesa DUPLA, por isso fora da lista): o `if not token` do authorized (o
+# compare_digest contra b"" já recusa) e o S_ISLNK do load_token (o lstat do symlink dá 0777 e o teste de modo recusa).
+# O download e o hash dos arquivos do modelo (stage_hf) não rodam aqui: exigiriam o modelo de 0,65 GB; o dogfood do
+# --apply na VPS é a prova deles, e o ensaio confere o pin contra a fonte a cada rodada.
+# DIARIZAÇÃO (2026-10-20, D_MC_DIARIZACAO_NO_SERVICO_PROXIMO_1019): o núcleo lê o RTTM, põe o falante na palavra por
+# sobreposição, corta o segmento na troca e roda o binário num subprocesso que NUNCA levanta (binários falsos em /bin/sh
+# provam rc≠0, timeout, RTTM ausente, estranho e vazio, e o ambiente fechado); o smoke reprova servidor sem falante, com
+# um falante só, com status failed ou sem a diarização no /health; o server.py real prova que a falha não derruba a
+# transcrição; o wrapper confere o binário no GitHub (w23) e o gguf no HF (w24) e passa o fixture de 2 falantes à prova
+# (w25). A montagem do binário (stage_diar_bin: download, digest, extração filtrada) é do --apply, como o stage_hf.
+# ---------------------------------------------------------------------------
+run_stt_service_selftests() {
+  local -; set +e
+  local wr="${REPO_ROOT}/ops/stt-service.sh" st="${REPO_ROOT}/ops/stt" helper="${REPO_ROOT}/ops/mutate-and-restore.sh"
+  if [ ! -f "${wr}" ] || [ ! -f "${st}/selftest.py" ]; then record_skip "stt-service: sem ops/stt-service.sh (core-only) — nada a testar"; return; fi
+  command -v python3 >/dev/null 2>&1 || { record_skip "stt-service: python3 ausente → pulado"; return; }
+  command -v flock >/dev/null 2>&1 || { record_skip "stt-service: flock ausente → pulado"; return; }
+  [ "$(id -u)" = 0 ] && { record_skip "stt-service: rodando como root (o wrapper recusa root) → pulado"; return; }
+  [ -f "${helper}" ] || { record_fail "stt-service" "ops/mutate-and-restore.sh ausente: mutante não exercido"; return; }
+  local d; d="$(mktemp -d)"
+  # ── (a) o harness do núcleo e do smoke ──
+  local want_total=75 o rc
+  if o="$(LC_ALL=C python3 -I -B "${st}/selftest.py" 2>&1)"; then rc=0; else rc=$?; fi
+  if [ "${rc}" -eq 0 ] && grep -qE "^TOTAL ${want_total} FAIL 0$" <<< "${o}"; then
+    record_pass "stt-service: (a) núcleo e prova do verify — ${want_total} casos (token, credencial do systemd, 401, 413, palavras, formas, diarização, smoke que reprova)"
+  else record_fail "stt-service: (a) harness" "rc=${rc}: $(grep -E '^(FAIL|TOTAL)' <<< "${o}" | head -4 | tr '\n' '|')"; fi
+  # ── (m) um mutante por caso: alvo<TAB>âncora<TAB>novo<TAB>caso ──
+  local tgt old new want n mo mrc
+  mkdir -p "${d}/mut"
+  while IFS=$'\x1f' read -r tgt old new want; do
+    [ -n "${tgt}" ] || continue
+    cp "${st}/stt_core.py" "${d}/mut/stt_core.py"; cp "${st}/smoke.py" "${d}/mut/smoke.py"
+    n="$(grep -cF -- "${old}" "${d}/mut/${tgt}" || true)"
+    if [ "${n}" != 1 ]; then record_fail "stt-service: (m) ${want}" "âncora do mutante aparece ${n}× em ${tgt} (tem de ser 1): ${old:0:80}"; continue; fi
+    if mo="$(LC_ALL=C bash "${helper}" "${d}/mut/${tgt}" "${old}|||${new}" python3 -I -B "${st}/selftest.py" \
+             --core "${d}/mut/stt_core.py" --smoke "${d}/mut/smoke.py" --until "${want}" 2>&1)"; then mrc=0; else mrc=$?; fi
+    if [ "${mrc}" -ne 0 ] && grep -q "^FAIL ${want}" <<< "${mo}"; then record_pass "stt-service: (m) mutante reprova ${want}"
+    else record_fail "stt-service: (m) ${want}" "o mutante SOBREVIVEU (rc=${mrc}): $(tail -2 <<< "${mo}" | tr '\n' '|')"; fi
+  done <<EOF_MUT
+stt_core.py$(printf '\x1f')    if scheme.lower() not in AUTH_SCHEMES:$(printf '\x1f')    if False:  # ONION_MUTANTE$(printf '\x1f')esquema-estranho-recusa
+stt_core.py$(printf '\x1f')        mask = 0o037$(printf '\x1f')        mask = 0o000  # ONION_MUTANTE$(printf '\x1f')load-token-credencial-0444-recusa
+stt_core.py$(printf '\x1f')    if cred_dir and os.path.dirname(os.path.abspath(path)) == os.path.abspath(cred_dir) and st.st_uid in (0, os.geteuid()):$(printf '\x1f')    if True:  # ONION_MUTANTE$(printf '\x1f')load-token-0440-fora-da-credencial-recusa
+stt_core.py$(printf '\x1f')    return hmac.compare_digest(cred.encode("utf-8", "surrogateescape"), token)$(printf '\x1f')    return True  # ONION_MUTANTE$(printf '\x1f')token-errado-recusa
+stt_core.py$(printf '\x1f')            if not authorized(_header(scope, b"authorization"), self.token):$(printf '\x1f')            if False:  # ONION_MUTANTE$(printf '\x1f')authgate-401-sem-token
+stt_core.py$(printf '\x1f')PROTECTED_PREFIX = "/v1/"$(printf '\x1f')PROTECTED_PREFIX = "/nada/"  # ONION_MUTANTE$(printf '\x1f')authgate-401-token-errado
+stt_core.py$(printf '\x1f')                if scope["type"] == "websocket":$(printf '\x1f')                if False:  # ONION_MUTANTE$(printf '\x1f')authgate-ws-fecha-sem-token
+stt_core.py$(printf '\x1f')            raise ConfigError("AuthGate sem token")$(printf '\x1f')            pass  # ONION_MUTANTE$(printf '\x1f')authgate-recusa-construir-sem-token
+stt_core.py$(printf '\x1f')    if st.st_mode & mask:$(printf '\x1f')    if False:  # ONION_MUTANTE$(printf '\x1f')load-token-modo-aberto-recusa
+stt_core.py$(printf '\x1f')    if len(tok) < TOKEN_MIN_LEN:$(printf '\x1f')    if False:  # ONION_MUTANTE$(printf '\x1f')load-token-curto-recusa
+stt_core.py$(printf '\x1f')    if not re.fullmatch(rb"[A-Za-z0-9._~+/=-]+", tok):$(printf '\x1f')    if False:  # ONION_MUTANTE$(printf '\x1f')load-token-alfabeto-recusa
+stt_core.py$(printf '\x1f')            if n < 0 or n > self.max_bytes:$(printf '\x1f')            if n > self.max_bytes:  # ONION_MUTANTE$(printf '\x1f')bodylimit-content-length-invalido-413
+stt_core.py$(printf '\x1f')            if n < 0 or n > self.max_bytes:$(printf '\x1f')            if n < 0:  # ONION_MUTANTE$(printf '\x1f')bodylimit-content-length-413
+stt_core.py$(printf '\x1f')                if seen > self.max_bytes:$(printf '\x1f')                if False:  # ONION_MUTANTE$(printf '\x1f')bodylimit-chunked-413
+stt_core.py$(printf '\x1f')        if tok.startswith(" ") or not groups:$(printf '\x1f')        if not groups:  # ONION_MUTANTE$(printf '\x1f')words-agrupa-por-espaco
+stt_core.py$(printf '\x1f')        if i + 1 < len(groups) and groups[i + 1][1] > start:$(printf '\x1f')        if False:  # ONION_MUTANTE$(printf '\x1f')words-fim-limitado-pela-seguinte
+stt_core.py$(printf '\x1f')        if rel_end > 0:$(printf '\x1f')        if False:  # ONION_MUTANTE$(printf '\x1f')words-fim-limitado-pelo-trecho
+stt_core.py$(printf '\x1f')        out.append({"word": text, "start": round(offset + start, 3),$(printf '\x1f')        out.append({"word": text, "start": round(start + 0 * len("ONION_MUTANTE"), 3),$(printf '\x1f')words-offset-absoluto
+stt_core.py$(printf '\x1f')        prob = min(math.exp(sum(lps) / len(lps)), 1.0)$(printf '\x1f')        prob = 1.0  # ONION_MUTANTE$(printf '\x1f')words-probabilidade-da-media-de-logprob
+stt_core.py$(printf '\x1f')        if w["word"][-1:] in _SENTENCE_END:$(printf '\x1f')        if False:  # ONION_MUTANTE$(printf '\x1f')split-pontuacao-final
+stt_core.py$(printf '\x1f')    if not segs and fallback_text:$(printf '\x1f')    if False:  # ONION_MUTANTE$(printf '\x1f')split-fallback-texto
+stt_core.py$(printf '\x1f')    return [{k: v for k, v in w.items() if k != "_lps"} for w in words]$(printf '\x1f')    return [dict(w) for w in words]  # ONION_MUTANTE$(printf '\x1f')openai-verbose-forma
+stt_core.py$(printf '\x1f')    if fmt == "json":$(printf '\x1f')    if False:  # ONION_MUTANTE$(printf '\x1f')openai-json-e-text
+stt_core.py$(printf '\x1f')    bare = _EDGE_PUNCT.sub("", unicodedata.normalize("NFC", w["word"])).lower()$(printf '\x1f')    bare = w["word"].lower()  # ONION_MUTANTE$(printf '\x1f')deepgram-forma
+stt_core.py$(printf '\x1f')    if dur * channels > 2 * max_s:$(printf '\x1f')    if False:  # ONION_MUTANTE$(printf '\x1f')duracao-acima-do-teto
+stt_core.py$(printf '\x1f')    if channels > MAX_CHANNELS:$(printf '\x1f')    if False:  # ONION_MUTANTE$(printf '\x1f')canais-acima-do-teto
+stt_core.py$(printf '\x1f')    return 0 <= frames < UNKNOWN_FRAMES$(printf '\x1f')    return 0 <= frames  # ONION_MUTANTE$(printf '\x1f')frames-desconhecidos-vao-ao-ffmpeg
+stt_core.py$(printf '\x1f')    if sr not in PCM_RATES:$(printf '\x1f')    if False:  # ONION_MUTANTE$(printf '\x1f')pcm-params
+smoke.py$(printf '\x1f')        if st1 == 401 and st2 == 401:$(printf '\x1f')        if True:  # ONION_MUTANTE$(printf '\x1f')smoke-reprova-servidor-sem-auth
+smoke.py$(printf '\x1f')        if not isinstance(s, (int, float)) or not isinstance(e, (int, float)) or not (0 <= s < e <= duration + 0.05) or s < prev:$(printf '\x1f')        if not isinstance(s, (int, float)) or not isinstance(e, (int, float)):  # ONION_MUTANTE$(printf '\x1f')smoke-reprova-tempos-invalidos
+smoke.py$(printf '\x1f')        (ok if rc >= meta["min_word_recall"] else bad)(f"OpenAI: recall$(printf '\x1f')        (ok if True else bad)(f"OpenAI: recall  # ONION_MUTANTE$(printf '\x1f')smoke-reprova-recall-baixo
+smoke.py$(printf '\x1f')        if h.get("server_sha256") == expect_sha:$(printf '\x1f')        if True:  # ONION_MUTANTE$(printf '\x1f')smoke-reprova-codigo-diferente
+smoke.py$(printf '\x1f')        if h.get("core_sha256") == expect_core_sha:$(printf '\x1f')        if True:  # ONION_MUTANTE$(printf '\x1f')smoke-reprova-nucleo-diferente
+smoke.py$(printf '\x1f')        if pool.get(w, 0) > 0:$(printf '\x1f')        if w in pool:  # ONION_MUTANTE$(printf '\x1f')smoke-recall-conta-repeticao
+stt_core.py$(printf '\x1f')    turns.sort(key=lambda t: (t[0], t[1], t[2]))$(printf '\x1f')    pass  # ONION_MUTANTE$(printf '\x1f')rttm-le-turnos-ordenados
+stt_core.py$(printf '\x1f')        if len(p) < 8 or p[0] != "SPEAKER":$(printf '\x1f')        if len(p) < 8:  # ONION_MUTANTE$(printf '\x1f')rttm-forma-invalida-recusa
+stt_core.py$(printf '\x1f')    if len({t[2] for t in turns}) > max_speakers:$(printf '\x1f')    if False:  # ONION_MUTANTE$(printf '\x1f')rttm-teto-de-falantes
+stt_core.py$(printf '\x1f')    for _s, _e, lab in sorted(turns, key=lambda t: (t[0], t[1])):$(printf '\x1f')    for _s, _e, lab in turns:  # ONION_MUTANTE$(printf '\x1f')speaker-ids-na-ordem-da-primeira-fala
+stt_core.py$(printf '\x1f')        if ov > best_ov:$(printf '\x1f')        if ov > 0 and best is None:  # ONION_MUTANTE$(printf '\x1f')speaker-maior-sobreposicao
+stt_core.py$(printf '\x1f')            if near is None or gap < near[0]:$(printf '\x1f')            if near is None:  # ONION_MUTANTE$(printf '\x1f')speaker-na-pausa-vai-ao-turno-mais-proximo
+stt_core.py$(printf '\x1f')        out.append(dict(w) if sp is None else dict(w, speaker=sp))$(printf '\x1f')        out.append(dict(w, speaker=0))  # ONION_MUTANTE$(printf '\x1f')assign-speakers-em-cada-palavra
+stt_core.py$(printf '\x1f')            if w.get("speaker") == runs[-1][-1].get("speaker"):$(printf '\x1f')            if True:  # ONION_MUTANTE$(printf '\x1f')diar-segmento-cortado-na-troca-de-falante
+stt_core.py$(printf '\x1f')        out["speaker"] = w["speaker"]$(printf '\x1f')        pass  # ONION_MUTANTE$(printf '\x1f')deepgram-palavra-leva-speaker
+stt_core.py$(printf '\x1f')    return [binary, "diarize", wav, "-m", model, "--device", "cpu", "--preset", "v3-offline", "--format", "rttm",$(printf '\x1f')    return [binary, "diarize", wav, "-m", model, "--device", "cpu", "--preset", "v3-streaming", "--format", "rttm",  # ONION_MUTANTE$(printf '\x1f')diarize-ok-com-o-comando-medido
+stt_core.py$(printf '\x1f')    return {"PATH": "/nonexistent", "HOME": tmpdir,$(printf '\x1f')    return {"PATH": "/usr/bin:/bin", "HOME": tmpdir,  # ONION_MUTANTE$(printf '\x1f')diarize-ambiente-fechado
+stt_core.py$(printf '\x1f')        if p.returncode != 0:$(printf '\x1f')        if False:  # ONION_MUTANTE$(printf '\x1f')diarize-rc-nao-zero-vira-failed
+stt_core.py$(printf '\x1f')        except subprocess.TimeoutExpired:$(printf '\x1f')        except ZeroDivisionError:  # ONION_MUTANTE$(printf '\x1f')diarize-timeout-vira-failed
+stt_core.py$(printf '\x1f')        if not os.path.isfile(rttm):$(printf '\x1f')        if False:  # ONION_MUTANTE$(printf '\x1f')diarize-sem-rttm-vira-failed
+stt_core.py$(printf '\x1f')    except (OSError, ValueError, UnicodeDecodeError) as e:$(printf '\x1f')    except (OSError, UnicodeDecodeError) as e:  # ONION_MUTANTE$(printf '\x1f')diarize-rttm-estranho-vira-failed
+stt_core.py$(printf '\x1f')        if not turns:$(printf '\x1f')        if False:  # ONION_MUTANTE$(printf '\x1f')diarize-rttm-vazio-vira-failed
+stt_core.py$(printf '\x1f')        if not os.path.isfile(wav):$(printf '\x1f')        if False:  # ONION_MUTANTE$(printf '\x1f')diarize-binario-ausente-vira-failed
+stt_core.py$(printf '\x1f')        w.setframerate(sample_rate)$(printf '\x1f')        w.setframerate(8000)  # ONION_MUTANTE$(printf '\x1f')diarize-wav-e-o-mesmo-audio
+stt_core.py$(printf '\x1f')        if status not in DIAR_STATUSES:$(printf '\x1f')        if False:  # ONION_MUTANTE$(printf '\x1f')diar-status-fora-do-vocabulario-recusa
+stt_core.py$(printf '\x1f')    return 120.0 + 0.5 * max(duration_s, 0.0)$(printf '\x1f')    return 120.0  # ONION_MUTANTE$(printf '\x1f')diar-timeout-escala-com-a-duracao
+stt_core.py$(printf '\x1f')        if near is not None and near[0] <= DIAR_NEAREST_MAX_GAP_S:$(printf '\x1f')        if near is not None:  # ONION_MUTANTE$(printf '\x1f')speaker-longe-de-turno-fica-sem-falante
+stt_core.py$(printf '\x1f')    ids = ids or word_speaker_ids(words, turns)$(printf '\x1f')    ids = ids or speaker_ids(turns)  # ONION_MUTANTE$(printf '\x1f')speaker-ids-pela-primeira-palavra
+stt_core.py$(printf '\x1f')            os.unlink(rttm)  # RTTM de um canal anterior$(printf '\x1f')            pass  # ONION_MUTANTE RTTM de um canal anterior$(printf '\x1f')diarize-rttm-velho-nao-conta
+stt_core.py$(printf '\x1f')        if os.path.getsize(rttm) > DIAR_RTTM_MAX_BYTES:$(printf '\x1f')        if False:  # ONION_MUTANTE$(printf '\x1f')diarize-rttm-grande-vira-failed
+stt_core.py$(printf '\x1f').replace(model, "<model>")$(printf '\x1f').replace("ONION_MUTANTE", "<model>")$(printf '\x1f')diarize-stderr-sem-caminho-do-modelo
+smoke.py$(printf '\x1f')    turns, need = meta["turns"], meta["min_speaker_agreement"]$(printf '\x1f')    turns, need = meta["turns"], 1.01  # ONION_MUTANTE$(printf '\x1f')smoke-diar-aprova-servidor-correto
+smoke.py$(printf '\x1f')        elif not words or any(not isinstance(w.get("speaker"), int) for w in words):$(printf '\x1f')        elif not words:  # ONION_MUTANTE$(printf '\x1f')smoke-diar-reprova-sem-falante
+smoke.py$(printf '\x1f')            (ok if ag >= need and n == n_ref else bad)(f"Deepgram diarize:$(printf '\x1f')            (ok if True or "ONION_MUTANTE" else bad)(f"Deepgram diarize:$(printf '\x1f')smoke-diar-reprova-um-falante-so
+smoke.py$(printf '\x1f')        if decl[0].get("status") != "ok":$(printf '\x1f')        if False:  # ONION_MUTANTE$(printf '\x1f')smoke-diar-reprova-status-failed
+smoke.py$(printf '\x1f')    (ok if hd.get("available") is True else bad)(f"/health declara$(printf '\x1f')    (ok if True or "ONION_MUTANTE" else bad)(f"/health declara$(printf '\x1f')smoke-diar-reprova-health-sem-diarizacao
+smoke.py$(printf '\x1f')    if None in mapping.values() or len(set(mapping.values())) != len(mapping):$(printf '\x1f')    if None in mapping.values():  # ONION_MUTANTE$(printf '\x1f')smoke-diar-concordancia-exige-mapa-injetivo
+EOF_MUT
+
+  # ── (w) o wrapper em modo de teste, com falsos no PATH ──
+  local fk="${d}/fake" W
+  mkdir -p "${fk}" "${d}/wops"
+  # python3 falso: só a sonda de versão do wrapper responde como a máquina-alvo (3.12, o que o lock fixa); o resto vai ao
+  # interpretador real. Sem ele a bancada media a versão do RUNNER, não o wrapper: o ubuntu 26.04 do CI não traz 3.12 e
+  # (w4)..(w16) caíam todos na recusa de versão. O (w22) prova que a recusa morde.
+  local py_real; py_real="$(command -v python3)"
+  cat > "${fk}/python3" <<EOF_PY
+#!/bin/sh
+if [ "\$1" = -c ] && case "\$2" in *"sys.version_info[:2] == (3, 12)"*) true ;; *) false ;; esac; then
+  [ -e "\${STT_FAKE}/pyver-bad" ] && exit 1
+  exit 0
+fi
+exec "${py_real}" "\$@"
+EOF_PY
+  chmod +x "${fk}/python3"
+  cat > "${fk}/systemctl" <<'EOF'
+#!/bin/sh
+F="$STT_FAKE"
+case "$1" in
+  --version) echo "systemd 255 (fake)"; exit 0 ;;
+  show)
+    shift; props=""; val=0
+    while [ $# -gt 0 ]; do case "$1" in -p) props="$props $2"; shift 2 ;; --value) val=1; shift ;; *) shift ;; esac; done
+    [ -f "$F/show-fail" ] && exit 1
+    for p in $props; do
+      if [ "$p" = InvocationID ]; then v="$(cat "$F/inv")"; else v="$(sed -n "s/^$p=//p" "$F/show")"; fi
+      if [ "$val" = 1 ]; then echo "$v"; else echo "$p=$v"; fi
+    done ;;
+  restart) [ -f "$F/restart-fail" ] && exit 1; [ -f "$F/ss.after" ] && cp "$F/ss.after" "$F/ss"; echo "inv-$(date +%s%N)" > "$F/inv"; echo restart >> "$F/calls" ;;
+  daemon-reload|enable) echo "$1" >> "$F/calls" ;;
+esac
+exit 0
+EOF
+  cat > "${fk}/systemd-run" <<'EOF'
+#!/bin/sh
+F="$STT_FAKE"; mode=url
+for a; do [ "$a" = --serve ] && mode=serve; done
+echo "$mode $*" >> "$F/sr-calls"
+cat "$F/smoke-$mode"
+exit "$(cat "$F/smoke-$mode-rc" 2>/dev/null || echo 0)"
+EOF
+  printf '#!/bin/sh\ncat "$STT_FAKE/ss" 2>/dev/null; exit 0\n' > "${fk}/ss"
+  printf '#!/bin/sh\necho "ffmpeg version 6.1.1-fake Copyright"\n' > "${fk}/ffmpeg"
+  cat > "${fk}/curl" <<'EOF'
+#!/bin/sh
+F="$STT_FAKE"; url=""
+for a; do case "$a" in http*) url="$a" ;; esac; done
+case "$url" in
+  */api/models/istupakov/parakeet*) cat "$F/hf-model.json" ;;
+  */api/models/istupakov/silero*) cat "$F/hf-vad.json" ;;
+  */api/models/nvidia/Nemotron-3-Diarization*) cat "$F/hf-diar.json" ;;
+  https://api.github.com/repos/NVIDIA/NeMo-Speech.cpp/releases/tags/*) cat "$F/gh-release.json" ;;
+  https://pypi.org/pypi/*)
+    printf '{"urls":['; sep=""
+    while read -r h; do grep -qx "$h" "$F/pypi-drop" 2>/dev/null && continue; printf '%s{"digests":{"sha256":"%s"}}' "$sep" "$h"; sep=","; done < "$F/pypi-hashes"
+    printf ']}' ;;
+  */health) [ -f "$F/health-down" ] && exit 7; cat "$F/health" ;;
+  *) exit 22 ;;
+esac
+EOF
+  chmod +x "${fk}"/*
+  # a cópia que leva os mutantes: o wrapper + o ops/stt de verdade ao lado (o SRC é relativo ao wrapper)
+  ln -s "${st}" "${d}/wops/stt"
+  local sha_srv; sha_srv="$(sha256sum < "${st}/server.py" | cut -d' ' -f1)"
+  _st_hfjson() {  # <repo-var-prefix MODEL|VAD> → o JSON da API do Hugging Face com os pins DO WRAPPER
+    python3 - "$1" "${wr}" <<'PY'
+import json, re, sys
+pre, src = sys.argv[1], open(sys.argv[2], encoding="utf-8").read()
+rev = re.search(rf"^{pre}_REV=(\w+)$", src, re.M).group(1)
+block = re.search(rf"^{pre}_FILES=\((.*?)^\)", src, re.M | re.S).group(1)
+sib = []
+for name, kind, dig, size in re.findall(r'"(\S+) (sha256|gitsha1) (\w+) (\d+)"', block):
+    s = {"rfilename": name, "size": int(size)}
+    if kind == "sha256":
+        s["lfs"] = {"sha256": dig}; s["blobId"] = "0" * 40
+    else:
+        s["blobId"] = dig
+    sib.append(s)
+print(json.dumps({"sha": rev, "siblings": sib}))
+PY
+  }
+  _st_ghjson() {  # o JSON da API de releases do GitHub com o pin do binário do diarizador DO WRAPPER
+    python3 - "${wr}" <<'PY'
+import json, re, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+g = lambda k: re.search(rf"^{k}=(\S+)$", src, re.M).group(1)
+print(json.dumps({"tag_name": g("DIAR_BIN_TAG"), "draft": False, "prerelease": False,
+                  "assets": [{"name": g("DIAR_BIN_ASSET") + ".sha256", "size": 108, "digest": "sha256:" + "0" * 64},
+                             {"name": g("DIAR_BIN_ASSET"), "size": int(g("DIAR_BIN_SIZE")), "digest": "sha256:" + g("DIAR_BIN_SHA256")}]}))
+PY
+  }
+  _st_reset() {  # o estado padrão: serviço vivo, saudável, na porta só em loopback, com a unit renderizada instalada
+    rm -rf "${d}/run"; mkdir -p "${d}/run/units" "${d}/run/fk"
+    local F="${d}/run/fk"
+    printf '%s\n' ActiveState=active MainPID=4242 "FragmentPath=${d}/run/units/onion-vps-stt.service" DropInPaths= MemoryMax=6442450944 \
+      MemorySwapMax=0 MemoryCurrent=2000000000 OOMPolicy=continue 'IPAddressDeny=0.0.0.0/0 ::/0' 'IPAddressAllow=127.0.0.0/8 ::1/128' DynamicUser=yes \
+      ProtectHome=yes NRestarts=0 NeedDaemonReload=no > "${F}/show"
+    echo inv-1 > "${F}/inv"
+    printf 'LISTEN 0 2048 127.0.0.1:8765 0.0.0.0:* users:(("python",pid=4242,fd=6))\n' > "${F}/ss"
+    printf '{"ready":true,"live":false,"server_sha256":"%s"}\n' "${sha_srv}" > "${F}/health"
+    printf 'OK smoke\nn_fail=0\n' > "${F}/smoke-url"; printf 'OK smoke\nn_fail=0\n' > "${F}/smoke-serve"
+    _st_hfjson MODEL > "${F}/hf-model.json"; _st_hfjson VAD > "${F}/hf-vad.json"; _st_hfjson DIAR_MODEL > "${F}/hf-diar.json"
+    _st_ghjson > "${F}/gh-release.json"
+    sed -n 's/.*--hash=sha256:\([0-9a-f]*\).*/\1/p' "${st}/pip.lock" "${st}/requirements.lock" > "${F}/pypi-hashes"
+  }
+  _st_env() {  # roda o wrapper <arquivo> com os argumentos, no modo de teste
+    local f="$1"; shift
+    env ONION_STT_SERVICE_TEST=1 ONION_STT_SERVICE_ROOT="${d}/run/root" ONION_STT_SERVICE_ETC="${d}/run/etc" \
+      ONION_STT_SERVICE_UNIT_DIR="${d}/run/units" ONION_STT_SERVICE_BACKUP_DIR="${d}/run/bk" ONION_STT_SERVICE_LOCK="${d}/run/lock" \
+      STT_FAKE="${d}/run/fk" PATH="${fk}:${PATH}" LC_ALL=C bash "${f}" "$@" 2>&1
+  }
+  _st_install_rendered() { _st_env "${wr}" show > "${d}/run/units/onion-vps-stt.service"; }
+  _st_stage_all() {  # a área montada (os diretórios endereçados pelo conteúdo, lidos da unit renderizada, com o marcador)
+    local u p; u="$(_st_env "${wr}" show)"
+    for p in $(grep -oE "${d}/run/root/(venv|code)-[0-9a-f]{12}" <<<"${u}" | sort -u) \
+             $(grep -oE -- "--(model|vad)-dir [^ ]+" <<<"${u}" | awk '{print $2}') \
+             $(grep -oE "${d}/run/root/(models|bin)/[^/ ]+@[0-9a-f]{12}" <<<"${u}" | sort -u); do
+      mkdir -p "${p}"; : > "${p}/.onion-stt-complete"
+    done
+  }
+  # _stcase <nome> <rc esperado> <padrão na saída (ERE) ou -> <âncora> <novo> <preparo> <args…>: o caso passa no VIVO e
+  # REPROVA na cópia mutada (rc diferente ou padrão ausente). O <preparo> roda antes de cada execução (estado limpo).
+  _stcase() {
+    local name="$1" want="$2" pat="$3" old="$4" new="$5" prep="$6"; shift 6
+    local out rc ok=0 mout mrc nm
+    _st_reset; "${prep}"
+    out="$(_st_env "${wr}" "$@")"; rc=$?
+    if [ "${rc}" = "${want}" ] && { [ "${pat}" = - ] || grep -qE -- "${pat}" <<<"${out}"; } && _st_post_ok; then ok=1
+      record_pass "stt-service: ${name}"
+    else record_fail "stt-service: ${name}" "rc=${rc} (esperado ${want}): $(tail -3 <<<"${out}" | tr '\n' '|' | cut -c1-300)"; fi
+    cp "${wr}" "${d}/wops/stt-service.sh"
+    nm="$(grep -cF -- "${old}" "${d}/wops/stt-service.sh" || true)"
+    if [ "${nm}" != 1 ]; then record_fail "stt-service: ${name} (MUT)" "âncora aparece ${nm}× no wrapper (tem de ser 1): ${old:0:80}"; return; fi
+    _st_reset; "${prep}"
+    mout="$(LC_ALL=C bash "${helper}" "${d}/wops/stt-service.sh" "${old}|||${new}" \
+            env ONION_STT_SERVICE_TEST=1 ONION_STT_SERVICE_ROOT="${d}/run/root" ONION_STT_SERVICE_ETC="${d}/run/etc" \
+            ONION_STT_SERVICE_UNIT_DIR="${d}/run/units" ONION_STT_SERVICE_BACKUP_DIR="${d}/run/bk" ONION_STT_SERVICE_LOCK="${d}/run/lock" \
+            STT_FAKE="${d}/run/fk" PATH="${fk}:${PATH}" bash "${d}/wops/stt-service.sh" "$@" 2>&1)"; mrc=$?
+    if [ "${mrc}" = "${want}" ] && { [ "${pat}" = - ] || grep -qE -- "${pat}" <<<"${mout}"; } && _st_post_ok; then
+      record_fail "stt-service: ${name} (MUT)" "o mutante SOBREVIVEU: ${new:0:80}"
+    else record_pass "stt-service: ${name} (MUT reprova)"; fi
+  }
+  _st_post_ok() { return 0; }   # a pós-condição do caso (cada caso que precisa a redefine e a devolve depois)
+  _p_none() { :; }
+  _p_live() { _st_install_rendered; }
+  _p_free() { : > "${d}/run/fk/ss"; }   # ensaio: porta livre, nada instalado
+  # (w1) a unit renderizada: loopback, sandbox, sem rede de saída, teto de memória, token por credencial e não no argv
+  _st_post_ok() { :; }
+  local U; U="$(_st_reset; _st_env "${wr}" show)"
+  local miss=""
+  for want in 'ExecStart=.* --host 127.0.0.1 ' '^DynamicUser=yes$' '^ProtectHome=yes$' '^ProtectSystem=strict$' '^PrivateTmp=yes$' \
+              '^NoNewPrivileges=yes$' '^IPAddressDeny=any$' '^IPAddressAllow=localhost$' '^MemoryMax=6G$' '^MemorySwapMax=0$' '^OOMPolicy=continue$' \
+              '^LoadCredential=token:' '^CapabilityBoundingSet=$' '^Environment=HF_HUB_OFFLINE=1 ' \
+              'ExecStart=.* --diar-bin [^ ]*/bin/nemo-speech-0\.2\.0-cpu@f396057150f1/nemo-speech-0\.2\.0-linux-x86_64-cpu/bin/nemo-speech ' \
+              'ExecStart=.* --diar-model [^ ]*/models/nemotron-3-diarization-q8_0@f667ed73aee5/Nemotron-3-Diarization\.q8_0\.gguf ' \
+              'ExecStart=.* --diar-max-s [0-9]+ '; do
+    grep -qE -- "${want}" <<<"${U}" || miss+=" ${want}"
+  done
+  grep -qiE '^ExecStart=.*token' <<<"${U}" && miss+=" (token no ExecStart)"
+  if [ -z "${miss}" ]; then record_pass "stt-service: (w1) show renderiza loopback, sandbox, sem saída de rede, MemoryMax=6G, token por credencial e o diarizador pelos pins"
+  else record_fail "stt-service: (w1) show" "faltou:${miss}"; fi
+  local m1
+  for m1 in '"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX" "IPAddressDeny=any" "IPAddressAllow=localhost"|||"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX"  # ONION_MUTANTE' \
+            'SERVER_ARGS=( --host 127.0.0.1 --model-dir|||SERVER_ARGS=( --host 0.0.0.0 --model-dir  # ONION_MUTANTE' \
+            '"ProtectSystem=strict" "ProtectHome=yes"|||"ProtectSystem=strict"  # ONION_MUTANTE' \
+            '"DynamicUser=yes" "LoadCredential=token:${TOKEN_FILE}"|||"LoadCredential=token:${TOKEN_FILE}"  # ONION_MUTANTE'; do
+    cp "${wr}" "${d}/wops/stt-service.sh"
+    local mu; mu="$(_st_reset; LC_ALL=C bash "${helper}" "${d}/wops/stt-service.sh" "${m1}" env ONION_STT_SERVICE_TEST=1 \
+      ONION_STT_SERVICE_ROOT="${d}/run/root" ONION_STT_SERVICE_ETC="${d}/run/etc" ONION_STT_SERVICE_UNIT_DIR="${d}/run/units" \
+      ONION_STT_SERVICE_BACKUP_DIR="${d}/run/bk" ONION_STT_SERVICE_LOCK="${d}/run/lock" bash "${d}/wops/stt-service.sh" show 2>&1)"
+    local mmiss=""
+    for want in 'ExecStart=.* --host 127.0.0.1 ' '^DynamicUser=yes$' '^ProtectHome=yes$' '^IPAddressDeny=any$'; do
+      grep -qE -- "${want}" <<<"${mu}" || mmiss+=" ${want}"
+    done
+    if [ -n "${mmiss}" ]; then record_pass "stt-service: (w1) MUT reprova (${m1%%|||*})"; else record_fail "stt-service: (w1) MUT" "sobreviveu: ${m1:0:80}"; fi
+  done
+  # (w2) produção não se redireciona por ambiente · (w3) uso inválido
+  local r2; r2="$(env ONION_STT_SERVICE_ROOT=/tmp/x LC_ALL=C bash "${wr}" show 2>&1)"; rc=$?
+  # o mutante roda num CHECKOUT git temporário (o wrapper e o ops/stt rastreados e commitados): sem isso a cópia morreria
+  # antes, na guarda do "arquivo rastreado", e o caso provaria a guarda errada (refutador, passada 1)
+  local gr="${d}/gitw"; mkdir -p "${gr}/ops"; cp -r "${st}" "${gr}/ops/stt"; cp "${wr}" "${gr}/ops/stt-service.sh"
+  git -C "${gr}" init -q -b main && git -C "${gr}" add -A && git -C "${gr}" -c user.email=t@t -c user.name=t commit -q -m base
+  # o mutante é COMMITADO no checkout temporário antes de rodar: sem a guarda do ambiente, a produção segue e imprime a
+  # unit (rc 0) — a prova de que é ESTA guarda, e não a do rastreio, que recusa
+  local r2m; r2m="$(LC_ALL=C bash "${helper}" "${gr}/ops/stt-service.sh" "  if compgen -e | grep -E '^ONION_STT_SERVICE_' >/dev/null; then|||  if false; then  # ONION_MUTANTE" \
+     bash -c 'cd "$1" && git -c user.email=t@t -c user.name=t commit -qam mutante && env ONION_STT_SERVICE_ROOT=/tmp/x bash ops/stt-service.sh show' _ "${gr}" 2>&1)"; local rc2m=$?
+  if [ "${rc}" = 3 ] && grep -q 'não se redireciona' <<<"${r2}" && [ "${rc2m}" = 0 ] && grep -q '^\[Service\]' <<<"${r2m}"; then
+    record_pass "stt-service: (w2) ONION_STT_SERVICE_* sem o modo de teste → rc 3 (e o mutante sem a guarda passa adiante)"
+  else record_fail "stt-service: (w2)" "rc=${rc} rc_mutante=${rc2m}: ${r2:0:160}"; fi
+  _stcase "(w3) opção fora da lista fechada → rc 3" 3 'opção não aceita' \
+    '    *) die 3 "opção não aceita: $1' '    *) shift; continue; die 3 "x: $1  # ONION_MUTANTE' _p_none install --port 9999
+  # (w4) o ensaio não escreve nada
+  _st_post_ok() { [ ! -e "${d}/run/root" ] && [ ! -e "${d}/run/etc" ] && [ -z "$(ls -A "${d}/run/units")" ]; }
+  _stcase "(w4) ensaio com tudo conferido → rc 0 e NADA escrito (área, token, unit)" 0 'ENSAIO OK: nada foi escrito' \
+    'if [ "${APPLY}" = 0 ]; then' 'if false; then  # ONION_MUTANTE' _p_free install
+  _st_post_ok() { return 0; }
+  # (w5) pin do modelo diferente da fonte · (w6) hash do lock ausente no PyPI · (w7) porta de outro processo
+  _p_hfbad() { _p_free; sed -i 's/6139d2fa7e1b086097b277c7149725edbab89cc7c7ae64b23c741be4055aff09/'"$(printf 'e%.0s' $(seq 64))"'/' "${d}/run/fk/hf-model.json"; }
+  _stcase "(w5) sha256 publicado do encoder diferente do fixado → rc 1" 1 'FALHA encoder-model.int8.onnx' \
+    '    if s is None or got != digest or int(s.get("size") or -1) != int(size):' '    if s is None:  # ONION_MUTANTE' _p_hfbad install
+  _p_pypibad() { _p_free; grep -m1 '^onnxruntime==' "${st}/requirements.lock" | sed 's/.*sha256://' > "${d}/run/fk/pypi-drop"; }
+  _stcase "(w6) hash do lock que o PyPI não publica → rc 1" 1 'FALHA onnxruntime' \
+    "      printf '    FALHA %s %s: o hash %s não está entre os arquivos publicados\\n' \"\${name}\" \"\${ver}\" \"\${hash:0:12}\"; bad=1" \
+    "      printf '    FALHA %s %s: o hash %s não está entre os arquivos publicados\\n' \"\${name}\" \"\${ver}\" \"\${hash:0:12}\"  # ONION_MUTANTE" _p_pypibad install
+  _p_portother() { printf 'LISTEN 0 128 127.0.0.1:8765 0.0.0.0:* users:(("nc",pid=999,fd=3))\n' > "${d}/run/fk/ss"; sed -i 's/^MainPID=.*/MainPID=0/' "${d}/run/fk/show"; }
+  _stcase "(w7) a porta é de outro processo → rc 1" 1 'ocupada por outro processo' \
+    '    || die 1 "a porta ${PORT} está ocupada por outro processo: ${occ}"' '    || true  # ONION_MUTANTE' _p_portother install
+  # (w22) a máquina sem 3.12 é recusada (o python3 falso responde à sonda como 3.13)
+  _p_pyver() { _p_free; : > "${d}/run/fk/pyver-bad"; }
+  _stcase "(w22) python3 que não é 3.12 → rc 1 (o lock fixa rodas cp312)" 1 'python3 não é 3.12' \
+    '  || die 1 "python3 não é 3.12: o requirements.lock fixa rodas cp312 (refaça o lock para a versão nova)"' '  || true  # ONION_MUTANTE' _p_pyver install
+  # (w8..w14) o verify
+  _stcase "(w8) verify do serviço saudável → rc 0" 0 'verify OK' \
+    '  [ "${vrc}" = 0 ] || return "${vrc}"' '  return 1  # ONION_MUTANTE' _p_live verify
+  _p_wide() { _p_live; printf 'LISTEN 0 2048 0.0.0.0:8765 0.0.0.0:*\n' > "${d}/run/fk/ss"; }
+  _stcase "(w9) verify com a porta escutando fora do loopback → rc 1" 1 'FORA do loopback' \
+    '    case "${a}" in "127.0.0.1:${PORT}"|"[::1]:${PORT}") : ;; *)' '    case "${a}" in *) : ;; ONION_MUTANTE)' _p_wide verify
+  _p_smokefail() { _p_live; printf 'OK a\nFALHA 401 sem token: esperado 401/401, veio 200/200\nn_fail=1\n' > "${d}/run/fk/smoke-url"; echo 1 > "${d}/run/fk/smoke-url-rc"; }
+  _stcase "(w10) verify cuja prova pelo cliente reprova (servidor aceitou sem token) → rc 1" 1 'FALHA 401' \
+    "  [ \"\${rc}\" = 0 ] && grep -qx 'n_fail=0' <<<\"\${out}\" && return 0" "  return 0  # ONION_MUTANTE" _p_smokefail verify
+  _p_smokecut() { _p_live; printf 'OK a\n' > "${d}/run/fk/smoke-url"; echo 1 > "${d}/run/fk/smoke-url-rc"; }
+  _stcase "(w11) verify cuja prova não chega ao fim (sem n_fail=) → rc 2, NÃO MEDI" 2 'NÃO MEDI' \
+    "  if ! grep -qE '^n_fail=[0-9]+\$' <<<\"\${out}\"; then" "  if false; then  # ONION_MUTANTE" _p_smokecut verify
+  _p_mem() { _p_live; sed -i 's/^MemoryMax=.*/MemoryMax=infinity/' "${d}/run/fk/show"; }
+  _stcase "(w12) verify com MemoryMax efetivo diferente → rc 1" 1 'MemoryMax efetivo' \
+    '  [ "${mem}" = "${MEMORY_MAX_BYTES}" ] || {' '  true || { : ONION_MUTANTE;' _p_mem verify
+  _p_sha() { _p_live; printf '{"ready":true,"server_sha256":"%s"}\n' "$(printf 'b%.0s' $(seq 64))" > "${d}/run/fk/health"; }
+  _stcase "(w13) verify com o processo servindo outro código → rc 1" 1 'serve outro código' \
+    '  [ "${hsha}" = "${SERVER_SHA}" ] || {' '  true || { : ONION_MUTANTE;' _p_sha verify
+  _p_drift() { _p_live; sed -i 's/MemoryMax=6G/MemoryMax=8G/' "${d}/run/units/onion-vps-stt.service"; }
+  _stcase "(w14) verify com a unit instalada diferente da renderizada → rc 1" 1 'DIFERE da renderizada' \
+    '  if priv cmp -s "${UNIT_FILE}" "${TMPD}/${UNIT}.service"; then' '  if true; then : ONION_MUTANTE;' _p_drift verify
+  # (w15) o --apply: token 0600 gerado e NUNCA na saída, unit instalada = renderizada, prova pré-troca e verify rodados
+  _p_apply() { _p_free; _st_stage_all; printf 'LISTEN 0 2048 127.0.0.1:8765 0.0.0.0:*\n' > "${d}/run/fk/ss.after"; }
+  _st_post_ok() {
+    local t="${d}/run/etc/token"
+    [ -f "${t}" ] && [ "$(stat -c %a "${t}")" = 600 ] && [ "$(wc -c < "${t}")" -ge 33 ] \
+      && ! grep -qF -- "$(cat "${t}")" <<<"${_ST_LAST_OUT:-}" \
+      && cmp -s "${d}/run/units/onion-vps-stt.service" <(_st_env "${wr}" show) \
+      && grep -q '^serve ' "${d}/run/fk/sr-calls" && grep -q '^url ' "${d}/run/fk/sr-calls"
+  }
+  # o fake do ss responde "porta livre" no pré-voo e "loopback" depois do restart (o systemctl falso troca o arquivo)
+  _ST_LAST_OUT=""
+  _st_env_capture() { _ST_LAST_OUT="$(_st_env "$@")"; printf '%s\n' "${_ST_LAST_OUT}"; }
+  _st_reset; _p_apply; _st_env_capture "${wr}" install --apply > "${d}/apply.out"; rc=$?
+  if [ "${rc}" = 0 ] && _st_post_ok; then record_pass "stt-service: (w15) --apply instala, gera o token 0600 sem imprimi-lo, prova antes e depois da troca"
+  else record_fail "stt-service: (w15) --apply" "rc=${rc}: $(tail -4 "${d}/apply.out" | tr '\n' '|' | cut -c1-300)"; fi
+  cp "${wr}" "${d}/wops/stt-service.sh"; _st_reset; _p_apply
+  _ST_LAST_OUT="$(LC_ALL=C bash "${helper}" "${d}/wops/stt-service.sh" "  priv sh -c 'umask 077; set -C;|||  priv sh -c 'umask 022; set -C; : ONION_MUTANTE;" \
+    env ONION_STT_SERVICE_TEST=1 ONION_STT_SERVICE_ROOT="${d}/run/root" ONION_STT_SERVICE_ETC="${d}/run/etc" \
+    ONION_STT_SERVICE_UNIT_DIR="${d}/run/units" ONION_STT_SERVICE_BACKUP_DIR="${d}/run/bk" ONION_STT_SERVICE_LOCK="${d}/run/lock" \
+    STT_FAKE="${d}/run/fk" PATH="${fk}:${PATH}" bash "${d}/wops/stt-service.sh" install --apply 2>&1)"; rc=$?
+  if [ "${rc}" = 0 ] && _st_post_ok; then record_fail "stt-service: (w15) MUT" "o token 0644 passou pela pós-condição"
+  else record_pass "stt-service: (w15) MUT reprova (token gerado com umask 022)"; fi
+  _st_post_ok() { return 0; }
+  # (w16) prova pré-troca que reprova: a unit de produção NÃO é tocada
+  _p_prefail() { _p_apply; printf 'FALHA rede de saída ABERTA\nn_fail=1\n' > "${d}/run/fk/smoke-serve"; echo 1 > "${d}/run/fk/smoke-serve-rc"; }
+  _st_post_ok() { [ ! -e "${d}/run/units/onion-vps-stt.service" ] && ! grep -q restart "${d}/run/fk/calls" 2>/dev/null; }
+  _stcase "(w16) a prova pré-troca reprova → rc 1 e a unit de produção NÃO é tocada" 1 'NÃO foi tocada' \
+    '[ "${r}" = 0 ] || die "${r}" "a prova pré-troca reprovou' '[ 0 = 0 ] || die "${r}" "a prova pré-troca reprovou  # ONION_MUTANTE' _p_prefail install --apply
+  _st_post_ok() { return 0; }
+  # (w17) drop-in na unit · (w18) IPAddressAllow fora do loopback · (w19) swap ligado (refutador, passada 1: o verify lia
+  # só o IPAddressDeny e o FragmentPath; um drop-in com IPAddressAllow=any abria a saída com o verify verde)
+  _p_dropin() { _p_live; sed -i "s|^DropInPaths=.*|DropInPaths=${d}/run/units/onion-vps-stt.service.d/x.conf|" "${d}/run/fk/show"; }
+  _stcase "(w17) verify com drop-in na unit → rc 1" 1 'drop-in' \
+    '  [ -z "${dpi}" ] || {' '  true || { : ONION_MUTANTE;' _p_dropin verify
+  _p_allow() { _p_live; sed -i 's|^IPAddressAllow=.*|IPAddressAllow=127.0.0.0/8 ::1/128 0.0.0.0/0|' "${d}/run/fk/show"; }
+  _stcase "(w18) verify com IPAddressAllow fora do loopback → rc 1" 1 'IPAddressAllow efetivo fora do loopback' \
+    '  for a in ${ipa}; do case "${a}" in 127.0.0.0/8|::1/128|127.0.0.1/32|localhost) : ;; *)' '  for a in ${ipa}; do case "${a}" in *) : ;; ONION_MUTANTE)' _p_allow verify
+  _p_halfdeny() { _p_live; sed -i 's|^IPAddressDeny=.*|IPAddressDeny=::/0|' "${d}/run/fk/show"; }
+  _stcase "(w20) verify com IPAddressDeny só de IPv6 → rc 1" 1 'não nega tudo' \
+    "  { grep -qE '(^| )any( |\$)' <<<\"\${ipd}\" || { grep -qE '(^| )0\\.0\\.0\\.0/0( |\$)' <<<\"\${ipd}\" && grep -qE '(^| )::/0( |\$)' <<<\"\${ipd}\"; }; } \\" \
+    "  { true || { : ONION_MUTANTE; }; } \\" _p_halfdeny verify
+  _p_reload() { _p_live; sed -i "s/^NeedDaemonReload=.*/NeedDaemonReload=yes/" "${d}/run/fk/show"; }
+  _stcase "(w21) verify com a unit em disco diferente da carregada → rc 1" 1 'NeedDaemonReload' \
+    '  [ "$(sed -n '"'"'s/^NeedDaemonReload=//p'"'"' <<<"${show}")" = no ] || {' '  true || { : ONION_MUTANTE;' _p_reload verify
+  _p_oom() { _p_live; sed -i 's|^OOMPolicy=.*|OOMPolicy=stop|' "${d}/run/fk/show"; }
+  _stcase "(w26) verify com OOMPolicy=stop (o OOM do filho derrubaria a unit) → rc 1" 1 'OOMPolicy efetivo' \
+    '  [ "$(sed -n '"'"'s/^OOMPolicy=//p'"'"' <<<"${show}")" = continue ] || {' '  true || { : ONION_MUTANTE;' _p_oom verify
+  _p_swap() { _p_live; sed -i 's|^MemorySwapMax=.*|MemorySwapMax=infinity|' "${d}/run/fk/show"; }
+  _stcase "(w19) verify com swap liberado → rc 1" 1 'MemorySwapMax efetivo' \
+    '  [ "$(sed -n '"'"'s/^MemorySwapMax=//p'"'"' <<<"${show}")" = 0 ] || {' '  true || { : ONION_MUTANTE;' _p_swap verify
+  # (w27) a extração do binário do diarizador é FILTRADA (tarfile filter="data") e a sonda não roda como root: pela FORMA,
+  # porque o stage_diar_bin só roda no --apply (o download real); o mutante tira o filtro e tem de reprovar
+  _st_tarform() { grep -qF 'extractall(sys.argv[2], filter="data")' "$1" && grep -qF 'setpriv --reuid=65534' "$1"; }
+  cp "${wr}" "${d}/wops/stt-service.sh"
+  if _st_tarform "${wr}" && ! LC_ALL=C bash "${helper}" "${d}/wops/stt-service.sh" \
+       'extractall(sys.argv[2], filter="data")|||extractall(sys.argv[2])  # ONION_MUTANTE' \
+       bash -c "$(declare -f _st_tarform); _st_tarform '${d}/wops/stt-service.sh'" >/dev/null 2>&1; then
+    record_pass "stt-service: (w27) extração do diarizador filtrada e sonda sem root, pela FORMA (o download real é do --apply; o mutante sem filtro reprova)"
+  else record_fail "stt-service: (w27) forma da extração" "sem filter=\"data\" ou sem setpriv no stage_diar_bin, ou o mutante passou"; fi
+  # (w23) digest do asset do diarizador no GitHub diferente do fixado · (w24) sha256 do gguf publicado diferente ·
+  # (w25) a prova (verify e unit transitória) recebe o fixture de 2 falantes
+  _p_ghbad() { _p_free; sed -i 's/f396057150f1b774935c7414fd32ebc04195a795a34120d78d8c9ecefa1b7507/'"$(printf 'd%.0s' $(seq 64))"'/' "${d}/run/fk/gh-release.json"; }
+  _stcase "(w23) digest publicado do binário do diarizador diferente do fixado → rc 1" 1 'FALHA nemo-speech-0\.2\.0-linux-x86_64-cpu\.tar\.gz' \
+    'check_gh_asset; r=$?; [ "${r}" = 0 ] || die "${r}" "pin do binário do diarizador não confere com a fonte oficial"' \
+    'check_gh_asset; r=0  # ONION_MUTANTE' _p_ghbad install
+  _p_hfdiarbad() { _p_free; sed -i 's/08456d9e22cd9a323c0364d98375f3746d6e68507ebb705cd46438c534c7a3a1/'"$(printf 'c%.0s' $(seq 64))"'/' "${d}/run/fk/hf-diar.json"; }
+  _stcase "(w24) sha256 publicado do gguf do diarizador diferente do fixado → rc 1" 1 'FALHA Nemotron-3-Diarization\.q8_0\.gguf' \
+    'check_hf "${DIAR_MODEL_REPO}" "${DIAR_MODEL_REV}" "${DIAR_MODEL_FILES[@]}"; r=$?; [ "${r}" = 0 ] || die' \
+    'r=0; [ "${r}" = 0 ] || die  # ONION_MUTANTE' _p_hfdiarbad install
+  _st_post_ok() { grep -qE -- '--diar-fixture [^ ]*/code-[0-9a-f]{12}/fixtures/fleurs-ptbr-2spk-aba\.flac' "${d}/run/fk/sr-calls"; }
+  _stcase "(w25) o verify prova a diarização: a unit transitória recebe o fixture de 2 falantes" 0 'verify OK' \
+    '         --fixture "${CODE_DIR}/${FIXTURE}" --diar-fixture "${CODE_DIR}/${DIAR_FIXTURE}" "$@" 2>&1)"; rc=$?' \
+    '         --fixture "${CODE_DIR}/${FIXTURE}" "$@" 2>&1)"; rc=$?  # ONION_MUTANTE' _p_live verify
+  _st_post_ok() { return 0; }
+  # ── (s) o server.py de VERDADE com motor falso: exige o venv do serviço (ONION_STT_SELFTEST_PY, ou o instalado na área
+  # do serviço). Sem ele: ⊘ declarado — no CI a amarração do AuthGate/BodyLimit, o teto de duração, o 413 chunked e a
+  # fila são provados só onde o venv existe (a VPS depois do --apply).
+  local spy="${ONION_STT_SELFTEST_PY:-}" cand
+  if [ -z "${spy}" ]; then for cand in /opt/onion-stt/venv-*/bin/python; do [ -x "${cand}" ] && spy="${cand}"; done; fi
+  # ⚠️ SEM O VENV NÃO É SKIP (o CI roda em STRICT: ⊘ = FALHA, medido no 1º CI do #1184): sem as dependências, a
+  # AMARRAÇÃO é conferida pela FORMA (AST do server.py: o build_app devolve core.AuthGate(core.BodyLimit(...)) e o
+  # parse_args recusa host fora do loopback), com mutante; o rótulo DIZ que o servidor real não rodou aqui.
+  _st_ast() {  # <server.py> → rc 0 se a amarração está na forma
+    python3 -I - "$1" <<'PY'
+import ast, sys
+t = ast.parse(open(sys.argv[1], encoding="utf-8").read())
+fn = {f.name: f for f in t.body if isinstance(f, ast.FunctionDef)}
+def is_call(n, attr):
+    return isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == attr \
+        and isinstance(n.func.value, ast.Name) and n.func.value.id == "core"
+rets = [r for r in ast.walk(fn["build_app"]) if isinstance(r, ast.Return) and r.value is not None]
+last = fn["build_app"].body[-1]
+ok_wrap = isinstance(last, ast.Return) and is_call(last.value, "AuthGate") and last.value.args and is_call(last.value.args[0], "BodyLimit")
+ok_host = "is_loopback" in ast.unparse(fn["parse_args"])
+sys.exit(0 if ok_wrap and ok_host else 1)
+PY
+  }
+  if [ -z "${spy}" ] || ! "${spy}" -I -c 'import numpy, soundfile, starlette, uvicorn' >/dev/null 2>&1; then
+    local am="${d}/ast-mut"; mkdir -p "${am}"; cp "${st}/server.py" "${am}/server.py"
+    if _st_ast "${st}/server.py" && ! LC_ALL=C bash "${helper}" "${am}/server.py" \
+         '    return core.AuthGate(core.BodyLimit(inner, a.max_body_mb * 1024 * 1024), token)|||    return inner  # ONION_MUTANTE' \
+         bash -c "$(declare -f _st_ast); _st_ast '${am}/server.py'" >/dev/null 2>&1; then
+      record_pass "stt-service: (s) amarração do AuthGate/BodyLimit e recusa de host pela FORMA (sem o venv neste host: o server.py real NÃO rodou aqui; roda com ONION_STT_SELFTEST_PY ou a área instalada)"
+    else record_fail "stt-service: (s) forma da amarração" "o build_app não devolve core.AuthGate(core.BodyLimit(...)) ou o mutante passou"; fi
+  else
+    local so src_ok=22
+    if so="$(cd / && LC_ALL=C "${spy}" -I -B "${st}/server_selftest.py" 2>&1)"; then rc=0; else rc=$?; fi
+    if [ "${rc}" = 0 ] && grep -qE "^TOTAL ${src_ok} FAIL 0$" <<<"${so}"; then
+      record_pass "stt-service: (s) server.py real com motor falso — ${src_ok} casos (401 amarrado, loopback, teto de duração, 413 chunked, fila, diarização que nunca derruba)"
+    else record_fail "stt-service: (s) server.py real" "rc=${rc}: $(grep -E '^(FAIL|TOTAL|SKIP)' <<<"${so}" | head -4 | tr '\n' '|')"; fi
+    mkdir -p "${d}/smut"
+    while IFS=$'\x1f' read -r old new want; do
+      [ -n "${old}" ] || continue
+      cp "${st}/server.py" "${st}/stt_core.py" "${d}/smut/"
+      n="$(grep -cF -- "${old}" "${d}/smut/server.py" || true)"
+      if [ "${n}" != 1 ]; then record_fail "stt-service: (s) ${want}" "âncora aparece ${n}× no server.py: ${old:0:80}"; continue; fi
+      if mo="$(cd / && LC_ALL=C bash "${helper}" "${d}/smut/server.py" "${old}|||${new}" "${spy}" -I -B "${st}/server_selftest.py" \
+               --server "${d}/smut/server.py" --until "${want}" 2>&1)"; then mrc=0; else mrc=$?; fi
+      if [ "${mrc}" -ne 0 ] && grep -q "^FAIL ${want}" <<<"${mo}"; then record_pass "stt-service: (s) mutante reprova ${want}"
+      else record_fail "stt-service: (s) ${want}" "o mutante SOBREVIVEU (rc=${mrc}): $(tail -2 <<<"${mo}" | tr '\n' '|')"; fi
+    done <<EOF_SMUT
+    return core.AuthGate(core.BodyLimit(inner, a.max_body_mb * 1024 * 1024), token)$(printf '\x1f')    return inner  # ONION_MUTANTE$(printf '\x1f')srv-sem-token-401
+        if not ipaddress.ip_address(a.host).is_loopback:$(printf '\x1f')        if False:  # ONION_MUTANTE$(printf '\x1f')srv-host-fora-do-loopback-recusa
+            why = core.audio_too_long(int(info.frames), int(info.samplerate), int(info.channels), max_s)$(printf '\x1f')            why = None  # ONION_MUTANTE$(printf '\x1f')srv-duracao-acima-do-teto-413
+    why = core.audio_too_long(int(oinfo.frames), int(oinfo.samplerate), int(oinfo.channels), max_s)$(printf '\x1f')    why = None  # ONION_MUTANTE$(printf '\x1f')srv-duracao-pelo-ffmpeg-413
+    inner = Starlette(routes=routes, exception_handlers={core.BodyTooLarge: too_large})$(printf '\x1f')    inner = Starlette(routes=routes)  # ONION_MUTANTE$(printf '\x1f')srv-chunked-acima-do-teto-413
+            except core.BodyTooLarge:$(printf '\x1f')            except ZeroDivisionError:  # ONION_MUTANTE$(printf '\x1f')srv-multipart-chunked-acima-do-teto-413
+    except (RuntimeError, OSError) as e:  # LibsndfileError é RuntimeError: arquivo corrompido é 400, nunca 500$(printf '\x1f')    except ZeroDivisionError as e:  # ONION_MUTANTE$(printf '\x1f')srv-flac-corrompido-400
+           *([] if multichannel else ["-ac", "1"]), "-c:a", "pcm_s16le", "-fs", str(fs), "-y", out]$(printf '\x1f')           *([] if multichannel else ["-ac", "1"]), "-c:a", "pcm_s16le", "-y", out]  # ONION_MUTANTE$(printf '\x1f')srv-ffmpeg-fs-limita-disco
+        if state["inflight"] >= a.queue_max:$(printf '\x1f')        if False:  # ONION_MUTANTE$(printf '\x1f')srv-fila-cheia-429
+                        words = core.assign_speakers(words, diar.turns)$(printf '\x1f')                        pass  # ONION_MUTANTE$(printf '\x1f')srv-diarize-deepgram-speaker-por-palavra
+            body["metadata"]["onion_diarization"] = [d.public() for d in diars]$(printf '\x1f')            pass  # ONION_MUTANTE$(printf '\x1f')srv-diarize-falha-nao-derruba-a-transcricao
+        except Exception as e:  # noqa: BLE001 — exceção do diarizador vira failed, nunca 500$(printf '\x1f')        except ZeroDivisionError as e:  # ONION_MUTANTE$(printf '\x1f')srv-diarize-excecao-nao-derruba-a-transcricao
+                segments = core.diarize_segments(segments, diar.turns)$(printf '\x1f')                pass  # ONION_MUTANTE$(printf '\x1f')srv-diarize-openai-verbose-com-falante
+            if want_diar and fmt != "verbose_json":$(printf '\x1f')            if False:  # ONION_MUTANTE$(printf '\x1f')srv-diarize-openai-verbose-com-falante
+            return None, core.DiarResult("unavailable", "diarization not configured on this server")$(printf '\x1f')            return None, None  # ONION_MUTANTE$(printf '\x1f')srv-diarize-sem-diarizador-declara-unavailable
+        if dur > a.diar_max_s:$(printf '\x1f')        if False:  # ONION_MUTANTE$(printf '\x1f')srv-diarize-acima-do-teto-declara-skipped
+            if not (os.path.isfile(a.diar_bin) and os.access(a.diar_bin, os.X_OK)):$(printf '\x1f')            if False:  # ONION_MUTANTE$(printf '\x1f')srv-diarize-boot-recusa-diarizador-ausente
+                    r[5] = diar_run(wav, early, dur, td)$(printf '\x1f')                    r[5] = diar_run(*pend[0], td)  # ONION_MUTANTE$(printf '\x1f')srv-diarize-multicanal-cada-canal
+                del audio  # o float32 do canal sai da memória ANTES de qualquer filho do diarizador subir$(printf '\x1f')                chans[i] = audio  # ONION_MUTANTE$(printf '\x1f')srv-diarize-float-solto-antes-do-filho
+            pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2")$(printf '\x1f')            pcm = (audio * 32767.0).astype("<i2")  # ONION_MUTANTE$(printf '\x1f')srv-diarize-wav-com-clip
+                shutil.rmtree(td, ignore_errors=True)$(printf '\x1f')                pass  # ONION_MUTANTE$(printf '\x1f')srv-diarize-temporario-limpo
+            hdr["X-Diarization"] = dstat$(printf '\x1f')            pass  # ONION_MUTANTE$(printf '\x1f')srv-diarize-deepgram-speaker-por-palavra
+EOF_SMUT
+  fi
+  unset -f _st_hfjson _st_reset _st_env _st_install_rendered _st_stage_all _stcase _st_post_ok _p_none _p_live _p_free _p_pyver _p_hfbad \
+    _p_pypibad _p_oom _p_ghbad _p_hfdiarbad _st_ghjson _st_tarform _p_portother _p_wide _p_smokefail _p_smokecut _p_mem _p_sha _p_drift _p_apply _p_prefail _st_env_capture _p_dropin _p_allow _p_swap _p_halfdeny _p_reload _st_ast
+  rm -rf "${d}"
+}
+
+# ---------------------------------------------------------------------------
 # update-bridge (2026-10-16): as checagens PÓS-UPDATE do ops/update-bridge.sh são FAIL-CLOSED. Antes, o verify do
 # degrau 1 e o do runner, sob `set -e`, matavam o script NA ATRIBUIÇÃO com rc≠0 e sem uma linha (o AVISO era código
 # morto), e JWKS ausente ou boot que caiu saíam rc 0 com AVISO. O wrapper dirige sudo, systemctl e journalctl reais,
@@ -11248,6 +12005,122 @@ GLPY
     if [ -z "${gl_out}" ]; then
       record_pass "env-exposure: (l) glob julgado pela regra do bash e pelo disco: as 5 formas medidas passam; pasta com prod.env, cd, subshell, .env na linha e glob com ponto seguem barrados"
     else record_fail "env-exposure: (l) glob" "casos divergentes (índice:esperado>veio): ${gl_out}"; fi
+  fi
+  # (u) U4 (2026-10-20, sinal de campo de um hub adotante + REPLAY dos vetos reais desta máquina): de 74 comandos
+  #     distintos vetados nos transcripts, a main barrava 57; com a cura, 15 — 12 deles leem valor (ficam por
+  #     desenho). Polaridade 0: CADA ocorrência medida (find com `\(` e -prune, grep -o que só imprime nome de
+  #     chave, heredoc do relatório citando .env.test por "$REPORT", o laço de rebase com `case … *)`, git grep em
+  #     docs/, resíduo com SHA=$(…), python por heredoc, helper por $H, glob por pasta literal). Polaridade 2: as
+  #     leituras de valor e os escapes que a passada achou (dois anteriores à cura: `echo "$(cat .env)"` e
+  #     `find … | xargs cat`). E os MUTANTES: cada cura revertida numa cópia tem de inverter o caso dela.
+  if [ -f "${guard}" ]; then
+    local u4_out
+    u4_out="$(python3 - "${guard}" <<'U4PY'
+import json, os, shutil, subprocess, sys, tempfile
+G = sys.argv[1]
+root = tempfile.mkdtemp()
+SEM, COM = os.path.join(root, 'sem'), os.path.join(root, 'com')
+os.makedirs(os.path.join(SEM, 'data')); os.makedirs(COM)
+open(os.path.join(SEM, 'data', 'a.tsv'), 'w').close(); open(os.path.join(COM, 'prod.env'), 'w').close()
+def t(guard, cmd, cwd):
+    p = subprocess.run(['bash', guard], input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}, 'cwd': cwd}),
+                       capture_output=True, text=True)
+    return p.returncode
+Q = "'"
+C = {
+ # polaridade 0 — as ocorrências medidas
+ 'find-paren': (0, "find ~/x -maxdepth 4 \\( -name node_modules -o -name .git \\) -prune -o \\( -name " + Q + ".env*" + Q + " -o -name " + Q + "*.env" + Q + " \\) -print 2>&1 | head -40", SEM),
+ 'find-prune': (0, "cd ~/x && find . \\( -name node_modules -o -name dist \\) -prune -o -type f -iname " + Q + "*env*" + Q + " -print | head", SEM),
+ 'grep-o-eq': (0, "grep -oE " + Q + "^#? ?ZOHO_[A-Z_]+=" + Q + " .env | sort -u", SEM),
+ 'grep-o-lit': (0, "grep -o " + Q + "^[A-Z_]*LINEAR[A-Z_]*" + Q + " .env | sort -u", SEM),
+ 'grep-o-grp': (0, "grep -HoiE " + Q + "^[[:space:]]*(export[[:space:]]+)?[A-Z_]*(CLICKUP|SLACK)[A-Z0-9_]*[[:space:]]*=" + Q + " .env", SEM),
+ 'report': (0, "W=/x; REPORT=\"$W/docs/evolution/inbound/r.md\"; cat > \"$REPORT\" <<" + Q + "EOF" + Q + "\n- o .env.test fica fora\nEOF", SEM),
+ 'rebase-loop': (0, "cd /tmp && for i in $(seq 1 3); do U=$(git diff --name-only --diff-filter=U); [ -z \"$U\" ] && break; for f in $U; do case \"$f\" in docs/onion/*.md|docs/onion/*.tsv) git checkout --theirs -- \"$f\";; *) echo \"NAO: $f\"; break 2;; esac; done; done", SEM),
+ 'case-src': (0, "(set -a; source .env >/dev/null 2>&1; set +a; k=\"${K:-}\"; case \"$k\" in lin_*) echo a;; \"\") echo vazia;; *) echo outra;; esac)", SEM),
+ 'git-grep': (0, "git grep -nE " + Q + "docs/" + Q + " -- " + Q + "apps/**/Dockerfile*" + Q + " | head", SEM),
+ 'residue': (0, "SHA=$(git diff | sha256sum | cut -c1-64); cat > docs/r.md <<EOF\nsha: $SHA\n- **Merge:** o .env.local\nEOF", SEM),
+ 'residue-nl': (0, "mkdir -p d\ncat > d/x.md <<" + Q + "E" + Q + "\n- **a:** .env\nE", SEM),
+ 'py-heredoc': (0, "cd " + SEM + " && python3 -I - <<" + Q + "EOF" + Q + "\nprint(2 ** 3)\nEOF", SEM),
+ 'py-timeout': (0, "cd " + SEM + " && timeout 60 python3 -I - <<" + Q + "EOF" + Q + "\nprint(2 ** 3)\nEOF", SEM),
+ 'helper-var': (0, "H=.claude/utils/task-manager/env-check.sh; bash $H --env ~/x/.env --provider", SEM),
+ 'assign-only': (0, "E=/etc/app.env; [ -e $E ] && echo existe", SEM),
+ 'glob-var': (0, "D=data; grep -n x $D/*", SEM),
+ # polaridade 2 — leituras de valor e escapes
+ 'cat': (2, "cat .env", SEM),
+ 'grep-line': (2, "grep " + Q + "^[A-Z_]*=" + Q + " .env", SEM),
+ 'grep-o-val': (2, "grep -oE " + Q + "^[A-Z_]+=.*" + Q + " .env", SEM),
+ 'grep-o-val2': (2, "grep -oE " + Q + "^ZOHO_[A-Z_]+=[A-Za-z0-9]*" + Q + " .env", SEM),
+ 'grep-o-alt': (2, "grep -oE " + Q + "^A|[A-Z]*=" + Q + " .env", SEM),
+ 'grep-o-range': (2, "grep -oE " + Q + "^[0-z]*=" + Q + " .env", SEM),
+ 'grep-o-ctx': (2, "grep -oA2 " + Q + "^[A-Z_]*=" + Q + " .env", SEM),
+ 'grep-c': (2, "grep -c x .env", SEM),
+ 'find-exec': (2, "find . \\( -name .env \\) -exec cat {} \\;", SEM),
+ 'xargs': (2, "find . -name .env | xargs cat", SEM),
+ 'dq-subst': (2, "echo \"$(cat .env)\"", SEM),
+ 'script-heredoc': (2, "cat > x.sh <<" + Q + "E" + Q + "\ncat .env\nE", SEM),
+ 'source-data': (2, "source notes.md", SEM),
+ 'data-exec': (2, "cat > x.md <<" + Q + "E" + Q + "\ncat .env\nE\nbash x.md", SEM),
+ 'subst-heredoc': (2, "$(cat <<" + Q + "E" + Q + ")\ncat .env\nE", SEM),
+ 'group-pipe': (2, "{ cat <<" + Q + "E" + Q + "\ncat .env\nE\n} | bash", SEM),
+ 'subsh-pipe': (2, "( cat <<" + Q + "E" + Q + "\ncat .env\nE\n) | sh", SEM),
+ 'unquoted-subst': (2, "cat > x.md <<E\n$(cat .env)\nE", SEM),
+ 'py-cites': (2, "python3 - <<" + Q + "P" + Q + "\nprint(open('.env').read())\nP", SEM),
+ 'case-body': (2, "case x in a|b) echo;; *) head .env;; esac", SEM),
+ 'case-subst': (2, "case x in $(cat .env)) echo;; esac", SEM),
+ 'glob-var-env': (2, "D=" + COM + "; cat $D/*", SEM),
+ # 2ª passada adversarial (2026-10-20): flag permutada pelo getopt, arquivo de dados executado na mesma linha,
+ # .env por variável no prefixo do interpretador
+ 'grep-o-permuted': (2, "grep -oE " + Q + "^[A-Z_]+=" + Q + " .env -A3", SEM),
+ 'data-then-subst': (2, "cat > x.md <<" + Q + "E" + Q + "\ncat .env\nE\nbash -c \"$(cat x.md)\"", SEM),
+ 'data-then-pipe': (2, "cat > x.md <<" + Q + "E" + Q + "\ncat .env\nE\ncat x.md | bash", SEM),
+ 'py-env-prefix': (2, "F=.env python3 -I - <<" + Q + "P" + Q + "\nimport os;print(open(os.environ[" + Q + "F" + Q + "]).read())\nP", SEM),
+ 'residue-noext':(2, "SHA=$(git diff | sha256sum); cat > r <<" + Q + "E" + Q + "\n- **x:** .env\nE", SEM),
+}
+# mutantes: (rótulo, trecho da cura, trecho revertido, casos que TÊM de inverter)
+M = [
+ ('M1 \\( volta a ser operador', "cmd[i + 1] in '();&|<>' else", "cmd[i + 1] in '' else", ['find-paren', 'find-prune']),
+ ('M2 padrão do case volta a ser comando', "    plain = _segments_plain(toks)\n", "    plain = _segments_plain(toks)\n    return plain\n", ['rebase-loop', 'case-src']),
+ ('M3 grep -o de nomes volta ao veto', "name in GREPS and grep_names_only(args, seg)", "False", ['grep-o-eq', 'grep-o-lit', 'grep-o-grp']),
+ ('M4 heredoc de dados volta ao veto', "    data = bool(dests) and", "    data = False and bool(dests) and", ['report', 'residue']),
+ ('M5 substituição no prefixo volta a recusar', "or len(HEREDOC_ANY.findall(prefix)) != 1", "or len(HEREDOC_ANY.findall(prefix)) != 1 or '$(' in prefix", ['residue']),
+ ('M6 heredoc de interpretador volta a ser shell', "if name in INTERP and all(a in INTERP_STDIN_OK for a in args[1:]):", "if False:", ['py-heredoc']),
+ ('M7 substituição entre aspas não é julgada', "    for sub in substitutions(cmd):\n        r = judge(sub, depth + 1)", "    for sub in []:\n        r = judge(sub, depth + 1)", ['dq-subst']),
+ ('M8 subshell aberto antes do consumidor', "if _sp.count('(') != _sp.count(')'):", "if False:", ['subsh-pipe']),
+ ('M9 xargs na linha que cita .env', "if name == 'xargs' and CTX['strict']:", "if False:", ['xargs']),
+ ('M10 shell executando arquivo de dados', "if name in SHELLS | {'source', '.'}:", "if False:", ['source-data']),
+ ('M11 glob com variável literal', "lambda m: _av.get(m.group(1), m.group(0))", "lambda m: m.group(0)", ['glob-var']),
+ ('M12 segmento só de atribuição', "                    assigned[_k] = _v\n            continue\n", "                    assigned[_k] = _v\n", ['assign-only']),
+ ('M13 quebra de linha no prefixo do heredoc', "punctuation_chars=';&|()<>\\n')\n        lex.whitespace = ' \\t\\r'\n        lex.whitespace_split = True\n        lex.commenters = ''\n        toks = list(lex)\n    except", "punctuation_chars=';&|()<>')\n        lex.whitespace_split = True\n        lex.commenters = ''\n        toks = list(lex)\n    except", ['residue-nl']),
+ ('M14 parêntese contado por token', "_sp.count('(') != _sp.count(')')", "toks[:k].count('(') != toks[:k].count(')')", ['residue']),
+ ('M15 timeout diante do interpretador', "    if args[0] == 'timeout':", "    if False:", ['py-timeout']),
+ ('M16 o = tem de ser o último', "if '=' in body and (body.count('=') != 1 or not body.endswith('=')):", "if False:", ['grep-o-val2']),
+ ('M17 alternância no topo', "        elif c == '|':\n            if depth == 0:\n                return False", "        elif c == '|':\n            pass", ['grep-o-alt']),
+ ('M18 opção permutada depois do padrão', "if i < pi or x.startswith('-')]", "if i < pi]", ['grep-o-permuted']),
+ ('M19 dado executado na mesma linha', "if any(d[4] and cites_env(d[2]) and data_used_as_code(cmd, d[4]) for d in docs):", "if False:", ['data-then-subst', 'data-then-pipe']),
+ ('M20 .env na variável do interpretador', "if cites_env(body) or kind == 'interp-env':", "if cites_env(body):", ['py-env-prefix']),
+]
+bad = []
+for k, (e, c, w) in C.items():
+    g = t(G, c, w)
+    if g != e:
+        bad.append('%s:%d>%d' % (k, e, g))
+src = open(G, encoding='utf-8').read()
+mg = os.path.join(root, 'mut.sh')
+alive = []
+for lab, a, b, ks in M:
+    if src.count(a) != 1:
+        bad.append('%s: trecho ausente (%d)' % (lab, src.count(a))); continue
+    open(mg, 'w', encoding='utf-8').write(src.replace(a, b))
+    flipped = [k for k in ks if t(mg, C[k][1], C[k][2]) != C[k][0]]
+    if len(flipped) != len(ks):
+        alive.append('%s (não inverteu: %s)' % (lab, ','.join(k for k in ks if k not in flipped)))
+shutil.rmtree(root, ignore_errors=True)
+print(' '.join(bad + ['VIVO ' + a for a in alive]))
+U4PY
+)" || u4_out="o harness do caso (u) não rodou"
+    if [ -z "${u4_out}" ]; then
+      record_pass "env-exposure: (u) U4: as 16 formas medidas que não leem valor passam; 27 leituras de valor e escapes seguem barrados; os 20 mutantes de cura mordem"
+    else record_fail "env-exposure: (u) U4 (listar/nome de chave/prosa × ler valor)" "${u4_out}"; fi
   fi
   # (m) o caminho sancionado para a pergunta "a chave tem \r?": --lint fala por NOME, nunca pelo valor; e o
   #     leitor tira o \r final (uma chave colada de editor Windows saía com ele e virava HTTP 401)
@@ -12211,7 +13084,7 @@ run_mail_receiver_selftests() {
   if [ -z "$(bash "${helper}" --repo "$t" 2>&1)" ]; then record_pass "mail-receiver: dedup (mesmo conjunto → silencioso)"
   else record_fail "mail-receiver: dedup" "não deduplicou"; fi
   printf 'y' > "$t/docs/evolution/inbound/b.md"
-  if printf '%s' "$(bash "${helper}" --repo "$t" 2>&1)" | grep -q '2 não-lido'; then
+  if grep -q '2 não-lido' <<< "$(bash "${helper}" --repo "$t" 2>&1)"; then
     record_pass "mail-receiver: conjunto novo → acorda de novo"
   else record_fail "mail-receiver: novo" "não reacordou no conjunto novo"; fi
   rm -f "$t/.claude/sessions/.mail-receiver.state"
@@ -12234,7 +13107,7 @@ run_detect_transport_selftests() {
   if [ "$(FEDERATION_TRANSPORT=local bash "${helper}" x 2>/dev/null)" = "local" ]; then record_pass "detect-transport: env=local → local"
   else record_fail "detect-transport: local" "env=local não resolveu"; fi
   if [ "$(FEDERATION_TRANSPORT=a2a-live bash "${helper}" x 2>/dev/null)" = "a2a-live" ] \
-     && FEDERATION_TRANSPORT=a2a-live bash "${helper}" x 2>&1 >/dev/null | grep -qi gated; then
+     && grep -qi gated <<< "$(FEDERATION_TRANSPORT=a2a-live bash "${helper}" x 2>&1 >/dev/null)"; then
     record_pass "detect-transport: a2a-live explícito → a2a-live + avisa GATED (stub)"
   else record_fail "detect-transport: a2a-live" "não é a2a-live ou não avisou gated"; fi
   if [ "$(FEDERATION_TRANSPORT=auto bash "${helper}" __fantasma__ 2>/dev/null)" = "git-async" ]; then
@@ -13418,8 +14291,14 @@ STUB
   else record_fail "federation-a2a: invite surrogate" "rc=${rc} err='${ierr}'"; fi
   python3 -c 'import sys; open(sys.argv[1],"w").write("{\"version\":1,\"x\":" + "["*100000 + "]"*100000 + ",\"invites\":[]}")' "${iv}"; chmod 600 "${iv}"
   _fa_ls check --file "${iv}" --json
-  if [ "${rc}" -eq 2 ] && [ "$(jq -r .state <<< "${out}")" = unmeasured ]; then record_pass "federation-a2a: invite JSON fundo demais para o leitor → não medido (rc 2), nunca 'o bridge recusa'"
-  else record_fail "federation-a2a: invite JSON fundo" "rc=${rc} state=$(jq -r .state <<< "${out}" 2>/dev/null)"; fi
+  # O invariante é "nunca 'o bridge recusa'": o JSON.parse do Node lê o arquivo. Se ESTE leitor não consegue,
+  # o certo é "não medido" (rc 2); se consegue, o certo é ler (rc 0, ok). Medido em 2026-10-19: do Python 3.14
+  # em diante o limite do decodificador é a pilha real, e com pilha ≥ 16 MB (o runner ubuntu-26.04) os 100.000
+  # níveis LÊEM — o oráculo antigo, que só aceitava rc 2, derrubou a main e gerou um revert automático (#1205).
+  local _jst; _jst="$(jq -r .state <<< "${out}" 2>/dev/null)"
+  if { [ "${rc}" -eq 2 ] && [ "${_jst}" = unmeasured ]; } || { [ "${rc}" -eq 0 ] && [ "${_jst}" = ok ]; }; then
+    record_pass "federation-a2a: invite JSON fundo → não medido (rc 2) se o leitor não alcança, ok (rc 0) se alcança; nunca 'o bridge recusa'"
+  else record_fail "federation-a2a: invite JSON fundo" "rc=${rc} state=${_jst}"; fi
   printf '{"version":1,"invites":[]}\n' > "${iv}"; chmod 600 "${iv}"; mkfifo "${sb}/desc.fifo"
   rc=0; out="$(timeout 10 bash "${inv_m}" inspect --invite "${sb}/desc.fifo" --member acme --json 2>&1)" || rc=$?
   if [ "${rc}" -eq 1 ] && _fa_has "${out}" 'não é arquivo regular'; then record_pass "federation-a2a: invite inspect com FIFO no descritor → recusa sem travar"
@@ -13888,6 +14767,62 @@ run_resolve_scope_layers_selftests() {
     else record_fail "resolve-scope-layers: compose" "efetivo incorreto"; fi
   else record_skip "resolve-scope-layers: compose pulado (sem jq)"; fi
   rm -rf "$t" "$us"
+}
+
+# ---------------------------------------------------------------------------
+# Modo resolve-context-dir — exercita .claude/utils/scope/resolve-context-dir.sh (sinal de campo 2026-10-19,
+# num hub: o repo declarava `context.compliance: docs/compliance` e o /docs:build-compliance-docs
+# gravou em docs/compliance-context/). O caso (b) é o defeito verbatim; o mutante é o helper que ignora o
+# mapa e devolve sempre o default — (b) reprova. Self-contained.
+# ---------------------------------------------------------------------------
+run_resolve_context_dir_selftests() {
+  local helper="${REPO_ROOT}/.claude/utils/scope/resolve-context-dir.sh"
+  if [ ! -f "${helper}" ]; then record_fail "resolve-context-dir" "helper ausente: ${helper}"; return; fi
+  local t out rc; t="$(mktemp -d)"; mkdir -p "$t/.claude"
+  # (a) sem mapa → default da dimensão
+  out="$(bash "${helper}" compliance --repo "$t" --source 2>/dev/null)"
+  if [ "${out}" = $'docs/compliance-context\tdefault' ]; then record_pass "resolve-context-dir: (a) sem mapa → docs/compliance-context (default)"
+  else record_fail "resolve-context-dir: (a)" "veio '${out}'"; fi
+  # (b) o defeito verbatim: o mapa do hub declara outra pasta → ela vence o default
+  printf 'context:\n  business: docs/business-context\n  technical: docs/technical-context\n  compliance: docs/compliance\n' > "$t/.claude/onion-context.yaml"
+  out="$(bash "${helper}" compliance --repo "$t" --source 2>/dev/null)"
+  if [ "${out}" = $'docs/compliance\tonion-context' ]; then record_pass "resolve-context-dir: (b) context.compliance declarado vence o default (o caso do hub)"
+  else record_fail "resolve-context-dir: (b)" "veio '${out}' — a declaração explícita tem de vencer a convenção"; fi
+  # (c) aspas, comentário e barra final não mudam o caminho
+  printf 'context:  # mapa\n  technical: "docs/tech/"  # nota\n' > "$t/.claude/onion-context.yaml"
+  out="$(bash "${helper}" technical --repo "$t" 2>/dev/null)"
+  if [ "${out}" = "docs/tech" ]; then record_pass "resolve-context-dir: (c) aspas, comentário e barra final normalizados"
+  else record_fail "resolve-context-dir: (c)" "veio '${out}'"; fi
+  # (d) declaração absoluta ou com '..' → exit 3 (PARA; não grava no default calado)
+  printf 'context:\n  compliance: ../fora\n' > "$t/.claude/onion-context.yaml"
+  rc=0; bash "${helper}" compliance --repo "$t" >/dev/null 2>&1 || rc=$?
+  if [ "${rc}" -eq 3 ]; then record_pass "resolve-context-dir: (d) declaração com '..' → exit 3"
+  else record_fail "resolve-context-dir: (d)" "esperava 3, veio ${rc}"; fi
+  # (e) dimensão desconhecida → exit 2
+  rc=0; bash "${helper}" design --repo "$t" >/dev/null 2>&1 || rc=$?
+  if [ "${rc}" -eq 2 ]; then record_pass "resolve-context-dir: (e) dimensão fora de business|technical|compliance → exit 2"
+  else record_fail "resolve-context-dir: (e)" "esperava 2, veio ${rc}"; fi
+  # (f) declaração absoluta → exit 3; `--repo` sem valor → exit 2 (antes: laço infinito, passada adversarial)
+  printf 'context:\n  compliance: /abs\n' > "$t/.claude/onion-context.yaml"
+  rc=0; bash "${helper}" compliance --repo "$t" >/dev/null 2>&1 || rc=$?
+  local rc2=0; timeout 5 bash "${helper}" compliance --repo >/dev/null 2>&1 || rc2=$?
+  if [ "${rc}" -eq 3 ] && [ "${rc2}" -eq 2 ]; then record_pass "resolve-context-dir: (f) caminho absoluto → exit 3; --repo sem valor → exit 2 (sem laço)"
+  else record_fail "resolve-context-dir: (f)" "absoluto rc=${rc} (quer 3), --repo sem valor rc=${rc2} (quer 2)"; fi
+  # (g) só o filho DIRETO de context: responde, e espaço no fim do valor não entra no caminho
+  printf '\357\273\277context:\n  nested:\n    compliance: docs/errado\n  compliance: docs/certo   \n' > "$t/.claude/onion-context.yaml"
+  out="$(bash "${helper}" compliance --repo "$t" 2>/dev/null)"
+  if [ "${out}" = "docs/certo" ]; then record_pass "resolve-context-dir: (g) BOM, chave aninhada e espaço no fim não desviam o caminho"
+  else record_fail "resolve-context-dir: (g)" "veio '${out}'"; fi
+  # (m) MUTANTE: o helper que ignora o mapa (devolve sempre o default) tem de reprovar o caso do hub
+  local mu; mu="$(mktemp)"
+  sed 's/&& emit "${val}" "onion-context"/\&\& : "${val}"/' "${helper}" > "${mu}"
+  printf 'context:\n  compliance: docs/compliance\n' > "$t/.claude/onion-context.yaml"
+  out="$(bash "${mu}" compliance --repo "$t" 2>/dev/null)"
+  if ! command grep -q 'emit "${val}" "onion-context"' "${mu}" && [ "${out}" = "docs/compliance-context" ]; then
+    record_pass "resolve-context-dir: (m) mutante sem a leitura do mapa cai no default — o caso (b) o pegaria"
+  else record_fail "resolve-context-dir: (m) mutante" "não aplicou ou não mordeu (saída '${out}')"; fi
+  rm -f "${mu}"
+  rm -rf "$t"
 }
 
 # ---------------------------------------------------------------------------
@@ -14928,6 +15863,16 @@ run_review_artifact_selftests() {
   fi
   rm -rf "${mutv}"
 
+  # (ovo) o PAR guarda × motor: o rótulo da isenção que a guarda EMITE tem de ser o mesmo que o pr-finalize
+  # ACEITA. Se um lado mudar o vocabulário, a isenção quebra calada e o motor volta a morrer pedindo hash
+  # que a guarda não dá (o defeito medido no pin v1.0.254, 2026-10-20). E a isenção vale nos DOIS pontos que
+  # exigem resíduo (o esquema 0a e o _restamp): definição + 2 chamadas de _ovo_exempt (a 1ª cura cobriu só um).
+  local _ovo='PR-edita-o-proprio-revisor(ovo-galinha)'
+  if grep -qF "_skip \"${_ovo}\"" "${REPO_ROOT}/.claude/validation/review-artifact-check.sh" \
+     && grep -qF "⊘ fora de escopo: ${_ovo}" "${REPO_ROOT}/ops/pr-finalize.sh" \
+     && [ "$(grep -c '_ovo_exempt' "${REPO_ROOT}/ops/pr-finalize.sh")" -ge 3 ]; then
+    record_pass "review-artifact: (ovo) o pr-finalize aceita a isenção ovo-galinha com o mesmo rótulo que a guarda emite"
+  else record_fail "review-artifact: (ovo) par guarda × motor" "o rótulo da isenção diverge entre review-artifact-check.sh e pr-finalize.sh (ou um lado o perdeu)"; fi
 }
 
 # Modo empty-result-guard — .claude/hooks/bash-empty-result-guard.sh é a guarda anti-fail-open do
@@ -15208,9 +16153,13 @@ run_empty_result_guard_selftests() {
   #       segundo `trap ... EXIT` a substituiu (bash guarda UM handler por sinal). Re-armar sem
   #       asserção deixa o próximo `trap` — ou um helper `source`ado — desarmá-la de novo em silêncio.
   #       Esta checagem roda EM RUNTIME e pega inclusive clobber vindo de arquivo externo.
-  if trap -p EXIT 2>/dev/null | grep -q '_bench_on_exit'; then
+  # `trap -p` direto em arquivo, no shell CORRENTE: dentro de $(...) a bancada não enxerga o handler do
+  # pai (medido em 2026-10-19, na onda 2 do EPIPE), e o pipe antigo era a classe que a onda cura.
+  local _tpf; _tpf="$(mktemp)"; trap -p EXIT > "${_tpf}" 2>/dev/null
+  if grep -q '_bench_on_exit' "${_tpf}"; then
     record_pass "empty-result-guard: (b5c) o handler de EXIT ainda é o combinado — a guarda de abort NÃO está muda"
   else record_fail "empty-result-guard: (b5c)" "INVARIANTE VIOLADA: o handler de EXIT foi substituído — a guarda de abort está MUDA e um abort passaria como '666 verdes'"; fi
+  rm -f "${_tpf}"
 
   # (b3) CALA na CURA — o idioma do colchete. Sem este caso a regra poderia ser "acusa sempre que
   #      vir pgrep", que empurraria quem obedece para o bypass (a lição da REGRA 56, que puniu
@@ -15455,6 +16404,14 @@ run_empty_result_guard_selftests() {
     else record_fail "empty-result-guard: (p) mutation" "o mutante SEM o filtro ainda satisfaz (l) — o caso (l) passa por vacuo"; fi
   fi
   rm -rf "${gd}"
+  # (r) COMANDO GRANDE (>64 KB) com o padrão no começo: o `printf | grep -q` sob pipefail levava EPIPE e a
+  #     guarda CALAVA (0/8 na versão antiga, medido em 2026-10-19; era a falha intermitente do (g) no CI).
+  #     Here-string não tem pipe: 8/8. Determinístico, sem depender da corrida.
+  local _big; _big="$(python3 -c "import json;print(json.dumps('sudo ls /root/dir/*.log\n# '+'x'*200000))")"
+  out="$(_erg "${_big}" '""' || true)"
+  if grep -q 'GLOB-SOB-SUDO' <<< "${out}"; then
+    record_pass "empty-result-guard: (r) comando de 200 KB com o padrão no começo → acusa (sem EPIPE sob pipefail)"
+  else record_fail "empty-result-guard: (r) comando grande" "calou: o printf|grep -q sob pipefail levou EPIPE"; fi
 }
 
 # Modo varredura-sa — REGRA 54. O caso que FALTAVA: rodar o lint de DENTRO de um worktree.
@@ -20534,11 +21491,13 @@ run_assemble_plugin_selftests() {
     record_pass "assemble-plugin: design (commands+agents+utils+validation+proveniência)"
   else record_fail "assemble-plugin: design estrutura" "faltou componente no plugin design"; fi
 
-  # (b) COMPLIANCE: shape diferente — agentes + 1 command, SEM utils/ nem validation/ (generalização)
+  # (b) COMPLIANCE: shape diferente — agentes + 1 command + SÓ utils/scope (o resolve-context-dir.sh que o
+  #     Passo 0 do build-compliance-docs chama, sinal de campo 2026-10-19), SEM validation/ (sem gate: generaliza)
   bash "${helper}" "${mcompl}" "${REPO_ROOT}" "${d}/compliance" >/dev/null 2>&1
   if ls "${d}/compliance/agents/"*.md >/dev/null 2>&1 && [ -f "${d}/compliance/commands/build-compliance-docs.md" ] \
-     && [ ! -d "${d}/compliance/utils" ] && [ ! -d "${d}/compliance/validation" ]; then
-    record_pass "assemble-plugin: compliance (agentes+command, sem utils/gate — generaliza)"
+     && [ -f "${d}/compliance/utils/scope/resolve-context-dir.sh" ] \
+     && [ "$(ls "${d}/compliance/utils" 2>/dev/null | tr '\n' ' ')" = "scope " ] && [ ! -d "${d}/compliance/validation" ]; then
+    record_pass "assemble-plugin: compliance (agentes+command+utils/scope, sem gate — generaliza)"
   else record_fail "assemble-plugin: compliance estrutura" "shape inesperado no plugin compliance"; fi
 
   # (c) plugin.json = EXATAMENTE os 8 campos permitidos (ambos)
@@ -21205,8 +22164,8 @@ run_capability_selftests() {
   done
 
   # (b) resolução: agente real resolve, bogus não
-  if find "${REPO_ROOT}/.claude/agents" -name "soc2-specialist.md" 2>/dev/null | grep -q . \
-     && ! find "${REPO_ROOT}/.claude/agents" -name "__nao_existe__.md" 2>/dev/null | grep -q .; then
+  if grep -q . <<< "$(find "${REPO_ROOT}/.claude/agents" -name "soc2-specialist.md" 2>/dev/null)" \
+     && ! grep -q . <<< "$(find "${REPO_ROOT}/.claude/agents" -name "__nao_existe__.md" 2>/dev/null)"; then
     record_pass "capability: resolução de REQUIRES acerta presente/ausente"
   else record_fail "capability: resolução" "primitiva de resolução incorreta"; fi
 
@@ -21263,8 +22222,7 @@ run_capability_selftests() {
     local nc_out
     nc_out="$(bash "${SANDBOX}/.claude/validation/lint-artifacts.sh" --only="${SANDBOX}/.claude/utils/marketplace/./verticals/selftest-noncanon-probe.manifest.sh" 2>&1)" || true
     rm -f "${nc_dst}"
-    if printf '%s
-' "${nc_out}" | grep -q "mas só cumpre"; then
+    if grep -q "mas só cumpre" <<< "${nc_out}"; then
       record_pass "only-gate: --only não-canônico (/./) mantém a R20 detectando (inode-compare vivo)"
     else
       record_fail "only-gate: --only não-canônico" "R20 ficou cega a path com /./ — o -ef regrediu para string-compare?"
@@ -21322,7 +22280,7 @@ run_graph_selftests() {
     record_fail "graph: yaml_list" "função yaml_list não encontrada em graph.sh"
   fi
   # (b) regressão nos dados reais: nenhum nó de template no grafo
-  if bash "${gen}" --triples 2>/dev/null | grep -qE 'agente-[0-9]|comando-[0-9]|autonomy:'; then
+  if grep -qE 'agente-[0-9]|comando-[0-9]|autonomy:' <<< "$(bash "${gen}" --triples 2>/dev/null)"; then
     record_fail "graph: sem ruído de template" "triplas contêm placeholders (agente-N/comando-N/autonomy:)"
   else record_pass "graph: triplas sem ruído de template (placeholders de exemplos)"; fi
 
@@ -21349,7 +22307,7 @@ run_graph_selftests() {
     record_pass "graph: atores+comunicação presentes (maestro/assistant/onion)"
   else record_fail "graph: atores" "arestas de ator/comunicação ausentes — triplas=$(_emit "${T}" | grep -c .) · 1as: [$(_emit "${T}" | head -3 | tr '\n\t' '| ' | cut -c1-160)] · stderr: [$(bash "${gen}" --triples 2>&1 >/dev/null | head -2 | tr '\n' '|' | cut -c1-160)] (intermitente 1/15 em paralelo, 2026-09-03)"; fi
 
-  if bash "${gen}" --impact design-system-specialist 2>/dev/null | grep -q "onion-design"; then
+  if grep -q "onion-design" <<< "$(bash "${gen}" --impact design-system-specialist 2>/dev/null)"; then
     record_pass "graph: --impact retorna dependentes reais"
   else record_fail "graph: --impact" "impacto reverso não achou dependente conhecido"; fi
 
@@ -21685,9 +22643,17 @@ run_corelay_selftests() {
     printf 'role: %s\n' "$2" > "$1/.claude/.onion-version"
     printf '# sinal de teste\n' > "$1/${SIG}"
   }
+  # builder: um CORE de verdade em $1 — git, sem carimbo, e o onion-version.sh real (que, sem carimbo, diz
+  # source). Até 2026-10-21 a fixture de core era um `git init` vazio, e era exatamente isso que o carteiro
+  # aceitava como core (Q_CO_RELAY_SEM_CARIMBO_E_O_CORE): a bancada provava o defeito como contrato.
+  _mk_core() {
+    git -C "$1" init -q
+    mkdir -p "$1/.claude/validation"
+    cp "${REPO_ROOT}/.claude/validation/onion-version.sh" "$1/.claude/validation/onion-version.sh"
+  }
 
   # (a) stamp role:source → exit 2 (rejeita CORE)
-  d="$(mktemp -d)"; core="$(mktemp -d)"; git -C "${core}" init -q; mkdir -p "${core}/docs/evolution/inbox"
+  d="$(mktemp -d)"; core="$(mktemp -d)"; _mk_core "${core}"; mkdir -p "${core}/docs/evolution/inbox"
   mk_adopter "${d}" source
   rc=0; ( cd "${d}" && bash "${helper}" --target "${core}" ) >/dev/null 2>&1 || rc=$?
   if [ "${rc}" -eq 2 ]; then record_pass "co-relay: stamp source → exit 2 (rejeita core)"
@@ -21695,7 +22661,7 @@ run_corelay_selftests() {
   rm -rf "${d}" "${core}"
 
   # (b) stamp role:adopted + alvo válido → relay ocorre (sinal aparece no inbox do core)
-  d="$(mktemp -d)"; core="$(mktemp -d)"; git -C "${core}" init -q; mkdir -p "${core}/docs/evolution/inbox"
+  d="$(mktemp -d)"; core="$(mktemp -d)"; _mk_core "${core}"; mkdir -p "${core}/docs/evolution/inbox"
   mk_adopter "${d}" adopted
   rc=0; ( cd "${d}" && bash "${helper}" --target "${core}" ) >/dev/null 2>&1 || rc=$?
   if [ "${rc}" -eq 0 ] && [ -f "${core}/${SIG}" ]; then record_pass "co-relay: adopted + alvo → relaya"
@@ -21703,7 +22669,7 @@ run_corelay_selftests() {
   rm -rf "${d}" "${core}"
 
   # (c) ANTI-REGRESSÃO: onion-version.sh presente (emite 'source') MAS stamp 'adopted' → DEVE seguir
-  d="$(mktemp -d)"; core="$(mktemp -d)"; git -C "${core}" init -q; mkdir -p "${core}/docs/evolution/inbox"
+  d="$(mktemp -d)"; core="$(mktemp -d)"; _mk_core "${core}"; mkdir -p "${core}/docs/evolution/inbox"
   mk_adopter "${d}" adopted
   mkdir -p "${d}/.claude/validation"; cp "${REPO_ROOT}/.claude/validation/onion-version.sh" "${d}/.claude/validation/" 2>/dev/null || true
   rc=0; ( cd "${d}" && bash "${helper}" --target "${core}" ) >/dev/null 2>&1 || rc=$?
@@ -21726,7 +22692,7 @@ run_corelay_selftests() {
   rm -rf "${d}" "${core}"
 
   # (f) --target sem docs/evolution/inbox → mkdir -p + AVISO, não falha hard (entrega ocorre)
-  d="$(mktemp -d)"; core="$(mktemp -d)"; git -C "${core}" init -q   # core sem o canal
+  d="$(mktemp -d)"; core="$(mktemp -d)"; _mk_core "${core}"   # core sem o canal
   mk_adopter "${d}" adopted
   rc=0; ( cd "${d}" && bash "${helper}" --target "${core}" ) >/dev/null 2>&1 || rc=$?
   if [ "${rc}" -eq 0 ] && [ -f "${core}/${SIG}" ]; then record_pass "co-relay: canal ausente → mkdir -p + entrega (simetria co-deliver)"
@@ -21734,7 +22700,7 @@ run_corelay_selftests() {
   rm -rf "${d}" "${core}"
 
   # (g) PROVA DO INVARIANTE: pós-relay, sinal é UNTRACKED no core e NÃO há commit novo
-  d="$(mktemp -d)"; core="$(mktemp -d)"; git -C "${core}" init -q; mkdir -p "${core}/docs/evolution/inbox"
+  d="$(mktemp -d)"; core="$(mktemp -d)"; _mk_core "${core}"; mkdir -p "${core}/docs/evolution/inbox"
   mk_adopter "${d}" adopted
   ( cd "${d}" && bash "${helper}" --target "${core}" ) >/dev/null 2>&1 || true
   local st commits
@@ -21746,7 +22712,7 @@ run_corelay_selftests() {
 
   # (h) never-clobber do que o core JÁ COMMITOU: mesmo nome, conteúdo diferente, TRACKED → no-op
   #     (desde 2026-10-07 a colisão decide por conteúdo; o que nunca se sobrescreve é a árvore do core)
-  d="$(mktemp -d)"; core="$(mktemp -d)"; git -C "${core}" init -q; mkdir -p "${core}/docs/evolution/inbox"
+  d="$(mktemp -d)"; core="$(mktemp -d)"; _mk_core "${core}"; mkdir -p "${core}/docs/evolution/inbox"
   mk_adopter "${d}" adopted
   printf '# já existe (versão do core)\n' > "${core}/${SIG}"
   git -C "${core}" add -A >/dev/null 2>&1
@@ -21760,7 +22726,7 @@ run_corelay_selftests() {
   # (h2) sinal ATUALIZADO sobre a entrega anterior ainda UNTRACKED → entrega por cima (sinal de
   #      um adotante, 2026-10-07: a checagem de existência saía "já relayado" antes do dedup e a
   #      versão nova nunca chegava). MUTANTE: voltar ao `[ -e ] → no-op` reprova este caso.
-  d="$(mktemp -d)"; core="$(mktemp -d)"; git -C "${core}" init -q; mkdir -p "${core}/docs/evolution/inbox"
+  d="$(mktemp -d)"; core="$(mktemp -d)"; _mk_core "${core}"; mkdir -p "${core}/docs/evolution/inbox"
   mk_adopter "${d}" adopted
   printf '# entrega anterior, ainda nao triada\n' > "${core}/${SIG}"
   rc=0; ( cd "${d}" && bash "${helper}" --target "${core}" ) >/dev/null 2>&1 || rc=$?
@@ -21770,7 +22736,7 @@ run_corelay_selftests() {
   rm -rf "${d}" "${core}"
 
   # (h3) mesmo nome, conteúdo IDÊNTICO → no-op (a cura não virou re-entrega a cada rodada)
-  d="$(mktemp -d)"; core="$(mktemp -d)"; git -C "${core}" init -q; mkdir -p "${core}/docs/evolution/inbox"
+  d="$(mktemp -d)"; core="$(mktemp -d)"; _mk_core "${core}"; mkdir -p "${core}/docs/evolution/inbox"
   mk_adopter "${d}" adopted
   cp "${d}/${SIG}" "${core}/${SIG}"
   local out_h3; rc=0; out_h3="$( ( cd "${d}" && bash "${helper}" --target "${core}" ) 2>&1)" || rc=$?
@@ -21780,7 +22746,7 @@ run_corelay_selftests() {
   rm -rf "${d}" "${core}"
 
   # (i) --dry-run não escreve nada
-  d="$(mktemp -d)"; core="$(mktemp -d)"; git -C "${core}" init -q; mkdir -p "${core}/docs/evolution/inbox"
+  d="$(mktemp -d)"; core="$(mktemp -d)"; _mk_core "${core}"; mkdir -p "${core}/docs/evolution/inbox"
   mk_adopter "${d}" adopted
   rc=0; ( cd "${d}" && bash "${helper}" --target "${core}" --dry-run ) >/dev/null 2>&1 || rc=$?
   if [ "${rc}" -eq 0 ] && [ ! -f "${core}/${SIG}" ]; then record_pass "co-relay: --dry-run não escreve"
@@ -21789,7 +22755,7 @@ run_corelay_selftests() {
 
   # (j) DEDUP por conteúdo: sinal IDÊNTICO já triado em _processed/ (nome diferente) → no-op
   #     (regressão do incidente 2026-07-03: carteiro re-entregou 3 sinais pós-triagem → 📬 fantasma)
-  d="$(mktemp -d)"; core="$(mktemp -d)"; git -C "${core}" init -q
+  d="$(mktemp -d)"; core="$(mktemp -d)"; _mk_core "${core}"
   mkdir -p "${core}/docs/evolution/inbox/_processed"
   mk_adopter "${d}" adopted
   printf '# sinal de teste\n' > "${core}/docs/evolution/inbox/_processed/2025-12-31-outro-nome.md"
@@ -21801,7 +22767,7 @@ run_corelay_selftests() {
 
   # (k) sinal ATUALIZADO: mesmo nome em _processed mas conteúdo DIFERENTE → DEVE entregar
   #     (a pergunta do maestro "elas não foram atualizadas?" virou guarda: update ≠ duplicata)
-  d="$(mktemp -d)"; core="$(mktemp -d)"; git -C "${core}" init -q
+  d="$(mktemp -d)"; core="$(mktemp -d)"; _mk_core "${core}"
   mkdir -p "${core}/docs/evolution/inbox/_processed"
   mk_adopter "${d}" adopted
   printf '# versão antiga já triada\n' > "${core}/docs/evolution/inbox/_processed/2026-01-01-sinal-teste.md"
@@ -21810,6 +22776,105 @@ run_corelay_selftests() {
     record_pass "co-relay: mesmo nome, conteúdo novo → entrega (sinal atualizado ≠ duplicata)"
   else record_fail "co-relay: sinal atualizado" "exit ${rc} — dedup bloqueou uma atualização legítima?"; fi
   rm -rf "${d}" "${core}"
+
+  # ── O destino-CORE se PROVA (Q_CO_RELAY_SEM_CARIMBO_E_O_CORE, 2026-10-21) ────────────────────────────────
+  # Sem carimbo, só é core quem tem o onion-version.sh e ele diz role: source (lido, não executado). Antes,
+  # qualquer repo git sem carimbo era o core: um clone do espelho do kg-ssot passava e ganharia a caixa.
+  local cmut c_out; cmut="$(mktemp -d)"
+  _c_run() {  # $1 = helper; $2 = remetente; $3 = destino → rc em ${rc}, saída em ${c_out}
+    rc=0; c_out="$( ( cd "$2" && bash "$1" --target "$3" ) 2>&1)" || rc=$?
+  }
+  # (C1) repo git sem carimbo e SEM onion-version.sh (o caso medido do espelho) → exit 2, nada criado lá
+  d="$(mktemp -d)"; core="$(mktemp -d)"; git -C "${core}" init -q; mk_adopter "${d}" adopted
+  _c_run "${helper}" "${d}" "${core}"; local rc_c1="${rc}"
+  if [ "${rc}" -eq 2 ] && [ ! -e "${core}/docs" ] && grep -q 'não prova ser o core' <<< "${c_out}" && grep -q 'onion-version.sh' <<< "${c_out}"; then
+    record_pass "co-relay: (C1) destino git sem carimbo e sem onion-version.sh → exit 2, nada criado, e diz por quê"
+  else record_fail "co-relay: (C1) repo qualquer virou core" "rc=${rc} docs=$([ -e "${core}/docs" ] && echo criado || echo não): ${c_out}"; fi
+  sed 's|^  if ! CORE_WHY="$(_core_proof "${TARGET}")"; then$|  if false; then|' "${helper}" > "${cmut}/c1.sh"
+  rm -rf "${core}/docs"; _c_run "${cmut}/c1.sh" "${d}" "${core}"; local m_c1="${rc}"
+  _prove_mutation "co-relay: (C-M1) sem a prova do core, o repo sem carimbo volta a ser o core (e ganha a caixa) — (C1) morde" \
+    "${helper}" "${cmut}/c1.sh" "$([ "${rc_c1}" -eq 2 ] && echo 0 || echo 1)" "$([ "${m_c1}" -eq 2 ] && echo 0 || echo 1)"
+  rm -rf "${core}"
+  # (C2) onion-version.sh que computa OUTRO papel (default role="adopted") ou diz outro papel literal → exit 2
+  local okc2=1 c2form rc_c2=0 c2_core=""
+  for c2form in default literal; do
+    core="$(mktemp -d)"; _mk_core "${core}"; mkdir -p "${core}/docs/evolution/inbox"
+    if [ "${c2form}" = default ]; then sed -i 's/^role="source"$/role="adopted"/' "${core}/.claude/validation/onion-version.sh"
+    else sed -i 's/^role: ${role}$/role: hub/' "${core}/.claude/validation/onion-version.sh"; fi
+    grep -qE '^role="adopted"$|^role: hub$' "${core}/.claude/validation/onion-version.sh" || okc2=0   # a fixture foi aplicada
+    _c_run "${helper}" "${d}" "${core}"
+    { [ "${rc}" -eq 2 ] && [ ! -f "${core}/${SIG}" ] && grep -q 'não source' <<< "${c_out}"; } || { okc2=0; rc_c2="${rc}"; }
+    [ "${c2form}" = literal ] || c2_core="${core}"
+    [ "${c2form}" = default ] || rm -rf "${core}"
+  done
+  if [ "${okc2}" -eq 1 ]; then record_pass "co-relay: (C2) onion-version.sh que computa ou diz outro papel (adopted, hub) → exit 2, nada entregue"
+  else record_fail "co-relay: (C2) papel ≠ source aceito como core" "rc=${rc_c2}: ${c_out}"; fi
+  sed 's|^          if \[ "${d}" != "source" \]; then|          if false; then|' "${helper}" > "${cmut}/c2.sh"
+  _c_run "${cmut}/c2.sh" "${d}" "${c2_core}"; local m_c2="${rc}"
+  _prove_mutation "co-relay: (C-M2) sem conferir o default, um script que computa adopted passaria como o core — (C2) morde" \
+    "${helper}" "${cmut}/c2.sh" "$([ "${okc2}" -eq 1 ] && echo 0 || echo 1)" "$([ "${m_c2}" -eq 2 ] && echo 0 || echo 1)"
+  rm -rf "${c2_core}"
+  # (C3) o core de verdade (o onion-version.sh real, forma `role: ${role}`) e um core antigo (`role: source`
+  #      literal, a forma de antes de FED-3-1) → entregam
+  local okc3=1 c3form c3_core=""
+  for c3form in atual antigo; do
+    core="$(mktemp -d)"; _mk_core "${core}"
+    if [ "${c3form}" = antigo ]; then
+      sed -i 's/^role: ${role}$/role: source/' "${core}/.claude/validation/onion-version.sh"
+      grep -q '^role: source$' "${core}/.claude/validation/onion-version.sh" || okc3=0
+    fi
+    _c_run "${helper}" "${d}" "${core}"
+    { [ "${rc}" -eq 0 ] && [ -f "${core}/${SIG}" ]; } || okc3=0
+    [ "${c3form}" = antigo ] || c3_core="${core}"
+    [ "${c3form}" = atual ] || rm -rf "${core}"
+  done
+  if [ "${okc3}" -eq 1 ]; then record_pass "co-relay: (C3) core de verdade (onion-version.sh real, e a forma antiga role: source) → entrega"
+  else record_fail "co-relay: (C3) o core real foi recusado" "rc=${rc}: ${c_out}"; fi
+  sed "s#^      '\${role}'|'\$role')\$#      __never__)#" "${helper}" > "${cmut}/c3.sh"
+  rm -f "${c3_core}/${SIG}"; _c_run "${cmut}/c3.sh" "${d}" "${c3_core}"; local m_c3=1
+  { [ "${rc}" -eq 0 ] && [ -f "${c3_core}/${SIG}" ]; } && m_c3=0
+  _prove_mutation "co-relay: (C-M3) sem ler a forma role: \${role}, o core real seria recusado — (C3) morde" \
+    "${helper}" "${cmut}/c3.sh" "$([ "${okc3}" -eq 1 ] && echo 0 || echo 1)" "${m_c3}"
+  rm -rf "${c3_core}"
+  # (C4) achado da passada adversarial (2026-10-21): os laços conferem TODO default e TODA saída, não só o 1º.
+  #      O papel extra é `standalone`, que ordena DEPOIS de `source` (e `${role}` antes de `standalone`): um laço
+  #      que lesse só o 1º elemento do sort aceitaria os dois. → exit 2
+  _c4_run() {  # $1 = helper; $2 = forma (defaults|outs) → 0 se recusou com o motivo e nada entregue
+    core="$(mktemp -d)"; _mk_core "${core}"
+    if [ "$2" = defaults ]; then sed -i 's/^role="source"$/role="source"\nrole=standalone/' "${core}/.claude/validation/onion-version.sh"
+    else sed -i 's/^role: ${role}$/role: ${role}\nrole: standalone/' "${core}/.claude/validation/onion-version.sh"; fi
+    grep -qE '^role(=|: )standalone$' "${core}/.claude/validation/onion-version.sh" || { rm -rf "${core}"; return 1; }
+    _c_run "$1" "${d}" "${core}"
+    local ok=1; { [ "${rc}" -eq 2 ] && [ ! -e "${core}/docs" ] && grep -q 'standalone, não source' <<< "${c_out}"; } && ok=0
+    rm -rf "${core}"; return "${ok}"
+  }
+  local c4d=1 c4o=1; _c4_run "${helper}" defaults && c4d=0; _c4_run "${helper}" outs && c4o=0
+  if [ "${c4d}" -eq 0 ] && [ "${c4o}" -eq 0 ]; then record_pass "co-relay: (C4) um 2º default ou uma 2ª saída com outro papel (standalone) → exit 2, nada entregue"
+  else record_fail "co-relay: (C4) só o 1º default/saída conferido" "defaults=${c4d} outs=${c4o}: ${c_out}"; fi
+  sed 's|^        done <<< "${defaults}" ;;$|        done <<< "$(head -1 <<< "${defaults}")" ;;|' "${helper}" > "${cmut}/c4.sh"
+  local m_c4=1; _c4_run "${cmut}/c4.sh" defaults && m_c4=0
+  _prove_mutation "co-relay: (C-M4) lendo só o 1º default, role=standalone depois de role=\"source\" passaria — (C4) morde" \
+    "${helper}" "${cmut}/c4.sh" "${c4d}" "${m_c4}"
+  sed 's|^  done <<< "${outs}"$|  done <<< "$(head -1 <<< "${outs}")"|' "${helper}" > "${cmut}/c5.sh"
+  local m_c5=1; _c4_run "${cmut}/c5.sh" outs && m_c5=0
+  _prove_mutation "co-relay: (C-M5) lendo só a 1ª saída, role: standalone depois de role: \${role} passaria — (C4) morde" \
+    "${helper}" "${cmut}/c5.sh" "${c4o}" "${m_c5}"
+  # (C5) achado da passada adversarial: o core num checkout CRLF (core.autocrlf) segue sendo o core → entrega
+  _c5_run() {  # $1 = helper → 0 se entregou
+    core="$(mktemp -d)"; _mk_core "${core}"; sed -i 's/$/\r/' "${core}/.claude/validation/onion-version.sh"
+    grep -q $'^role="source"\r$' "${core}/.claude/validation/onion-version.sh" || { rm -rf "${core}"; return 1; }
+    _c_run "$1" "${d}" "${core}"
+    local ok=1; { [ "${rc}" -eq 0 ] && [ -f "${core}/${SIG}" ]; } && ok=0
+    rm -rf "${core}"; return "${ok}"
+  }
+  local c5=1; _c5_run "${helper}" && c5=0
+  if [ "${c5}" -eq 0 ]; then record_pass "co-relay: (C5) o core num checkout CRLF → entrega (o \\r não vira 'computa source, não source')"
+  else record_fail "co-relay: (C5) core em CRLF recusado" "${c_out}"; fi
+  sed '/^  defaults=/s|; s/\[\[:space:\]\]\*\$//'"'"' \| LC_ALL=C sort -u)"$|'"'"' \| LC_ALL=C sort -u)"|' "${helper}" > "${cmut}/c6.sh"
+  local m_c6=1; _c5_run "${cmut}/c6.sh" && m_c6=0
+  _prove_mutation "co-relay: (C-M6) sem o corte do espaço final no default, o \\r do CRLF faria o core ser recusado — (C5) morde" \
+    "${helper}" "${cmut}/c6.sh" "${c5}" "${m_c6}"
+  rm -rf "${d}" "${cmut}"
 
   # ── F3 (SAC-124): o destino se prova — o core (sem carimbo) ou um hub (carimbo role: hub) ─────────────
   local hubd peer
@@ -21857,6 +22922,149 @@ run_corelay_selftests() {
   done
   if [ "${okr3}" -eq 1 ]; then record_pass "co-relay: (F3.r3) standalone ou hub → um hub → exit 2 (só o filho do hub relaya para ele)"
   else record_fail "co-relay: (F3.r3) não-filho relayou ao hub" "rc=${rc}"; fi
+
+  # ── Canal UPSTREAM DE VENDOR (D_CANAL_UPSTREAM_POR_VENDOR, 2026-10-20) ─────────────────────────────────────
+  # O dono de um vendor (ex.: o repo de dev do kg-ssot, carimbo `adopted`) recebe sinal do adotante que o vendoriza quando a
+  # árvore da tag do carimbo, no destino, reproduz os sha256 do carimbo. Sem rede: o "dono" é um repo local com
+  # a tag; o carimbo do remetente é gerado dos blobs dessa tag, como o kg_vendor.py faz.
+  if ! command -v python3 >/dev/null 2>&1; then record_skip "co-relay: (V*) canal de vendor" "python3 ausente"; return; fi
+  local own vrc
+  _mk_owner() {  # $1 = dir; $2 = conteúdo de A.md; $3 = msg do commit (muda o commit, não o conteúdo)
+    git -C "$1" init -q; mkdir -p "$1/.claude" "$1/docs/evolution/inbox" "$1/spec"
+    printf 'role: adopted\n' > "$1/.claude/.onion-version"
+    printf '%s\n' "$2" > "$1/A.md"; printf 'schema\n' > "$1/spec/s.json"
+    git -C "$1" add -A >/dev/null 2>&1
+    git -C "$1" -c user.name=t -c user.email=t@t commit -qm "$3" >/dev/null 2>&1
+    git -C "$1" -c user.name=t -c user.email=t@t tag -a prod-v1.0.0 -m rel >/dev/null 2>&1
+  }
+  _mk_vendor_stamp() {  # $1 = remetente; $2 = conteúdo de A.md vendorizado (o sha256 vai ao carimbo)
+    mkdir -p "$1/vendor/prod"
+    python3 -I -c '
+import hashlib, json, sys
+h = lambda b: hashlib.sha256(b).hexdigest()
+d = {"product": "prod", "tag": "prod-v1.0.0", "commit": "0" * 40, "version": "1.0.0",
+     "files": {"A.md": h((sys.argv[2] + "\n").encode()), "spec/s.json": h(b"schema\n")}}
+open(sys.argv[1] + "/vendor/prod/.prod-version", "w").write(json.dumps(d, indent=2) + "\n")' "$1" "$2"
+  }
+  _v_run() {  # $1 = helper; $2 = remetente; $3 = destino → rc
+    vrc=0; ( cd "$2" && bash "$1" --target "$3" ) >/dev/null 2>&1 || vrc=$?
+  }
+  # (V1) carimbo do vendor reproduzido pela tag do dono (carimbo adopted) → entrega, untracked, com o rodapé
+  d="$(mktemp -d)"; own="$(mktemp -d)"; mk_adopter "${d}" adopted; _mk_owner "${own}" "alfa" "c1"; _mk_vendor_stamp "${d}" "alfa"
+  _v_run "${helper}" "${d}" "${own}"
+  st="$(git -C "${own}" status --porcelain -- "${SIG}" 2>/dev/null | head -1)"
+  if [ "${vrc}" -eq 0 ] && [ "${st#'??'}" != "${st}" ] && grep -q 'vendor/prod/.prod-version' "${own}/${SIG}" \
+     && grep -q 'sinal de teste' "${own}/${SIG}"; then
+    record_pass "co-relay: (V1) o dono do vendor (carimbo adopted) prova a origem pela tag → entrega untracked, e o sinal diz qual carimbo autorizou"
+  else record_fail "co-relay: (V1) canal de vendor" "rc=${vrc} status='${st}'"; fi
+  # (V1b) a mesma entrega de novo é no-op: o rodapé é determinístico, o dedup por conteúdo segue valendo
+  local out_v; out_v="$( ( cd "${d}" && bash "${helper}" --target "${own}" ) 2>&1)"
+  if grep -q '0 relayado' <<< "${out_v}"; then record_pass "co-relay: (V1b) re-entrega idêntica pelo canal de vendor → no-op (rodapé sem data)"
+  else record_fail "co-relay: (V1b) re-entrega" "${out_v}"; fi
+  # (V5) a prova passa, mas o dono não tem docs/evolution/inbox/ → exit 2, nada criado no repo alheio
+  rm -rf "${own}/docs/evolution"
+  _v_run "${helper}" "${d}" "${own}"
+  if [ "${vrc}" -eq 2 ] && [ ! -e "${own}/docs/evolution" ]; then record_pass "co-relay: (V5) dono sem docs/evolution/inbox/ → exit 2, o carteiro não abre caixa alheia"
+  else record_fail "co-relay: (V5) dono sem caixa" "rc=${vrc}"; fi
+  rm -rf "${d}" "${own}"
+  # (V2) outro adotante SEM a tag (vendoriza o mesmo produto: tem os arquivos, não a história) → exit 2
+  d="$(mktemp -d)"; peer="$(mktemp -d)"; mk_adopter "${d}" adopted; _mk_vendor_stamp "${d}" "alfa"
+  mk_adopter "${peer}" adopted; rm -f "${peer}/${SIG}"; _mk_vendor_stamp "${peer}" "alfa"
+  _v_run "${helper}" "${d}" "${peer}"
+  if [ "${vrc}" -eq 2 ] && [ ! -f "${peer}/${SIG}" ]; then record_pass "co-relay: (V2) par adotado que só vendoriza o mesmo produto → exit 2 (canal lateral, como antes)"
+  else record_fail "co-relay: (V2) par lateral" "rc=${vrc}"; fi
+  rm -rf "${d}" "${peer}"
+  # (V3) a tag de MESMO NOME no destino com outro conteúdo (o carimbo aponta OUTRO repo) → exit 2
+  d="$(mktemp -d)"; own="$(mktemp -d)"; mk_adopter "${d}" adopted; _mk_owner "${own}" "beta" "c1"; _mk_vendor_stamp "${d}" "alfa"
+  _v_run "${helper}" "${d}" "${own}"; local rc_v3_intact="${vrc}"
+  if [ "${vrc}" -eq 2 ] && [ ! -f "${own}/${SIG}" ]; then record_pass "co-relay: (V3) tag homônima com outro conteúdo → exit 2 (o carimbo é de outro repo)"
+  else record_fail "co-relay: (V3) carimbo de outro repo" "rc=${vrc}"; fi
+  local v3_d="${d}" v3_own="${own}"
+  # (V4) o ESPELHO × o dono: commit diferente (o carimbo real traz o commit do espelho, que o dono não tem),
+  #      mesmo conteúdo → entrega. É o caso medido do kg-ssot: carimbo 172c62a, tag do dono 2a69199.
+  d="$(mktemp -d)"; own="$(mktemp -d)"; mk_adopter "${d}" adopted; _mk_owner "${own}" "alfa" "outra historia"
+  _mk_vendor_stamp "${d}" "alfa"; git -C "${own}" remote add origin git@github.com:acme/prod-dev.git
+  _v_run "${helper}" "${d}" "${own}"; local rc_v4_intact="${vrc}"
+  if [ "${vrc}" -eq 0 ] && [ -f "${own}/${SIG}" ]; then record_pass "co-relay: (V4) o dono com outro commit e outro remote que o espelho do carimbo, mesmo conteúdo → entrega (prova por conteúdo, não por URL nem commit)"
+  else record_fail "co-relay: (V4) espelho × dono" "rc=${vrc}"; fi
+  rm -f "${own}/${SIG}"
+  # ── Mutantes (o intacto passa; o mutante tem de reprovar) ──
+  local mutd; mutd="$(mktemp -d)"
+  # M1: aceitar pela EXISTÊNCIA da tag, sem comparar o conteúdo → (V3) deixa de recusar
+  sed 's/    if hashlib.sha256(blob).hexdigest() != files\[n\]:/    if False:/' "${helper}" > "${mutd}/m1.sh"
+  rm -f "${v3_own}/${SIG}"; _v_run "${mutd}/m1.sh" "${v3_d}" "${v3_own}"; local m1="${vrc}"
+  _prove_mutation "co-relay: (V-M1) sem a comparação de sha256, a tag homônima de outro repo passaria — (V3) morde" \
+    "${helper}" "${mutd}/m1.sh" "$([ "${rc_v3_intact}" -eq 2 ] && echo 0 || echo 1)" "$([ "${m1}" -eq 2 ] && echo 0 || echo 1)"
+  # M2: provar pelo COMMIT do carimbo (o desenho por commit/URL) → (V4), o caso real do espelho, deixa de entregar
+  sed 's|^if run("rev-parse", "--verify", "--quiet", "refs/tags/" + tag + "^{tree}").returncode != 0:|if run("rev-parse", "--verify", "--quiet", "refs/tags/" + tag + "^{commit}").stdout.decode().strip() != d.get("commit"):|' "${helper}" > "${mutd}/m2.sh"
+  _v_run "${mutd}/m2.sh" "${d}" "${own}"; local m2="${vrc}"; rm -f "${own}/${SIG}"
+  _prove_mutation "co-relay: (V-M2) prova por commit recusaria o dono real (espelho × dono) — (V4) morde" \
+    "${helper}" "${mutd}/m2.sh" "$([ "${rc_v4_intact}" -eq 0 ] && echo 0 || echo 1)" "$([ "${m2}" -eq 0 ] && echo 0 || echo 1)"
+  # M3: sem a checagem da caixa do dono → (V5) deixa de recusar (e cria docs/evolution/ no repo alheio)
+  sed 's|    if \[ ! -d "${TARGET}/docs/evolution/inbox" \]; then|    if false; then|' "${helper}" > "${mutd}/m3.sh"
+  local own5; own5="$(mktemp -d)"; _mk_owner "${own5}" "alfa" "c1"; rm -rf "${own5}/docs/evolution"
+  _v_run "${helper}" "${d}" "${own5}"; local rc_v5_intact="${vrc}"
+  _v_run "${mutd}/m3.sh" "${d}" "${own5}"; local m3="${vrc}"
+  _prove_mutation "co-relay: (V-M3) sem a checagem da caixa, o carteiro abriria docs/evolution/ no repo do dono — (V5) morde" \
+    "${helper}" "${mutd}/m3.sh" "$([ "${rc_v5_intact}" -eq 2 ] && echo 0 || echo 1)" "$([ "${m3}" -eq 2 ] && echo 0 || echo 1)"
+  # M4: sem o rodapé (os três printf entre os marcadores) → o sinal chega sem dizer qual carimbo autorizou
+  sed '/# >>> rodape-vendor/,/# <<< rodape-vendor/d' "${helper}" > "${mutd}/m4.sh"
+  _foot() { grep -q 'vendor/prod/.prod-version' "$1" 2>/dev/null && grep -q 'prod-v1.0.0' "$1" 2>/dev/null; }
+  rm -f "${own}/${SIG}"; _v_run "${helper}" "${d}" "${own}"; local foot_i=1; _foot "${own}/${SIG}" && foot_i=0
+  rm -f "${own}/${SIG}"; _v_run "${mutd}/m4.sh" "${d}" "${own}"; local foot_m=1; _foot "${own}/${SIG}" && foot_m=0
+  _prove_mutation "co-relay: (V-M4) sem o rodapé, o dono recebe o sinal sem a autorização declarada — (V1) morde" \
+    "${helper}" "${mutd}/m4.sh" "${foot_i}" "${foot_m}"
+
+  # ── Achados da passada adversarial (2026-10-20), cada um com o caso e o mutante que o prende ──
+  # (V6) o dono SEM carimbo do Onion e sem caixa (o espelho público, por exemplo): antes caía em "sem carimbo
+  #      = o core" e o carteiro criava docs/evolution/inbox/ lá → exit 2, nada criado, com o DIAGNÓSTICO certo.
+  #      Desde 2026-10-21 a prova do core (C1) também o recusa, então o rc sozinho não prende mais a recusa do
+  #      dono-sem-caixa: o que ela entrega a mais é dizer que o destino É o dono e falta a caixa (o remédio
+  #      certo), em vez de "não é o core". O caso e o mutante cobram a mensagem.
+  local own6 out_v6 v6_i=1 v6_m=1; own6="$(mktemp -d)"; _mk_owner "${own6}" "alfa" "c1"; rm -rf "${own6}/.claude" "${own6}/docs/evolution"
+  vrc=0; out_v6="$( ( cd "${d}" && bash "${helper}" --target "${own6}" ) 2>&1)" || vrc=$?
+  { [ "${vrc}" -eq 2 ] && [ ! -e "${own6}/docs/evolution" ] && grep -q 'é o dono de vendor/prod' <<< "${out_v6}"; } && v6_i=0
+  if [ "${v6_i}" -eq 0 ]; then record_pass "co-relay: (V6) dono do vendor sem carimbo do Onion e sem caixa → exit 2, nada criado, e o diagnóstico é 'o dono não tem caixa'"
+  else record_fail "co-relay: (V6) dono sem carimbo" "rc=${vrc}: ${out_v6}"; fi
+  sed '/^elif \[ -n "${VENDOR_OWNER_NO_BOX}" \]; then$/,/^  exit 2$/d' "${helper}" > "${mutd}/m5.sh"
+  rm -rf "${own6}/docs/evolution"; vrc=0; out_v6="$( ( cd "${d}" && bash "${mutd}/m5.sh" --target "${own6}" ) 2>&1)" || vrc=$?
+  { [ "${vrc}" -eq 2 ] && [ ! -e "${own6}/docs/evolution" ] && grep -q 'é o dono de vendor/prod' <<< "${out_v6}"; } && v6_m=0
+  _prove_mutation "co-relay: (V-M5) sem a recusa do dono-sem-caixa, o dono provado ouviria 'não é o core' em vez de 'falta a caixa' — (V6) morde" \
+    "${helper}" "${mutd}/m5.sh" "${v6_i}" "${v6_m}"
+  # (V7) o origin do remetente com credencial (`usuário:token@`) não vaza no rodapé do repo alheio
+  git -C "${d}" remote add origin "https://u:ghp_SEGREDO1@github.com/acme/sender.git" 2>/dev/null
+  _leak() { [ -f "$1" ] && ! grep -q 'ghp_SEGREDO1' "$1" && grep -q 'github.com/acme/sender' "$1"; }
+  rm -f "${own}/${SIG}"; _v_run "${helper}" "${d}" "${own}"; local lk_i=1; _leak "${own}/${SIG}" && lk_i=0
+  if [ "${lk_i}" -eq 0 ]; then record_pass "co-relay: (V7) origin com credencial → o rodapé nomeia o remetente sem o token"
+  else record_fail "co-relay: (V7) credencial no rodapé" "$(grep -o 'entregue por `[^`]*`' "${own}/${SIG}" 2>/dev/null)"; fi
+  sed 's|^  SENDER="$(\[ -n "${SENDER}" \] \&\& _norm_remote "${SENDER}" \|\| basename "${REPO_ROOT}")"$|  :|' "${helper}" > "${mutd}/m6.sh"
+  rm -f "${own}/${SIG}"; _v_run "${mutd}/m6.sh" "${d}" "${own}"; local lk_m=1; _leak "${own}/${SIG}" && lk_m=0
+  _prove_mutation "co-relay: (V-M6) com a URL crua do origin, o token iria ao repo do dono — (V7) morde" \
+    "${helper}" "${mutd}/m6.sh" "${lk_i}" "${lk_m}"
+  # (V8) sinal já TRIADO (em _processed/) e o vendor sobe de tag: o rodapé muda, o corpo não → no-op
+  _v8() {  # $1 = helper → 0 se a re-rodada foi no-op
+    rm -rf "${own}/docs/evolution/inbox"; mkdir -p "${own}/docs/evolution/inbox/_processed"
+    _mk_vendor_stamp "${d}" "alfa"; _v_run "$1" "${d}" "${own}"
+    mv "${own}/${SIG}" "${own}/docs/evolution/inbox/_processed/" 2>/dev/null
+    python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["tag"]="prod-v1.1.0"; open(p,"w").write(json.dumps(d))' \
+      "${d}/vendor/prod/.prod-version"
+    _v_run "$1" "${d}" "${own}"; [ "${vrc}" -eq 0 ] && [ ! -f "${own}/${SIG}" ]
+  }
+  git -C "${own}" -c user.name=t -c user.email=t@t tag -a prod-v1.1.0 -m rel >/dev/null 2>&1
+  local v8_i=1; _v8 "${helper}" && v8_i=0
+  if [ "${v8_i}" -eq 0 ]; then record_pass "co-relay: (V8) sinal triado + vendor em tag nova → no-op (o dedup compara o corpo, não o rodapé)"
+  else record_fail "co-relay: (V8) 📬 fantasma pelo rodapé" "re-entregou o sinal já triado"; fi
+  sed 's|^  cmp -s "$2" <(_strip_vendor_footer "$3")$|  return 1|' "${helper}" > "${mutd}/m7.sh"
+  local v8_m=1; _v8 "${mutd}/m7.sh" && v8_m=0
+  _prove_mutation "co-relay: (V-M7) com o dedup pelo arquivo inteiro, a tag nova faria voltar o sinal triado — (V8) morde" \
+    "${helper}" "${mutd}/m7.sh" "${v8_i}" "${v8_m}"
+  # (V9) o próprio repo como destino → exit 2 (o dono relayando para si reescreveria a fonte)
+  mkdir -p "${own}/docs/evolution/inbox"; printf '# sinal de teste\n' > "${own}/${SIG}"
+  local out_v9; vrc=0; out_v9="$( ( cd "${own}" && bash "${helper}" --target "${own}" ) 2>&1)" || vrc=$?
+  if [ "${vrc}" -eq 2 ] && grep -q 'este próprio repo' <<< "${out_v9}" && [ "$(cat "${own}/${SIG}")" = "# sinal de teste" ]; then
+    record_pass "co-relay: (V9) --target = este próprio repo → exit 2, a fonte intocada"
+  else record_fail "co-relay: (V9) relay para si" "rc=${vrc}: ${out_v9}"; fi
+  rm -rf "${d}" "${own}" "${own5}" "${own6}" "${v3_d}" "${v3_own}" "${mutd}"
 }
 
 # ---------------------------------------------------------------------------
@@ -22165,7 +23373,7 @@ run_onion_version_selftests() {
   printf 'framework: onion\nsource_commit: abc123\nrole: adopted\n' > "${d}/.claude/.onion-version"
   out="$(bash "${d}/.claude/validation/onion-version.sh" | grep '^role:' || true)"
   if [ "${out}" = "role: adopted" ] \
-     && ! bash "${d}/.claude/validation/onion-version.sh" | grep -qE '^role: (source|hub)'; then
+     && ! grep -qE '^role: (source|hub)' <<< "$(bash "${d}/.claude/validation/onion-version.sh")"; then
     record_pass "onion-version: stamp adopted → gate do adopt REJEITA (FED-3-1 vivo)"
   else record_fail "onion-version: stamp adopted" "gate deveria rejeitar adopted; veio '${out}'"; fi
 
@@ -22179,7 +23387,7 @@ run_onion_version_selftests() {
   printf 'framework: acme-adopter\nsource_commit: abc123\nrole: hub\n' > "${d}/.claude/.onion-version"
   out="$(bash "${d}/.claude/validation/onion-version.sh" | grep '^role:' || true)"
   if [ "${out}" = "role: hub" ] \
-     && bash "${d}/.claude/validation/onion-version.sh" | grep -qE '^role: (source|hub)'; then
+     && grep -qE '^role: (source|hub)' <<< "$(bash "${d}/.claude/validation/onion-version.sh")"; then
     record_pass "onion-version: stamp hub → gate do adopt ACEITA (Camada 2 aberta)"
   else record_fail "onion-version: stamp hub" "gate deveria aceitar hub; veio '${out}'"; fi
   rm -rf "${d}"
@@ -22250,7 +23458,7 @@ _prov_run() {
   rm -f "${tf}"
 }
 
-_prov_has() { printf '%s\n' "$1" | grep -qE "^$2	$3	$4	"; }
+_prov_has() { grep -qE "^$2	$3	$4	" <<< "$1"; }
 
 # NOME: run_kg_COVERAGE_selftests, não run_kg_provenance_selftests. Colisão real
 # (2026-07-20→21): esta função nasceu com o mesmo nome da guarda do modo --provenance
@@ -22571,7 +23779,7 @@ _df_run() {
   _DF_OUT="$(cat "${tf}")"; rm -f "${tf}"
 }
 
-_df_has() { printf '%s\n' "$1" | grep -qE "^$2"$'\t'"$3"$'\t'"$4"$'\t'; }
+_df_has() { grep -qE "^$2"$'\t'"$3"$'\t'"$4"$'\t' <<< "$1"; }
 
 run_doctrine_freshness_selftests() {
   local h="${REPO_ROOT}/.claude/validation/doctrine-freshness.sh"
@@ -22727,7 +23935,7 @@ run_doctrine_freshness_selftests() {
   # =========================================================================
   # BLOCO F — (P2 reforço) prova ESTRUTURAL: o helper NÃO faz rede (CI-safe by construction)
   # =========================================================================
-  if grep -vE '^[[:space:]]*#' "${h}" | grep -qE 'curl|wget|/dev/tcp|nc |WebFetch|ntpstat.*http'; then
+  if grep -qE 'curl|wget|/dev/tcp|nc |WebFetch|ntpstat.*http' <<< "$(grep -vE '^[[:space:]]*#' "${h}")"; then
     record_fail "doctrine: (P2) no-network" "o helper contém chamada de rede fora de comentário — não é CI-safe"
   else
     record_pass "doctrine: (P2) CI-SAFE por construção — nenhuma chamada de rede no corpo do helper (só o repo decide)"
@@ -23389,8 +24597,12 @@ run_session_beacon_selftests() {
   # `sleep` renomeada → comm=claude) dispensa haver uma sessão real por perto: o mesmo
   # veredito em dev e no CI. Sem este caso, inverter a comparação de `comm` passaria batido.
   fake_dir="$(mktemp -d)"
-  if cp "$(command -v sleep)" "${fake_dir}/claude" 2>/dev/null; then
-    "${fake_dir}/claude" 30 & fake_pid=$!
+  # O falso `claude` é um SCRIPT, não uma cópia do `sleep` (2026-10-19, medido num container ubuntu:26.04):
+  # lá o coreutils é o uutils, um binário multicall que escolhe a ferramenta pelo argv[0] — copiado como
+  # `claude`, ele responde "unknown program 'claude'" e sai na hora, e o comm nunca é visto (o ⊘ derrubava o
+  # CI em STRICT). O comm de um script é o nome do arquivo; o laço de `sleep 1` não deixa órfão ao ser morto.
+  if printf '#!/bin/sh\nwhile :; do sleep 1; done\n' > "${fake_dir}/claude" && chmod +x "${fake_dir}/claude"; then
+    "${fake_dir}/claude" & fake_pid=$!
     # ESPERA O `exec`, com teto. A 1a forma lia `/proc/<pid>/comm` NA HORA, e isso e corrida: entre o
     # `&` e o exec do filho o comm ainda e o do shell, o caso caia no `record_skip` e sob
     # ONION_SELFTEST_STRICT=1 o ⊘ PINTA O CI DE VERMELHO. Medido 2026-09-23: a mesma faixa passou as
@@ -23503,7 +24715,7 @@ run_session_beacon_selftests() {
     # dele carrega "claude" — senão não é o cenário que o bug exigia
     out="$(sed 's/.*) //' "/proc/${child_pid}/stat" 2>/dev/null | awk '{print $2}' || true)"
     if [ -n "${child_pid}" ] && [ "${out}" = "1" ] \
-       && tr '\0' ' ' < "/proc/${child_pid}/cmdline" 2>/dev/null | grep -q 'claude'; then
+       && grep -q 'claude' <<< "$(tr '\0' ' ' < "/proc/${child_pid}/cmdline" 2>/dev/null)"; then
       ONION_BEACON_OWNER_PID="${child_pid}" bash "${sb}" up "${d}" "sess-sonda"
       if ! grep -q '^owner_pid:' "${d}/.claude/beacons/sess-sonda.beacon"; then
         record_pass "session-beacon: sonda REJEITA processo não-claude com 'claude' no cmdline (comm/argv0 decidem)"
@@ -23900,6 +25112,63 @@ run_lint_hard_file_selftests() {
 }
 _family run_lint_hard_file_selftests
 
+# ── REGRA 16 (Contagem de inventário-TOTAL divergente da SSOT), feeder da linha 'Total' de tabela ──
+# Falso-positivo medido em 2026-10-20 na main: `| **Total** | | **8.749.759** | **122** | …` numa
+# tabela de CUSTO (coluna 'Tokens') era lido como a contagem `8`. A cura é de VOCABULÁRIO: 'Total' só
+# é inventário com a população nomeada (cabeçalho da coluna ou a célula), e o número é o token inteiro
+# com milhar. As fixtures vivem no manifesto (família `fixtures`); AQUI se prova que cada metade da
+# cura é load-bearing, rodando o lint MUTADO no mesmo sandbox — mutante que não roda é decoração.
+run_r16_table_total_selftests() {
+  local fxd="${REPO_ROOT}/.claude/validation/fixtures/r16-count-drift"
+  local lint="${SANDBOX:-}/.claude/validation/lint-artifacts.sh"
+  if [ -z "${SANDBOX:-}" ] || [ ! -f "${lint}" ] || [ ! -f "${fxd}/good-table-total-cost.md" ] \
+     || [ ! -f "${fxd}/bad-table-total-thousand.md" ]; then
+    record_skip "r16-table-total: sandbox ou fixture ausente → pulado"; return; fi
+  [ -n "${SSOT_AGENT_TOTAL:-}" ] || { record_skip "r16-table-total: SSOT de agentes vazia → pulado"; return; }
+  local vdir; vdir="$(dirname "${lint}")"
+  local mfull="${vdir}/zz-r16-mut-full.sh" mthou="${vdir}/zz-r16-mut-thousand.sh"
+  local probe="${SANDBOX}/docs/zz-r16-table-probe.md" msg="linha 'Total' de tabela"
+  # MUTANTE "desfaz a cura inteira": população sempre aceita + número cortado no 1º separador = a régua de antes
+  sed -e 's#if (is_pop(c\[i\]) || (i <= nh \&\& is_pop(h\[i\]))) {#if (1) {#' \
+      -e 's#/\[0-9\]+(\[.,\]\[0-9\]\[0-9\]\[0-9\])\*/#/[0-9]+/#' "${lint}" > "${mfull}"
+  # MUTANTE "só o milhar": a população continua exigida, mas `51.000` volta a ser lido `51`
+  sed -e 's#/\[0-9\]+(\[.,\]\[0-9\]\[0-9\]\[0-9\])\*/#/[0-9]+/#' "${lint}" > "${mthou}"
+  local rc_i rc_m out
+  # here-string, nunca `produtor | grep -q` (pipefail + EPIPE quando o leitor fecha cedo)
+  _r16_lines() { grep -F 'zz-r16-table-probe' <<< "$1" || true; }
+  _r16_hit() { local l; l="$(_r16_lines "$1")"; grep -qF "${msg}" <<< "${l}"; }
+  # (a) GOOD — tabela de custo: o intacto CALA; o mutante total ACUSA (lê `8`)
+  cp "${fxd}/good-table-total-cost.md" "${probe}"
+  out="$(bash "${lint}" --only="${probe}" 2>&1 || true)"
+  if _r16_hit "${out}"; then rc_i=1; else rc_i=0; fi
+  [ "${rc_i}" -eq 0 ] && record_pass "r16-table-total: (a) 'Total' de tabela de CUSTO (8.749.759 sob 'Tokens') → não acusa" \
+    || record_fail "r16-table-total: (a)" "falso-positivo voltou: $(grep -F 'zz-r16' <<< "${out}" | head -1 | cut -c1-160)"
+  out="$(bash "${mfull}" --only="${probe}" 2>&1 || true)"
+  # o mutante precisa acusar EXATAMENTE '8' — só "acusou" provaria a metade da população e deixaria a
+  # do milhar sem dente (o sed dela poderia virar no-op e o cmp ainda diferiria pelo outro)
+  local _m8; _m8="$(_r16_lines "${out}")"
+  if _r16_hit "${out}" && grep -qF "'8' (" <<< "${_m8}"; then rc_m=1; else rc_m=0; fi
+  _prove_mutation "r16-table-total: (a-MUT) com a régua antiga a tabela de custo volta a ser acusada como '8'" \
+    "${lint}" "${mfull}" "${rc_i}" "${rc_m}"
+  # (b) BAD — 'Total' com população na célula e número divergente: o intacto ACUSA (a regra ainda morde)
+  sed -e "s/__ONION_COMMANDS_DRIFT__/${SSOT_CMD_DRIFT}/g" "${fxd}/bad-table-total-pop-cell.md" > "${probe}"
+  out="$(bash "${lint}" --only="${probe}" 2>&1 || true)"
+  if _r16_hit "${out}"; then record_pass "r16-table-total: (b) '| **Total** | **${SSOT_CMD_DRIFT} comandos** |' divergente → acusa (a cura não afrouxou)"
+  else record_fail "r16-table-total: (b)" "a população nomeada na célula não disparou a regra"; fi
+  # (c) BAD — milhar sob população: o intacto ACUSA `${SSOT_AGENT_TOTAL}000`; o mutante do milhar lê o total e CALA
+  sed -e "s/__ONION_AGENTS_TOTAL__/${SSOT_AGENT_TOTAL}/g" "${fxd}/bad-table-total-thousand.md" > "${probe}"
+  out="$(bash "${lint}" --only="${probe}" 2>&1 || true)"
+  if _r16_hit "${out}"; then rc_i=0; else rc_i=1; fi
+  [ "${rc_i}" -eq 0 ] && record_pass "r16-table-total: (c) '${SSOT_AGENT_TOTAL}.000' sob 'Agentes' é lido inteiro → acusa" \
+    || record_fail "r16-table-total: (c)" "o número com milhar foi lido pela metade (calou)"
+  out="$(bash "${mthou}" --only="${probe}" 2>&1 || true)"
+  if _r16_hit "${out}"; then rc_m=0; else rc_m=1; fi
+  _prove_mutation "r16-table-total: (c-MUT) cortando no separador, '${SSOT_AGENT_TOTAL}.000' vira ${SSOT_AGENT_TOTAL} e cala" \
+    "${lint}" "${mthou}" "${rc_i}" "${rc_m}"
+  rm -f "${probe}" "${mfull}" "${mthou}"
+}
+_family run_r16_table_total_selftests
+
 run_fixtures_selftests() {
 # SHARD (faixa paralela): ONION_SELFTEST_SHARD=i/n → este worker processa só as linhas do manifest
 # cujo índice % n == i. A família `fixtures` é ~97% do tempo serial (94 casos × ~10 s); sem fatiar,
@@ -24008,6 +25277,9 @@ _family run_compose_settings_selftests
 
 # Modo resolve-scope-layers — fecha o loop do compose-settings (descobre a cadeia de escopo).
 _family run_resolve_scope_layers_selftests
+
+# Modo resolve-context-dir — a pasta do contexto de domínio sai do onion-context.yaml (sinal de campo 2026-10-19).
+_family run_resolve_context_dir_selftests
 
 # Modo show-scope — proveniência-por-chave do compositor (RFC-0005 Fase 2, `--show-scope`).
 _family run_show_scope_selftests
@@ -25162,19 +26434,20 @@ run_role_cut_selftests() {
       _t_bundle "${d}/v-dr-${_r}" "${_vmx}" --role "${_r}" --kind door --repo "${REPO_ROOT}"
       grep -q . "${d}/v-ad-${_r}" || { _bad="${_bad} ${_r}:bundle-vazio"; continue; }
       for _x in .claude/skills/onion-publish/SKILL.md .claude/commands/meta/publish.md \
-                .claude/rules/publish-lens.md .claude/commands/common/prompts/publish-doctrine.md; do
+                .claude/rules/publish-lens.md .claude/commands/common/prompts/publish-doctrine.md \
+                .claude/validation/claude-md-size-ceiling.txt .claude/utils/kg/kg-migrate-v3.py; do
         grep -qxF "${_x}" "${d}/v-ad-${_r}" && _bad="${_bad} ${_r}:vazou-na-adocao:${_x}"
         grep -qxF "${_x}" "${d}/v-dr-${_r}" || _bad="${_bad} ${_r}:sumiu-da-porta:${_x}"
       done
       grep -qxF .claude/commands/meta/create-command.md "${d}/v-ad-${_r}" || _bad="${_bad} ${_r}:meta-fabrica-cortada"
-      _diff="$(LC_ALL=C comm -13 <(LC_ALL=C sort "${d}/v-ad-${_r}") <(LC_ALL=C sort "${d}/v-dr-${_r}") | grep -vE '^\.claude/(skills/onion-publish/|commands/meta/publish\.md$|rules/publish-lens\.md$|commands/common/prompts/publish-doctrine\.md$)' || true)"
+      _diff="$(LC_ALL=C comm -13 <(LC_ALL=C sort "${d}/v-ad-${_r}") <(LC_ALL=C sort "${d}/v-dr-${_r}") | grep -vE '^\.claude/(skills/onion-publish/|commands/meta/publish\.md$|rules/publish-lens\.md$|commands/common/prompts/publish-doctrine\.md$|validation/claude-md-size-ceiling\.txt$|utils/kg/kg-migrate-v3\.py$)' || true)"
       [ -n "${_diff}" ] && _bad="${_bad} ${_r}:adocao-perdeu-mais:$(head -1 <<< "${_diff}")"
     done
     printf '%s' "${_bad}"
   }
   local _vbad; _vbad="$(_v_check "${vm}")"
   if [ -z "${_vbad}" ]; then
-    record_pass "role-cut: (v) adopted e hub, no destino adoção, não recebem o /meta:publish (comando, skill, lente, doutrina) e mantêm a meta-fábrica; a porta segue com eles"
+    record_pass "role-cut: (v) adopted e hub, no destino adoção, não recebem o /meta:publish (comando, skill, lente, doutrina) nem o kg-migrate-v3.py (o migrador do corpus do core, D_U1_MIGRADOR_NO_KG_SSOT) e mantêm a meta-fábrica; a porta segue com eles"
   else record_fail "role-cut: (v)" "desvio:${_vbad}"; fi
   local _vm_mut="${d}/vm-v-mut.sh"
   sed '/_CORE_ONLY_ADOPTION_EXCLUDES\[@\]/d' "${vm}" > "${_vm_mut}"
@@ -25816,12 +27089,227 @@ run_adopt_update_source_selftests() {
   rm -rf "${d}" "${d%/*}/t10-chore-onion-update-abc" 2>/dev/null || true
 }
 
+# ---------------------------------------------------------------------------
+# prove_gate_blocks — a prova de BLOQUEIO do gate do alvo, num sandbox, com o checkout real intocado
+#
+# Nasceu de uma recorrência medida (2026-10-20): em 11 `--update` seguidos o verificador do gate só provou
+# que o hook EXECUTA; a prova de que ele BARRA ficou com a sessão do adotante, que a fez à mão (commit-sonda
+# barrado pela REGRA 8 (Inventário canônico sincronizado com o filesystem), rc 1). O
+# `prove-gate-blocks.sh` é essa prova virada mecanismo, e esta família prova o que ele decide.
+#
+# A fixture usa o TEMPLATE REAL do hook (`githook-pre-commit-onion.tpl`) e um lint que reproduz a regra
+# plantada: compara `docs/onion/inventory.md` byte a byte com a saída do `inventory.sh` e imprime a linha
+# VIOLATION no formato do lint de verdade. O lint inteiro do core custaria minutos por caso, e o que se
+# mede aqui é o veredito do script, não o lint (esse é o dogfood).
+#
+# Todo caso confere, POR FORA do script, que o checkout real ficou igual (HEAD, status com untracked e
+# refs) e que nenhum sandbox sobrou no TMPDIR.
+# ---------------------------------------------------------------------------
+run_prove_gate_blocks_selftests() {
+  local pg="${REPO_ROOT}/.claude/utils/adopt/prove-gate-blocks.sh"
+  local tpl="${REPO_ROOT}/.claude/utils/adopt/githook-pre-commit-onion.tpl"
+  if [ ! -f "${pg}" ] || [ ! -f "${tpl}" ]; then record_skip "prove-gate-blocks" "script ou template do hook ausente"; return; fi
+  local d; d="$(mktemp -d)"; mkdir -p "${d}/tmp"
+
+  _pg_mk() {  # $1=dir · $2=tipo do hook: onion|echo|none|all|ignore|nocite|lintall
+    local r="$1"; mkdir -p "${r}/.claude/validation" "${r}/docs/onion" "${r}/.githooks"
+    printf '#!/usr/bin/env bash\nprintf "# inv\\n"\n' > "${r}/.claude/validation/inventory.sh"
+    cat > "${r}/.claude/validation/lint-artifacts.sh" <<'LINT'
+#!/usr/bin/env bash
+# espelha a SAÍDA do lint real: SOFT também sai como `VIOLATION:` (no adotante, `[papel/SEM-OBJETO]` é rotina),
+# e só o sumário `Violações HARD : N` diz quantas são HARD
+R="$(git rev-parse --show-toplevel)"; h=0
+echo "VIOLATION: .claude/rules/x.md: REGRA 7 (x): [papel/SEM-OBJETO] soft de rotina"
+if ! bash "${R}/.claude/validation/inventory.sh" --markdown | cmp -s - "${R}/docs/onion/inventory.md"; then
+  echo "VIOLATION: docs/onion/inventory.md: REGRA 8 (Inventário canônico sincronizado com o filesystem): inventário desatualizado vs filesystem"; h=$((h+1))
+fi
+if [ -e "${R}/.claude/validation/legacy-broken" ]; then echo "VIOLATION: .claude/validation/legacy-broken: REGRA 99 (x): hard pré-existente"; h=$((h+1)); fi
+echo "  Violações HARD : ${h}"
+[ "${h}" -eq 0 ] && { echo "OK ✓"; exit 0; }; exit 1
+LINT
+    printf '# inv\n' > "${r}/docs/onion/inventory.md"
+    printf 'produto\n' > "${r}/a.txt"
+    case "$2" in
+      onion)  cp "${tpl}" "${r}/.githooks/pre-commit" ;;
+      echo)   printf '#!/usr/bin/env bash\necho "🧅 Onion pre-commit — tudo certo"\nexit 0\n' > "${r}/.githooks/pre-commit" ;;
+      all)    printf '#!/usr/bin/env bash\necho "pre-commit quebrado"\nexit 1\n' > "${r}/.githooks/pre-commit" ;;
+      ignore) printf '#!/usr/bin/env bash\nbash "$(git rev-parse --show-toplevel)/.claude/validation/lint-artifacts.sh" || true\nexit 0\n' > "${r}/.githooks/pre-commit" ;;
+      nocite) printf '#!/usr/bin/env bash\ncase "$(git diff --cached --name-only)" in *inventory*) echo "barrado por outro gestor"; exit 1 ;; esac\nexit 0\n' > "${r}/.githooks/pre-commit" ;;
+      lintall) printf '#!/usr/bin/env bash\nbash "$(git rev-parse --show-toplevel)/.claude/validation/lint-artifacts.sh"\nexit 1\n' > "${r}/.githooks/pre-commit" ;;
+      none)   rmdir "${r}/.githooks" ;;
+    esac
+    [ -f "${r}/.githooks/pre-commit" ] && chmod +x "${r}/.githooks/pre-commit"
+    git -C "${r}" init -q >/dev/null 2>&1
+    [ "$2" = none ] || git -C "${r}" config core.hooksPath .githooks
+    git -C "${r}" add -A >/dev/null 2>&1
+    git -C "${r}" -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -qm base --no-verify >/dev/null 2>&1 || true
+    # estado pendente do "maestro": o checkout real tem de sair disto exatamente igual
+    printf 'mudança não commitada\n' >> "${r}/a.txt"; printf 'rascunho\n' > "${r}/notas.txt"
+  }
+  _pg_snap() { { git -C "$1" rev-parse HEAD; git -C "$1" status --porcelain=v1 --untracked-files=all; git -C "$1" for-each-ref; } 2>/dev/null | sha256sum; }
+  _pg_run() {  # $1=script · $2=alvo → define _o (saída), _r (rc), _intact (1/0), _left (sobras no TMPDIR)
+    local before; before="$(_pg_snap "$2")"
+    _r=0; _o="$(TMPDIR="${d}/tmp" bash "$1" "$2" 2>&1)" || _r=$?
+    [ "$(_pg_snap "$2")" = "${before}" ] && _intact=1 || _intact=0
+    _left="$(find "${d}/tmp" -mindepth 1 -maxdepth 1 | wc -l)"
+  }
+  _pg_last() { tail -n1 <<< "${_o}"; }
+
+  # (a) gate que barra → PROVADO, com a regra e o rc citados
+  local ta="${d}/a"; _pg_mk "${ta}" onion; _pg_run "${pg}" "${ta}"
+  if [ "${_r}" -eq 0 ] && [[ "$(_pg_last)" == "bloqueio PROVADO (REGRA 8 (Inventário canônico sincronizado com o filesystem), rc 1)" ]] \
+     && [ "${_intact}" = 1 ] && [ "${_left}" = 0 ]; then
+    record_pass "prove-gate-blocks: (a) gate do template real barra a violação plantada → PROVADO (REGRA 8, rc 1); checkout real intocado, sandbox apagado"
+  else record_fail "prove-gate-blocks: (a)" "rc=${_r} intacto=${_intact} sobras=${_left} última='$(_pg_last)'"; fi
+
+  # (b) O MODO DE FALHA: hook que só ecoa e sai 0 → NÃO PROVADO (fail-open)
+  local tb="${d}/b"; _pg_mk "${tb}" echo; _pg_run "${pg}" "${tb}"
+  if [ "${_r}" -eq 1 ] && [[ "$(_pg_last)" == "bloqueio NÃO PROVADO: FAIL-OPEN"* ]] && [ "${_intact}" = 1 ] && [ "${_left}" = 0 ]; then
+    record_pass "prove-gate-blocks: (b) hook que só ecoa e sai 0 → NÃO PROVADO (FAIL-OPEN, rc 1); checkout real intocado"
+  else record_fail "prove-gate-blocks: (b)" "rc=${_r} intacto=${_intact} sobras=${_left} última='$(_pg_last)'"; fi
+
+  # (c) alvo sem pre-commit → NÃO PROVADO declarado (precondição, rc 3), nunca calado
+  local tc="${d}/c"; _pg_mk "${tc}" none; _pg_run "${pg}" "${tc}"
+  if [ "${_r}" -eq 3 ] && [[ "$(_pg_last)" == "bloqueio NÃO PROVADO: o alvo não tem pre-commit"* ]] && [ "${_intact}" = 1 ] && [ "${_left}" = 0 ]; then
+    record_pass "prove-gate-blocks: (c) alvo sem pre-commit → NÃO PROVADO declarado (rc 3); checkout real intocado"
+  else record_fail "prove-gate-blocks: (c)" "rc=${_r} intacto=${_intact} sobras=${_left} última='$(_pg_last)'"; fi
+
+  # (d) hook que barra TUDO → NÃO PROVADO (barrar tudo não é discriminar)
+  local td="${d}/d"; _pg_mk "${td}" all; _pg_run "${pg}" "${td}"
+  if [ "${_r}" -eq 1 ] && [[ "$(_pg_last)" == *"barra até o commit de controle"* ]] && [ "${_intact}" = 1 ]; then
+    record_pass "prove-gate-blocks: (d) hook que barra até o controle → NÃO PROVADO (rc 1)"
+  else record_fail "prove-gate-blocks: (d)" "rc=${_r} intacto=${_intact} última='$(_pg_last)'"; fi
+
+  # (e) hook que roda o lint e IGNORA o rc → NÃO PROVADO (o lint acusou e o commit passou)
+  local te="${d}/e"; _pg_mk "${te}" ignore; _pg_run "${pg}" "${te}"
+  if [ "${_r}" -eq 1 ] && [[ "$(_pg_last)" == *"ignora o veredito do lint"* ]] && [ "${_intact}" = 1 ]; then
+    record_pass "prove-gate-blocks: (e) hook que roda o lint e ignora o rc → NÃO PROVADO (FAIL-OPEN)"
+  else record_fail "prove-gate-blocks: (e)" "rc=${_r} intacto=${_intact} última='$(_pg_last)'"; fi
+
+  # (f) outro gestor barra o plantado SEM citar a regra → NÃO PROVADO (o mérito não é do gate do Onion)
+  local tf="${d}/f"; _pg_mk "${tf}" nocite; _pg_run "${pg}" "${tf}"
+  if [ "${_r}" -eq 1 ] && [[ "$(_pg_last)" == *"sem citar a REGRA 8"* ]] && [ "${_intact}" = 1 ]; then
+    record_pass "prove-gate-blocks: (f) barrado sem citar a regra plantada → NÃO PROVADO"
+  else record_fail "prove-gate-blocks: (f)" "rc=${_r} intacto=${_intact} última='$(_pg_last)'"; fi
+
+  # (g) o PENDENTE da working tree entra no sandbox: inventário já fora de sincronia, não commitado → a prova
+  #     recusa a atribuição (rc 3) em vez de creditar ao plantio uma violação que já existia
+  local tg="${d}/g"; _pg_mk "${tg}" onion; printf 'drift pendente\n' >> "${tg}/docs/onion/inventory.md"; _pg_run "${pg}" "${tg}"
+  if [ "${_r}" -eq 3 ] && [[ "$(_pg_last)" == *"JÁ viola a REGRA 8"* ]] && [ "${_intact}" = 1 ]; then
+    record_pass "prove-gate-blocks: (g) violação PENDENTE na working tree do alvo é vista no sandbox → não atribuível (rc 3)"
+  else record_fail "prove-gate-blocks: (g)" "rc=${_r} intacto=${_intact} última='$(_pg_last)'"; fi
+
+  # (h) alvo é WORKTREE ligada (o --update usa worktree irmã com farol vivo) → PROVADO, e as duas árvores intactas
+  local th="${d}/h-wt"; git -C "${ta}" -c core.hooksPath=/dev/null worktree add -q -b wt-probe "${th}" >/dev/null 2>&1 || true
+  local snap_main; snap_main="$(_pg_snap "${ta}")"
+  _pg_run "${pg}" "${th}"
+  if [ "${_r}" -eq 0 ] && [[ "$(_pg_last)" == "bloqueio PROVADO"* ]] && [ "${_intact}" = 1 ] && [ "$(_pg_snap "${ta}")" = "${snap_main}" ]; then
+    record_pass "prove-gate-blocks: (h) alvo em worktree ligada → PROVADO; worktree e checkout principal intocados"
+  else record_fail "prove-gate-blocks: (h)" "rc=${_r} intacto=${_intact} última='$(_pg_last)'"; fi
+
+  # ── da passada adversarial (2026-10-20): cada caso abaixo reproduz um achado executado pelo refutador ──
+  # (i) hook que RODA o lint e barra TUDO, com o lint emitindo SOFT (`VIOLATION:` de rotina) → NÃO PROVADO.
+  #     A 1ª versão contava `^VIOLATION:` como HARD, aceitava o controle barrado e dava PROVADO.
+  local ti="${d}/i"; _pg_mk "${ti}" lintall; _pg_run "${pg}" "${ti}"
+  if [ "${_r}" -eq 1 ] && [[ "$(_pg_last)" == *"barra até o commit de controle sem HARD medida"* ]] && [ "${_intact}" = 1 ]; then
+    record_pass "prove-gate-blocks: (i) hook que roda o lint e barra tudo (lint só com SOFT) → NÃO PROVADO (rc 1)"
+  else record_fail "prove-gate-blocks: (i)" "rc=${_r} intacto=${_intact} última='$(_pg_last)'"; fi
+
+  # (n) HARD pré-existente (não a 8) com o gate certo → NÃO PROVADO por precondição (rc 3), nunca PROVADO
+  local tn="${d}/n"; _pg_mk "${tn}" onion; printf 'x\n' > "${tn}/.claude/validation/legacy-broken"; _pg_run "${pg}" "${tn}"
+  if [ "${_r}" -eq 3 ] && [[ "$(_pg_last)" == *"já reprova com 1 HARD"* ]] && [ "${_intact}" = 1 ]; then
+    record_pass "prove-gate-blocks: (n) alvo que já reprova com HARD → NÃO PROVADO declarado (rc 3), o número vem do sumário do lint"
+  else record_fail "prove-gate-blocks: (n)" "rc=${_r} intacto=${_intact} última='$(_pg_last)'"; fi
+
+  # (j) pendente SÓ STAGEADO: inventário regenerado e dado `git add`, gerador mudado na working tree → PROVADO.
+  #     Com `ls-files -m` (working tree × índice) o inventário stageado não ia para o sandbox.
+  local tj="${d}/j"; _pg_mk "${tj}" onion
+  printf '#!/usr/bin/env bash\nprintf "# inv2\\n"\n' > "${tj}/.claude/validation/inventory.sh"
+  printf '# inv2\n' > "${tj}/docs/onion/inventory.md"; git -C "${tj}" add docs/onion/inventory.md
+  _pg_run "${pg}" "${tj}"
+  if [ "${_r}" -eq 0 ] && [[ "$(_pg_last)" == "bloqueio PROVADO"* ]] && [ "${_intact}" = 1 ]; then
+    record_pass "prove-gate-blocks: (j) pendente só stageado entra no sandbox → PROVADO"
+  else record_fail "prove-gate-blocks: (j)" "rc=${_r} intacto=${_intact} última='$(_pg_last)'"; fi
+
+  # (m) APAGADO pendente de que o lint depende: o alvo apagou o arquivo que dava HARD → PROVADO
+  local tm="${d}/m"; _pg_mk "${tm}" onion; printf 'x\n' > "${tm}/.claude/validation/legacy-broken"
+  git -C "${tm}" add -A >/dev/null 2>&1; git -C "${tm}" -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -qm legado --no-verify >/dev/null 2>&1 || true
+  rm -f "${tm}/.claude/validation/legacy-broken"; _pg_run "${pg}" "${tm}"
+  if [ "${_r}" -eq 0 ] && [[ "$(_pg_last)" == "bloqueio PROVADO"* ]] && [ "${_intact}" = 1 ]; then
+    record_pass "prove-gate-blocks: (m) apagado pendente é apagado no sandbox → PROVADO"
+  else record_fail "prove-gate-blocks: (m)" "rc=${_r} intacto=${_intact} última='$(_pg_last)'"; fi
+
+  # (k) worktree ligada SEM hooksPath: o hook mora no gitdir COMUM e delega por "$(dirname "$0")/../../.githooks"
+  #     → PROVADO. Copiado para fora do .git do sandbox, o caminho relativo sumia e a prova dizia "barra tudo".
+  local tk="${d}/k"; _pg_mk "${tk}" onion; git -C "${tk}" config --unset core.hooksPath
+  printf '#!/usr/bin/env bash\nexec "$(dirname "$0")/../../.githooks/pre-commit" "$@"\n' > "${tk}/.git/hooks/pre-commit"; chmod +x "${tk}/.git/hooks/pre-commit"
+  local tkw="${d}/k-wt"; git -C "${tk}" worktree add -q -b wt-k "${tkw}" >/dev/null 2>&1 || true
+  _pg_run "${pg}" "${tkw}"
+  if [ "${_r}" -eq 0 ] && [[ "$(_pg_last)" == "bloqueio PROVADO"* ]] && [ "${_intact}" = 1 ]; then
+    record_pass "prove-gate-blocks: (k) worktree com hook no gitdir comum (delegador relativo) → PROVADO"
+  else record_fail "prove-gate-blocks: (k)" "rc=${_r} intacto=${_intact} última='$(_pg_last)'"; fi
+
+  # (l) hook como SYMLINK absoluto que se localiza por `readlink -f "$0"` e grava um carimbo ao lado → PROVADO,
+  #     e o carimbo NÃO cai no checkout real. Com o symlink preservado, o hook voltava ao alvo e escrevia nele.
+  local tl="${d}/l"; _pg_mk "${tl}" onion; git -C "${tl}" config --unset core.hooksPath
+  printf '#!/usr/bin/env bash\nd="$(dirname "$(readlink -f "$0")")"; date > "${d}/carimbo-do-hook.txt"\nexec bash "$(git rev-parse --show-toplevel)/.githooks/pre-commit"\n' > "${tl}/.githooks/pre-commit-real"
+  chmod +x "${tl}/.githooks/pre-commit-real"; ln -s "${tl}/.githooks/pre-commit-real" "${tl}/.git/hooks/pre-commit"
+  _pg_run "${pg}" "${tl}"
+  if [ "${_r}" -eq 0 ] && [[ "$(_pg_last)" == "bloqueio PROVADO"* ]] && [ "${_intact}" = 1 ] && [ ! -e "${tl}/.githooks/carimbo-do-hook.txt" ]; then
+    record_pass "prove-gate-blocks: (l) hook symlink absoluto roda no sandbox (cp -aL) → PROVADO, nada escrito no alvo"
+  else record_fail "prove-gate-blocks: (l)" "rc=${_r} intacto=${_intact} carimbo-no-alvo=$([ -e "${tl}/.githooks/carimbo-do-hook.txt" ] && echo sim || echo não) última='$(_pg_last)'"; fi
+  rm -f "${tl}/.githooks/carimbo-do-hook.txt"
+
+  # ── MUTANTES — cada um tira uma decisão e o caso que a mede tem de virar ───────────────────────────
+  _pg_mut() {  # $1=nome · $2=sed · $3=alvo · $4=padrão que a última linha do ORIGINAL tem e o mutante perde
+    local m="${d}/mut-$1.sh"; sed "$2" "${pg}" > "${m}"
+    if cmp -s "${pg}" "${m}"; then record_fail "prove-gate-blocks: (MUT-$1) setup" "a mutação não foi aplicada (a âncora do sed mudou?)"; return; fi
+    _pg_run "${m}" "$3"
+    if [[ "$(_pg_last)" != *"$4"* ]]; then record_pass "prove-gate-blocks: (MUT-$1) o caso morde: sem a decisão, o veredito muda"
+    else record_fail "prove-gate-blocks: (MUT-$1)" "o mutante manteve o veredito — o caso não mede esta decisão"; fi
+  }
+  # sem exigir rc≠0 do plantado, o hook que ignora o lint (e) passaria por PROVADO
+  _pg_mut rc 's|if \[ "${P_RC}" -eq 0 \]; then|if false; then|' "${te}" "NÃO PROVADO"
+  # sem exigir a citação, o outro gestor (f) levaria o mérito
+  _pg_mut cite 's|if ! grep -Eq "${CITE_RE}" <<< "${P_OUT}"; then|if false; then|' "${tf}" "NÃO PROVADO"
+  # sem o controle, barrar tudo (d) deixa de ser nomeado
+  _pg_mut control 's|^if \[ "${C_RC}" -ne 0 \]; then|if false; then|' "${ti}" "NÃO PROVADO"
+  # sem distinguir HARD pelo sumário, a HARD pré-existente (n) vira "barra tudo"
+  _pg_mut hardsum 's|if \[ -n "${C_HARD}" \] && \[ "${C_HARD}" -gt 0 \]; then|if false; then|' "${tn}" "já reprova com 1 HARD"
+  # com `ls-files -m` no lugar de `diff HEAD`, o stageado (j) some do sandbox
+  _pg_mut staged 's|diff -z --no-renames --name-only HEAD|ls-files -z -m|' "${tj}" "bloqueio PROVADO"
+  # sem apagar no sandbox o que o alvo apagou, (m) volta a reprovar pela HARD apagada
+  _pg_mut deleted 's/|| rm -f -- "${R}\/${f}"/|| true/' "${tm}" "bloqueio PROVADO"
+  # com os hooks do gitdir comum copiados para fora do .git do sandbox, (k) acusa "barra tudo"
+  _pg_mut commonhooks 's|"${COMMON}/"\*) HSB=|"${COMMON}/nunca/"*) HSB=|' "${tkw}" "bloqueio PROVADO"
+  # com o symlink preservado (cp -a), o hook de (l) volta ao checkout real
+  _pg_mut symlink 's|cp -aL -- "${H}/."|cp -a -- "${H}/."|' "${tl}" "bloqueio PROVADO"
+  rm -f "${tl}/.githooks/carimbo-do-hook.txt"
+  # sem o pendente da working tree, (g) creditaria ao plantio a violação que já existia
+  _pg_mut overlay 's|git -C "${T}" diff -z --no-renames --name-only HEAD 2>/dev/null; ||' "${tg}" "JÁ viola"
+  # plantando no checkout REAL, a conferência de integridade tem de trocar o veredito (rc 4)
+  local m4="${d}/mut-real.sh"; sed 's|>> "${R}/docs/onion/inventory.md"|>> "${T}/docs/onion/inventory.md"|' "${pg}" > "${m4}"
+  if cmp -s "${pg}" "${m4}"; then record_fail "prove-gate-blocks: (MUT-real) setup" "a mutação não foi aplicada"
+  else
+    _pg_run "${m4}" "${ta}"
+    if [ "${_r}" -eq 4 ] && [[ "$(_pg_last)" == *"checkout real do alvo mudou"* ]] && [ "${_intact}" = 0 ]; then
+      record_pass "prove-gate-blocks: (MUT-real) plantar no checkout real é pego pela integridade (rc 4) — a conferência morde"
+    else record_fail "prove-gate-blocks: (MUT-real)" "rc=${_r} intacto=${_intact} última='$(_pg_last)'"; fi
+  fi
+
+  git -C "${ta}" worktree remove --force "${th}" >/dev/null 2>&1 || true
+  git -C "${tk}" worktree remove --force "${tkw}" >/dev/null 2>&1 || true
+  unset -f _pg_mk _pg_snap _pg_run _pg_last _pg_mut
+  rm -rf "${d}" 2>/dev/null || true
+}
+
 _family run_license_travels_selftests
 _family run_ssot_projections_selftests
 _family run_role_cut_selftests
 _family run_adopt_robust_selftests
 _family run_adopt_update_source_selftests
 _family run_adopter_gate_selftests
+_family run_prove_gate_blocks_selftests
 _family run_sweep_fixtures_selftests
 _family run_seed_adoption_graph_selftests
 _family run_migrate_seed_graph_selftests
@@ -26073,7 +27561,56 @@ PYI
   out="$(bash "${copy}" --families zz_ok,zz_ok2 --jobs 2 2>&1)" && rc=0 || rc=$?
   if [ "${rc}" -eq 0 ] && grep -q 'Passaram : 2' <<< "${out}"&& grep -q 'faixa paralela: 2 famílias / 2 workers' <<< "${out}"; then
     record_pass "selftest-lanes: (h) --jobs 2 agrega 2 workers ⇒ Passaram 2, exit 0"
-  else record_fail "selftest-lanes: (h) --jobs agrega" "rc=${rc}; $(printf '%s\n' "${out}" | grep -E 'Passaram|faixa' | tr '\n' '|' | cut -c1-140)"; fi
+  # a soma vem PRIMEIRO na mensagem: em 2026-10-20 o corte de 140 caracteres engoliu justamente o
+  # "Passaram : N" no runner, e o CI só provava "≠ 2" — o número da causa teve de vir da reprodução
+  else record_fail "selftest-lanes: (h) --jobs agrega" "rc=${rc}; $(grep -oE 'Passaram : [0-9]+' <<< "${out}" | tail -1); $(printf '%s\n' "${out}" | grep -E 'faixa' | tr '\n' '|' | cut -c1-140)"; fi
+  # (h2) A REIVINDICAÇÃO DA FILA É ATÔMICA QUALQUER QUE SEJA O `mkdir` DA IMAGEM. Medido em 2026-10-20: o
+  #      runner ubuntu-26.04 traz o uutils 0.10.0, cujo `mkdir` confere a existência e SÓ DEPOIS cria — dois
+  #      workers que chegam juntos recebem rc=0 os dois (4% a 48% das corridas em 2 núcleos, conforme o harness; GNU: 0). Os
+  #      dois rodavam a mesma família, o pai somava 3 ou 4 com exit 0, e o (h) caía só no CI. Aqui o
+  #      `mkdir` do PATH vira um imitador FIEL desse defeito, com BARREIRA: quem confere espera o outro
+  #      conferir também, então a corrida acontece em toda rodada, não por sorte. O SUT tem de dar 2 e
+  #      exit 0; o MUTANTE (a trava devolvida ao `mkdir`) tem de RODAR (somar mais que 2) e o PAI tem de
+  #      ACUSAR a dupla execução (exit 1 nomeando "rodou 2 vezes") — as duas metades da cura mordem.
+  local _shim="${d}/zz-uu-shim" _real_mk; _real_mk="$(command -v mkdir)"
+  mkdir -p "${_shim}/bin" "${_shim}/arrived"
+  cat > "${_shim}/bin/mkdir" <<SHIM
+#!/bin/bash
+# imitador do mkdir do uutils 0.10.0: confere-depois-cria (não-atômico). Com -p, o real.
+for _a in "\$@"; do case "\${_a}" in -p|--parents|-*p*) exec "${_real_mk}" "\$@" ;; esac; done
+_t="\${!#}"; [ -e "\${_t}" ] && { echo "mkdir: \${_t}: File exists" >&2; exit 1; }
+_k="${_shim}/arrived/\$(printf '%s' "\${_t}" | tr '/' '_')"; "${_real_mk}" -p "\${_k}"; : > "\${_k}/\$\$"
+for _i in \$(seq 1 300); do [ "\$(ls "\${_k}" | wc -l)" -ge 2 ] && break; sleep 0.1; done
+exec "${_real_mk}" -p "\${_t}"
+SHIM
+  chmod +x "${_shim}/bin/mkdir"
+  local _mut="${d}/.claude/validation/lint-selftest-mut.sh" _o2 _om _r2 _rm
+  # âncora por REGEX ancorada no recuo da linha do `_family` (4 espaços): este caso cita a trava em prosa
+  # e não pode casar consigo mesmo (contagem tem de ser exatamente 1, senão o mutante não nasce)
+  python3 - "${copy}" "${_mut}" <<'PYMUT'
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src).read()
+rx = re.compile(r'^    \( set -C; : > "\$\{SELFTEST_QUEUE\}/claimed/\$\{name\}" \) 2>/dev/null \|\| return 0$', re.M)
+if len(rx.findall(s)) != 1: sys.exit(0)   # sem a âncora o mutante não nasce, e o caso acusa abaixo
+open(dst, "w").write(rx.sub('    mkdir "${SELFTEST_QUEUE}/claimed/${name}" 2>/dev/null || return 0', s))
+PYMUT
+  _o2="$(PATH="${_shim}/bin:${PATH}" bash "${copy}" --families zz_ok,zz_ok2 --jobs 2 2>&1)" && _r2=0 || _r2=$?
+  if [ ! -f "${_mut}" ]; then
+    record_fail "selftest-lanes: (h2) mutante" "a âncora da trava (noclobber) não está UMA vez no SUT — a cura sumiu ou mudou de forma; o mutante não nasceu"
+  else
+    rm -rf "${_shim}/arrived"; mkdir -p "${_shim}/arrived"
+    _om="$(PATH="${_shim}/bin:${PATH}" bash "${_mut}" --families zz_ok,zz_ok2 --jobs 2 2>&1)" && _rm=0 || _rm=$?
+    rm -f "${_mut}"
+    # o mutante tem de RODAR até o sumário e somar MAIS que 2 (casamento POSITIVO): só "não deu 2"
+    # aprovava um mutante que morre antes do sumário (achado da passada adversarial, 2026-10-20:
+    # sintaxe quebrada ⇒ PASS). E o pai tem de acusar a dupla execução com exit 1, nomeando-a.
+    if [ "${_r2}" -eq 0 ] && grep -q 'Passaram : 2$' <<< "${_o2}" && ! grep -q 'rodou [0-9]* vezes' <<< "${_o2}" \
+       && [ "${_rm}" -eq 1 ] && grep -qE 'Passaram : ([3-9]|[1-9][0-9]+)$' <<< "${_om}" \
+       && grep -q 'família zz_ok rodou 2 vezes' <<< "${_om}"; then
+      record_pass "selftest-lanes: (h2) mkdir não-atômico no PATH (uutils) ⇒ SUT soma 2 e exit 0; o mutante com a trava em mkdir soma $(grep -oE 'Passaram : [0-9]+' <<< "${_om}" | grep -oE '[0-9]+$') e o pai ACUSA a dupla execução (exit 1)"
+    else record_fail "selftest-lanes: (h2) reivindicação não-atômica" "SUT rc=${_r2} $(grep -oE 'Passaram : [0-9]+' <<< "${_o2}"); mutante rc=${_rm} $(grep -oE 'Passaram : [0-9]+' <<< "${_om}") $(grep -oE 'família [a-z0-9_]+ rodou [0-9]+ vezes' <<< "${_om}" | head -1) — esperado SUT=2/exit 0 e mutante>2 com exit 1 nomeando a dupla execução"; fi
+  fi
   out="$(bash "${copy}" --families zz_ok,zz_abort --jobs 2 2>&1)" && rc=0 || rc=$?
   if [ "${rc}" -eq 1 ] && grep -q 'ABORTOU sem somar' <<< "${out}"&& grep -q 'zz_abort reivindicada e NÃO concluída' <<< "${out}"&& ! grep -q '^OK ✓' <<< "${out}"; then
     record_pass "selftest-lanes: (i) worker que aborta ⇒ FALHA no pai (exit 1): sem trailer + família reivindicada-e-não-concluída nomeada"
@@ -26136,7 +27673,7 @@ PYI
   else record_fail "selftest-lanes: (p) --report altera contagem" "sem=[$(tr '\n' '|' <<< "${sem}")] com=[$(tr '\n' '|' <<< "${com}")]"; fi
   # (q) o TOTAL do TSV é a SOMA das linhas de família — um relatório cuja aritmética não fecha é
   #     pior que relatório nenhum: ele parece medição.
-  if [ -f "${rep}" ] && head -1 "${rep}" | grep -q '^familia'; then
+  if [ -f "${rep}" ] && grep -q '^familia' <<< "$(head -1 "${rep}")"; then
     local somap totp
     somap="$(awk -F'\t' '$1!="familia" && $1!="TOTAL" && $1!="FAIL" && $1!="SKIP" {s+=$2} END{print s+0}' "${rep}")"
     totp="$(awk -F'\t' '$1=="TOTAL"{print $2+0}' "${rep}")"
@@ -26991,14 +28528,14 @@ run_model_ladder_selftests() {
   else record_fail "model-ladder: (a) piso/picker" "rc=${rc}: $(head -c 120 "${d}/err")"; fi
   # (b) piso por fallback ⇒ permite, ladder=degraded, aviso no stderr
   rc="$(_sw claude-fable-5-1 claude-sonnet-5 sonnet fallback)"
-  if [ "${rc}" = 0 ] && tail -1 "${d}/log.jsonl" | grep -q '"decision":"allow","ladder":"degraded"' && grep -q "DEGRADADA" "${d}/err"; then
+  if [ "${rc}" = 0 ] && grep -q '"decision":"allow","ladder":"degraded"' <<< "$(tail -1 "${d}/log.jsonl")" && grep -q "DEGRADADA" "${d}/err"; then
     record_pass "model-ladder: (b) piso por fallback ⇒ permite com ladder=degraded e aviso"
   else record_fail "model-ladder: (b) piso/fallback" "rc=${rc}; $(tail -1 "${d}/log.jsonl" | cut -c1-160)"; fi
   # (c) aviso de degradação a cada prompt enquanto degradado; silêncio após restored
   out="$(printf '{"session_id":"sess-1","hook_event_name":"UserPromptSubmit","prompt":"x"}' | ONION_MODEL_SWITCH_LOG="${d}/log.jsonl" CLAUDE_PROJECT_DIR="${d}" CLAUDE_CODE_SESSION_ID=sess-1 bash "${nt}" 2>&1 || true)"
   rc="$(_sw claude-sonnet-5 claude-fable-5-1 fable picker)"
   local out2; out2="$(printf '{"session_id":"sess-1","hook_event_name":"UserPromptSubmit","prompt":"x"}' | ONION_MODEL_SWITCH_LOG="${d}/log.jsonl" CLAUDE_PROJECT_DIR="${d}" CLAUDE_CODE_SESSION_ID=sess-1 bash "${nt}" 2>&1 || true)"
-  if grep -q "DEGRADADA na escada" <<< "${out}"&& grep -q "claude-sonnet-5" <<< "${out}"&& [ -z "${out2}" ] && [ "${rc}" = 0 ] && tail -1 "${d}/log.jsonl" | grep -q '"ladder":"restored"'; then
+  if grep -q "DEGRADADA na escada" <<< "${out}"&& grep -q "claude-sonnet-5" <<< "${out}"&& [ -z "${out2}" ] && [ "${rc}" = 0 ] && grep -q '"ladder":"restored"' <<< "$(tail -1 "${d}/log.jsonl")"; then
     record_pass "model-ladder: (c) aviso a cada prompt enquanto degradado; volta ao primário ⇒ ladder=restored e silêncio"
   else record_fail "model-ladder: (c) aviso" "out='${out:0:80}' out2='${out2:0:40}' rc=${rc}"; fi
   # (d) fora da escada pelo picker ⇒ VETO (o 1+3 continua)
@@ -27278,7 +28815,7 @@ run_plugin_hooks_resolvable_selftests() {
 [h.pop("onFailure", None) for v in d["hooks"].values() for g in v for h in g["hooks"]]
 json.dump(d, open(p, "w"), indent=2)' "${d}/src/plugins/hp/hooks/hooks.json"
   out="$(bash "${h}" "${d}/src" --format tsv 2>/dev/null)"
-  if printf '%s' "${out}" | grep -q "motor-ausente" && printf '%s' "${out}" | grep -q "repo-prefixado" && printf '%s' "${out}" | grep -q "matcher-divergente" && printf '%s' "${out}" | grep -q "onfailure-divergente"; then
+  if grep -q "motor-ausente" <<< "${out}" && grep -q "repo-prefixado" <<< "${out}" && grep -q "matcher-divergente" <<< "${out}" && grep -q "onfailure-divergente" <<< "${out}"; then
     record_pass "plugin-hooks-resolvable: (c) mutante → motor-ausente + repo-prefixado + matcher-divergente + onfailure-divergente"
   else record_fail "plugin-hooks-resolvable: (c) mutante" "$(printf '%s' "${out}" | tr '\n' ' ' | cut -c1-240)"; fi
   unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
@@ -27297,17 +28834,17 @@ run_plugin_bare_path_selftests() {
   printf -- '---\nname: x\nallowed-tools: Bash(bash .claude/utils/co/relay.sh*)\n---\nVeja `.claude/utils/c4-templates.md`, `${CLAUDE_PLUGIN_ROOT}/utils/ok.md` e `.claude/sessions/x`.\n' > "${d}/r/plugins/p/commands/x.md"
   # (a) sem baseline → NO-BASELINE + 2 NOVO (sessions/ e PLUGIN_ROOT não contam)
   out="$(bash "${h}" "${d}/r" --format tsv 2>/dev/null)"
-  if printf '%s' "${out}" | grep -q "NO-BASELINE" && [ "$(printf '%s\n' "${out}" | grep -c "	NOVO	")" -eq 2 ]; then record_pass "plugin-bare-path: (a) sem baseline = NO-BASELINE + 2 NOVO (sessions/ e PLUGIN_ROOT não contam)"
+  if grep -q "NO-BASELINE" <<< "${out}" && [ "$(printf '%s\n' "${out}" | grep -c "	NOVO	")" -eq 2 ]; then record_pass "plugin-bare-path: (a) sem baseline = NO-BASELINE + 2 NOVO (sessions/ e PLUGIN_ROOT não contam)"
   else record_fail "plugin-bare-path: (a)" "$(printf '%s' "${out}" | tr '\n' ' ' | cut -c1-200)"; fi
   # (b) baseline emitido → passivo SOFT, allowed-tools sinalizado, 0 HARD
   bash "${h}" "${d}/r" --emit-baseline > "${d}/r/.claude/validation/plugin-bare-path-baseline.txt"
   out="$(bash "${h}" "${d}/r" --format tsv 2>/dev/null)"
-  if ! printf '%s' "${out}" | grep -q "^HARD" && printf '%s' "${out}" | grep -q "ALLOWED-TOOLS" && printf '%s' "${out}" | grep -q "PASSIVO"; then record_pass "plugin-bare-path: (b) passivo baselined = SOFT; allowed-tools sinalizado"
+  if ! grep -q "^HARD" <<< "${out}" && grep -q "ALLOWED-TOOLS" <<< "${out}" && grep -q "PASSIVO" <<< "${out}"; then record_pass "plugin-bare-path: (b) passivo baselined = SOFT; allowed-tools sinalizado"
   else record_fail "plugin-bare-path: (b)" "$(printf '%s' "${out}" | tr '\n' ' ' | cut -c1-200)"; fi
   # (c) ref NOVA fora do baseline = HARD
   printf 'Nova: `.claude/commands/common/templates/t.md`.\n' >> "${d}/r/plugins/p/commands/x.md"
   out="$(bash "${h}" "${d}/r" --format tsv 2>/dev/null)"
-  if printf '%s' "${out}" | grep -q "^HARD	NOVO"; then record_pass "plugin-bare-path: (c) ref nova fora do baseline = HARD"
+  if grep -q "^HARD	NOVO" <<< "${out}"; then record_pass "plugin-bare-path: (c) ref nova fora do baseline = HARD"
   else record_fail "plugin-bare-path: (c)" "$(printf '%s' "${out}" | tr '\n' ' ' | cut -c1-200)"; fi
   rm -rf "${d}"
 }
@@ -28143,6 +29680,9 @@ run_realign_selftests() {
     "drift-c-unreconciled|REALINHAR: (c)=1|1"
     "drift-b-costly|(b)=1|0"
     "drift-a-benign|(a)=1|0"
+    # ESPAÇO no verified_against e no trace (o caso real do corpus): o feed de frescor é por TAB, e lido
+    # por espaço o veredito vira texto e a camada 2 cega (2026-10-21: 3 STALE no fios-abertos, (a)=0).
+    "drift-a-spaced|(a)=1|0"
     "drift-northstar|commit=1 bind=1|0"
     "bind-fp-supported-decision|bind=0|0"
     # PAR que fixa o critério do SUPERADOR MORTO (2026-09-06). O radar já ignora superador
@@ -28165,7 +29705,7 @@ run_realign_selftests() {
     if [ "${_nn}" = "${_sn}" ] && [ "${_nn}" -gt 0 ] 2>/dev/null; then
       record_pass "realign: --status-tsv lista TODOS os ${_nn} nós (inclusive atenção zero)"
     else record_fail "realign: --status-tsv incompleto" "arquivo tem ${_nn} nós, o feed devolveu ${_sn} — a cura do superador morto vira no-op"; fi
-    if bash "${_rad}" "${_fm}" --status-tsv 2>/dev/null | grep -q "Q_SUPERADOR_QUE_CAIU$(printf '\t')refuted"; then
+    if grep -q "Q_SUPERADOR_QUE_CAIU$(printf '\t')refuted" <<< "$(bash "${_rad}" "${_fm}" --status-tsv 2>/dev/null)"; then
       record_pass "realign: --status-tsv traz o status do nó REFUTADO (o que o freshness-tsv omite)"
     else record_fail "realign: --status-tsv sem o refutado" "o feed não traz o superador morto — foi assim que a 1ª cura ficou muda"; fi
   fi
@@ -28507,8 +30047,8 @@ m=lambda n,r: {"node_id":n,"kg_file":sys.argv[2],"verdict":"DRIFTED","realidade"
 json.dump({"run_id":"wf_fixture","medidos":[m("N_GATED","GATED"),m("N_MORTO","MORTO-CANDIDATO")],"juizo":{},"nao_medidos_por_teto":[],"parametros":{}},open(sys.argv[1],'w'))
 PY
   rc=0; out="$(ONION_CENSUS_ROOT="$d" python3 "${seal}" seal "$d/c.json" 2>&1)" || rc=$?
-  if [ $rc -eq 0 ] && grep -qE 'to: N_GATED\n?' "$d/$g" && awk '/to: N_GATED/{getline; print}' "$d/$g" | grep -q CONSTRAINS \
-     && awk '/to: N_MORTO/{getline; print}' "$d/$g" | grep -q SUPERSEDES; then
+  if [ $rc -eq 0 ] && grep -qE 'to: N_GATED\n?' "$d/$g" && grep -q CONSTRAINS <<< "$(awk '/to: N_GATED/{getline; print}' "$d/$g")" \
+     && grep -q SUPERSEDES <<< "$(awk '/to: N_MORTO/{getline; print}' "$d/$g")"; then
     record_pass "census-seal: (d) DRIFTED+GATED vira CONSTRAINS (alvo segue open) e DRIFTED+MORTO vira SUPERSEDES"
   else record_fail "census-seal: (d)" "aresta pela realidade nao aplicada (rc=$rc): $out $(grep -A1 'to: N_' "$d/$g")"; fi
   # (v3) o que o censo ESCREVE nasce no contrato v3 (2026-10-08, SAC-71): partindo de um grafo conforme,
@@ -28760,7 +30300,7 @@ run_backlog_projection_selftests() {
   #     O script pina `export LC_ALL=C`; este caso prova que a pinagem sobrevive ao chamador.
   local loc found_alt=""
   for loc in en_US.utf8 en_US.UTF-8 C.utf8; do
-    if locale -a 2>/dev/null | grep -qx "${loc}"; then found_alt="${loc}"; break; fi
+    if grep -qx "${loc}" <<< "$(locale -a 2>/dev/null)"; then found_alt="${loc}"; break; fi
   done
   if [ -n "${found_alt}" ]; then
     ( cd "${sb}" && LC_ALL="${found_alt}" bash .claude/validation/kg-backlog-project.sh --markdown > "${sb}/loc.out" 2>/dev/null )
@@ -30440,6 +31980,20 @@ STUB
   if [[ "${_f2}" == 0:*' ok' ]] && [[ "${_f2b}" == 0:*' ok' ]]; then
     record_pass "registry-pins: (f2) registro standalone × carimbo standalone (o corte) e × adopted (compat) ⇒ ok, sem DIVERGE de papel"
   else record_fail "registry-pins: (f2) carimbo do adotante standalone" "standalone×standalone=${_f2} · standalone×adopted=${_f2b}"; fi
+
+  # (f3) CARIMBO SEM `role:` (passada adversarial de 2026-10-20): registro `standalone`, carimbo vivo com
+  #      pin novo e SEM linha de papel ⇒ acusa papel (<sem role>), rc=1, e o --seal NÃO carimba. A 1ª forma
+  #      só comparava com os dois lados preenchidos, e o carimbo mudo passava direto ao pin.
+  #      MUTANTE: voltar a condição para `[ -n "${stamp_role}" ] && [ -n "${regrole}" ]` reprova este caso.
+  rm -f "${stamps}"/*; _rp_stamp vizinho "${PIN_OLD}"
+  printf 'source_commit: %s\n' "${PIN_NEW}" > "${stamps}/dono_alvo_main"
+  _rp_reg "${PIN_OLD}" "${PIN_OLD}" "github.com/dono/alvo"
+  sed -i '/^  - id: alvo$/a\    role: standalone' "${REG}"
+  _rp --seal
+  if [ "${_r}" -eq 1 ] && grep -qE '^alvo .*papel: registro standalone × carimbo <sem role>' <<< "${_o}" \
+     && grep -qF "onion_version: ${PIN_OLD}   # comentario antigo do alvo" "${REG}"; then
+    record_pass "registry-pins: (f3) carimbo vivo SEM role ⇒ acusa papel e NÃO carimba (omissão não é compatível)"
+  else record_fail "registry-pins: (f3) carimbo sem role passou direto ao pin" "rc=${_r} out=$(_emit "${_o}" | head -c 300)"; fi
   rm -f "${stamps}"/*; _rp_stamp vizinho "${PIN_OLD}"   # devolve o mundo como o (f) o deixou: o (g) parte dele
 
   # (g) membro COM remoto, remoto FALHA, clone parado bate com o registro ⇒ ILEGÍVEL (rc=3), nunca ok.
@@ -33491,6 +35045,7 @@ _family run_a2a_invite_live_selftests
 _family run_a2a_queue_live_selftests
 _family run_bridge_hardening_selftests
 _family run_chat_runner_selftests
+_family run_stt_service_selftests
 _family run_update_bridge_selftests
 _family run_version_drift_selftests
 _family run_currency_census_selftests
@@ -34886,7 +36441,7 @@ run_zoho_adapter_selftests() {
   # Por isso o caso agora cobra o ANINHAMENTO — a convenção que a §1 do adapter já declarava e que
   # eu não apliquei a mim. Guarda que canoniza a conclusão da semana passada é pior que guarda nenhuma.
   local _sec_sub; _sec_sub="$(_zoho_sec 'createSubtask')"
-  if grep -qF '"parental_info":{"parent_task_id"' <<< "$(printf '%s' "${_sec_sub}")" && grep -qF 'depth' <<< "${_sec_sub}"; then
+  if grep -qF '"parental_info":{"parent_task_id"' <<< "${_sec_sub}" && grep -qF 'depth' <<< "${_sec_sub}"; then
     record_pass "zoho-adapter: (f) createSubtask usa o vínculo ANINHADO parental_info, com a evidência (depth 1 / has_subtasks)"
   else record_fail "zoho-adapter: (f)" "a seção do createSubtask não mostra \`{\"parental_info\":{\"parent_task_id\":…}}\` nem a evidência medida (filha depth 1, pai has_subtasks true) — as formas PLANAS dão 400 e já produziram DUAS conclusões erradas neste arquivo"; fi
 
@@ -35539,8 +37094,8 @@ run_ops_citation_travel_selftests() {
   local o rc
   # (a) o --selftest próprio: acusa o defeito verbatim e cala nas três declarações + fora do escopo
   if o="$(LC_ALL=C bash "${chk}" --selftest 2>&1)"; then rc=0; else rc=$?; fi
-  if [ "${rc}" -eq 0 ] && grep -qF 'selftest: 19/19 verdes' <<< "${o}"; then
-    record_pass "ops-citation-travel: (a) --selftest verde (19 casos, os 2 últimos da SAC-149: a mensagem de violation e a regra source-only: o defeito verbatim, as três declarações, fora do escopo, catraca por contagem e os achados da passada adversarial)"
+  if [ "${rc}" -eq 0 ] && grep -qF 'selftest: 25/25 verdes' <<< "${o}"; then
+    record_pass "ops-citation-travel: (a) --selftest verde (25 casos: o defeito verbatim, as três declarações, fora do escopo, catraca por contagem, os achados da passada adversarial, os 2 da SAC-149, os 3 do 2º vocabulário, o /meta:publish cortado da adoção, sinal de campo 2026-10-19, e os 3 do 3º, o kg-migrate-v3.py cortado da adoção, 2026-10-20)"
   else record_fail "ops-citation-travel: (a) --selftest" "rc=${rc}; $(grep '✗' <<< "${o}" | head -3 | tr '\n' '|')"; fi
   # (b) O MODO QUE A PRODUÇÃO CONSOME, no corpus real: --format tsv sai 0, sem HARD, e com o passivo à vista.
   #     CAMINHO LITERAL: a REGRA 59 casa o nome do arquivo para achar o par.
@@ -35593,10 +37148,162 @@ sub(/\r\$/, "", l);$(printf '\x1f')sub(/\rX\$/, "", l);$(printf '\x1f')(xiv)
 for (t in lg) if (code) gtok[t] = 1$(printf '\x1f')for (t in lg) gtok[t] = 1$(printf '\x1f')(xvi)
 -[efxsdrL][[:space:]]+[^] ]+/)$(printf '\x1f')-[efxsd][[:space:]]+[^] ]+/)$(printf '\x1f')(xvii)
 if (inpaths) next$(printf '\x1f')if (0) next$(printf '\x1f')(xv)
+-v cmdre="\${_CMDRE}"$(printf '\x1f')-v cmdre=""$(printf '\x1f')(xx)
+if (c ~ /[A-Za-z0-9_.\/-]/ || nx ~ /[A-Za-z0-9_-]/) continue$(printf '\x1f')if (0) continue$(printf '\x1f')(xxi)
+p = index(substr(t, 2), "/"); if (p > 0)$(printf '\x1f')p = 0; if (p > 0)$(printf '\x1f')(xxi)
+if (cmdre != "" && !cutfile) {$(printf '\x1f')if (cmdre != "") {$(printf '\x1f')(xxii)
+-v filere="\${_FILERE}"$(printf '\x1f')-v filere=""$(printf '\x1f')(xxiii)
+if (c ~ /[A-Za-z0-9_.-]/ || nx ~ /[A-Za-z0-9_-]/) continue$(printf '\x1f')if (0) continue$(printf '\x1f')(xxiv)
+if (filere != "" && !cutfile && !plant) {$(printf '\x1f')if (filere != "") {$(printf '\x1f')(xxv)
 EOF_MUT
   rm -rf "${sb}"
 }
 _family run_ops_citation_travel_selftests
+
+# REGRA 109 (CLAUDE.md não cresce sem tirar o equivalente ou citar um nó) — medido em 2026-10-19: +52% depois do
+# selo que mandava medir antes de podar. (a) o --selftest próprio; (b) o modo tsv no corpus real; (c) o lint de
+# produção emite a regra sobre o defeito verbatim; (m) mutante sem o teto reprova o (a).
+run_claude_md_size_selftests() {
+  local chk="${REPO_ROOT}/.claude/validation/claude-md-size-check.sh"
+  [ -f "${chk}" ] || { record_fail "claude-md-size" "guarda ausente"; return; }
+  local o rc
+  if o="$(LC_ALL=C bash "${chk}" --selftest 2>&1)"; then rc=0; else rc=$?; fi
+  if [ "${rc}" -eq 0 ] && grep -qF '14 passaram, 0 falharam' <<< "${o}"; then
+    record_pass "claude-md-size: (a) --selftest verde (14 casos: o defeito verbatim, o teto, a folga, a catraca pelo merge-base, o nó citado e os achados do Elenxo)"
+  else record_fail "claude-md-size: (a) --selftest" "rc=${rc}; $(grep '✗' <<< "${o}" | head -3 | tr '\n' '|')"; fi
+  if o="$(cd "${REPO_ROOT}" && LC_ALL=C bash "${REPO_ROOT}/.claude/validation/claude-md-size-check.sh" "${REPO_ROOT}" --format tsv 2>&1)"; then rc=0; else rc=$?; fi
+  if [ "${rc}" -eq 0 ] && ! grep -q '^HARD' <<< "${o}"; then
+    record_pass "claude-md-size: (b) corpus real → rc 0, sem HARD no modo tsv"
+  else record_fail "claude-md-size: (b) corpus real" "rc=${rc}; ${o:0:200}"; fi
+  local sd; sd="$(TMPDIR=/tmp mktemp -d)"
+  cp -a "${SANDBOX}/.claude" "${sd}/" 2>/dev/null
+  printf 'ceiling: 10\n' > "${sd}/.claude/validation/claude-md-size-ceiling.txt"
+  printf 'uma linha que passa do teto de dez bytes\n' > "${sd}/CLAUDE.md"
+  ( cd "${sd}" && git init -q . 2>/dev/null; git add -A ) >/dev/null 2>&1
+  local l; l="$(cd "${sd}" && LC_ALL=C bash .claude/validation/lint-artifacts.sh --only="${sd}/CLAUDE.md" 2>&1 || true)"
+  if grep -q 'REGRA 109 (CLAUDE.md não cresce sem tirar o equivalente ou citar um nó): \[CRESCEU\]' <<< "${l}"; then
+    record_pass "claude-md-size: (c) o lint de produção (dispatcher) emite a REGRA 109 sobre o CLAUDE.md acima do teto"
+  else record_fail "claude-md-size: (c) dispatcher" "$(grep -E 'REGRA 109|HARD' <<< "${l}" | head -3 | tr '\n' '|')"; fi
+  sed -i 's/if \[ "${size}" -gt "${ceiling}" \]; then/if false; then/' "${sd}/.claude/validation/claude-md-size-check.sh"
+  if o="$(LC_ALL=C bash "${sd}/.claude/validation/claude-md-size-check.sh" --selftest 2>&1)" || ! grep -q '✗ claude-md-size: (a)' <<< "${o}"; then
+    record_fail "claude-md-size: (m) mutante sem o teto" "o --selftest passou com o teto desligado"
+  else record_pass "claude-md-size: (m) mutante sem o teto reprova o (a)"; fi
+  rm -rf "${sd}"
+}
+_family run_claude_md_size_selftests
+
+# REGRA 110 (Índice da KB conta o que o disco tem) — U5, sinal de campo de um hub adotante (2026-10-19): o índice
+# dizia 42 conceitos, listava 44 e o disco tinha 53. Polaridades com fixture: índice coerente cala; contagem, entrada
+# faltando, pasta sem seção, estatística e árvore erradas acusam HARD; no derivado, SOFT; o dispatcher emite a REGRA;
+# e dois mutantes (sem a comparação da contagem, sem a da listagem) têm de calar o caso que os pega.
+run_kb_index_selftests() {
+  local chk="${REPO_ROOT}/.claude/validation/kb-index-check.sh"
+  [ -f "${chk}" ] || { record_fail "kb-index" "guarda ausente: ${chk}"; return; }
+  local o rc
+  if o="$(LC_ALL=C bash "${chk}" "${REPO_ROOT}" --format tsv 2>&1)"; then rc=0; else rc=$?; fi
+  if [ "${rc}" -eq 0 ] && ! grep -q '^HARD' <<< "${o}"; then record_pass "kb-index: (a) corpus real → rc 0, sem HARD (o índice do core conta o que o disco tem)"
+  else record_fail "kb-index: (a) corpus real" "rc=${rc}; ${o:0:240}"; fi
+  local f; f="$(mktemp -d)"
+  mkdir -p "${f}/docs/knowledge-base/concepts" "${f}/docs/knowledge-base/tools/sub" "${f}/docs/knowledge-base/decisions"
+  : > "${f}/docs/knowledge-base/concepts/a.md"; : > "${f}/docs/knowledge-base/concepts/b.md"
+  : > "${f}/docs/knowledge-base/tools/t.md"; : > "${f}/docs/knowledge-base/tools/sub/README.md"
+  cat > "${f}/docs/knowledge-base/index.md" <<'KBI'
+# Índice
+- **3 documentos de conteúdo**
+- **2** em `concepts/` · **1** em `tools/`
+
+```
+docs/knowledge-base/
+├── concepts/   # 2 — x
+└── tools/      # 1 — y
+```
+
+## 🧠 Conceitos (2)
+
+> prosa que cita [outra](tools/t.md) não é entrada
+
+- [A](concepts/a.md) — a
+- [B](concepts/b.md) — b
+
+## 🛠️ Ferramentas (1 + 1 README)
+
+- [T](tools/t.md) — t
+KBI
+  if o="$(LC_ALL=C bash "${chk}" "${f}" --format tsv 2>&1)" && [ -z "${o}" ]; then record_pass "kb-index: (b) índice coerente com o disco ⇒ cala (a prosa da seção que cita outra pasta não confunde)"
+  else record_fail "kb-index: (b) índice coerente" "${o:0:240}"; fi
+  # (b2) formas legítimas de entrada que a 1ª redação reprovava (passada adversarial): âncora, título, negrito, `./`,
+  #      lista numerada, uma pasta em duas seções e um `## X (9)` dentro de bloco cercado; e o inverso, a entrada
+  #      só em comentário HTML não conta como listada
+  local f2; f2="$(mktemp -d)"; mkdir -p "${f2}/docs/knowledge-base/concepts"
+  : > "${f2}/docs/knowledge-base/concepts/a.md"; : > "${f2}/docs/knowledge-base/concepts/b.md"; : > "${f2}/docs/knowledge-base/concepts/c.md"
+  printf '%s\n' '## C1 (2)' '' '- **[A](concepts/a.md#sec)** — a' '1. [B](./concepts/b.md "t") — b' '' '```' '## Falso (9)' '```' '' '### C2 (1) 🧠' '' '- [C](concepts/c.md)' > "${f2}/docs/knowledge-base/index.md"
+  local b2a b2b; b2a="$(LC_ALL=C bash "${chk}" "${f2}" --format tsv 2>&1)"
+  printf '%s\n' '## C (3)' '- [A](concepts/a.md)' '- [B](concepts/b.md)' '<!-- - [C](concepts/c.md) -->' > "${f2}/docs/knowledge-base/index.md"
+  b2b="$(LC_ALL=C bash "${chk}" "${f2}" --format tsv 2>&1)"; rm -rf "${f2}"
+  if [ -z "${b2a}" ] && grep -q 'FORA-DO-INDICE.*concepts/c.md' <<< "${b2b}"; then record_pass "kb-index: (b2) âncora, título, negrito, ./, lista numerada, pasta em 2 seções e cabeçalho em bloco cercado não acusam; entrada só em comentário HTML acusa"
+  else record_fail "kb-index: (b2) formas de entrada" "legítimas=${b2a:0:160} | comentário=${b2b:0:120}"; fi
+  : > "${f}/docs/knowledge-base/concepts/c.md"; : > "${f}/docs/knowledge-base/decisions/d.md"
+  o="$(LC_ALL=C bash "${chk}" "${f}" --format tsv 2>&1)"
+  local want miss=""
+  for want in 'HARD	CONTAGEM' 'HARD	FORA-DO-INDICE' 'HARD	PASTA-SEM-SECAO' 'HARD	ESTATISTICA' 'HARD	ARVORE'; do
+    grep -qF "${want}" <<< "${o}" || miss="${miss} [${want}]"
+  done
+  grep -q 'concepts/c.md' <<< "${o}" || miss="${miss} [não nomeou concepts/c.md]"
+  if [ -z "${miss}" ]; then record_pass "kb-index: (c) arquivo novo fora do índice e pasta sem seção ⇒ HARD por contagem, entrada faltando (nomeada), pasta, estatística e árvore"
+  else record_fail "kb-index: (c) deriva" "faltou:${miss}; veio: ${o:0:200}"; fi
+  o="$(LC_ALL=C bash "${chk}" "${f}" --format tsv --derived 2>&1)"
+  if grep -q '^SOFT' <<< "${o}" && ! grep -q '^HARD' <<< "${o}"; then record_pass "kb-index: (d) no derivado a mesma deriva é SOFT (o índice vendorizado é do core)"
+  else record_fail "kb-index: (d) derivado" "${o:0:200}"; fi
+  local sd; sd="$(TMPDIR=/tmp mktemp -d)"
+  cp -a "${SANDBOX}/.claude" "${sd}/" 2>/dev/null; cp -a "${f}/docs" "${sd}/" 2>/dev/null
+  ( cd "${sd}" && git init -q . 2>/dev/null; git add -A ) >/dev/null 2>&1
+  local l; l="$(cd "${sd}" && LC_ALL=C bash .claude/validation/lint-artifacts.sh --only="${sd}/docs/knowledge-base/index.md" 2>&1 || true)"
+  if grep -q 'REGRA 110 (Índice da KB conta o que o disco tem): \[FORA-DO-INDICE\]' <<< "${l}"; then
+    record_pass "kb-index: (e) o lint de produção (dispatcher) emite a REGRA 110 sobre o índice defasado"
+  else record_fail "kb-index: (e) dispatcher" "$(grep -E 'REGRA 110|HARD' <<< "${l}" | head -3 | tr '\n' '|')"; fi
+  rm -rf "${sd}"
+  # (g) CI do #1222: o lint com --only sobre uma KB PLANTADA (o caso r22-kb-links) não responde pela REGRA 110 —
+  #     a pergunta é sobre o índice; --only no índice responde. Mutante: o gate volta a aceitar qualquer KB.
+  local sg; sg="$(TMPDIR=/tmp mktemp -d)"
+  cp -a "${SANDBOX}/.claude" "${sg}/" 2>/dev/null; cp -a "${f}/docs" "${sg}/" 2>/dev/null
+  : > "${sg}/docs/knowledge-base/concepts/selftest-fixture-probe.md"
+  local ga gb gm
+  ga="$(cd "${sg}" && LC_ALL=C bash .claude/validation/lint-artifacts.sh --only="${sg}/docs/knowledge-base/concepts/selftest-fixture-probe.md" 2>&1 | grep -c 'REGRA 110' || true)"
+  gb="$(cd "${sg}" && LC_ALL=C bash .claude/validation/lint-artifacts.sh --only="${sg}/docs/knowledge-base/index.md" 2>&1 | grep -c 'REGRA 110 (Índice da KB conta o que o disco tem): \[FORA-DO-INDICE\]' || true)"
+  sed -i 's#"${REPO_ROOT}"/docs/knowledge-base/index.md|\*/kb-index-check.sh) : ;;#"${REPO_ROOT}"/docs/knowledge-base/*|*/kb-index-check.sh) : ;;#' "${sg}/.claude/validation/lint-artifacts.sh"
+  gm="$(cd "${sg}" && LC_ALL=C bash .claude/validation/lint-artifacts.sh --only="${sg}/docs/knowledge-base/concepts/selftest-fixture-probe.md" 2>&1 | grep -c 'REGRA 110' || true)"
+  rm -rf "${sg}"
+  if [ "${ga}" = 0 ] && [ "${gb}" -ge 1 ] 2>/dev/null && [ "${gm}" -ge 1 ] 2>/dev/null; then
+    record_pass "kb-index: (g) --only numa KB plantada não responde pela REGRA 110; --only no índice responde; o mutante do gate devolve o falso positivo do r22"
+  else record_fail "kb-index: (g) gate por relevância" "kb=${ga} (esperado 0) índice=${gb} (esperado ≥1) mutante=${gm} (esperado ≥1)"; fi
+  # (f) CI do #1222 (2026-10-20): a bancada PLANTA `concepts/selftest-fixture-probe.md` na árvore viva (o caso r22
+  #     testa o lint, que varre o diretório real) e a REGRA 110 a contava. O conjunto contado é o RASTREADO (molde
+  #     do inventory.sh): a sonda não rastreada não reprova; um .md real RASTREADO fora do índice reprova; e o
+  #     mutante que força o disco (ONION_KB_INDEX_FS=1) devolve o falso positivo.
+  local fg; fg="$(mktemp -d)"; mkdir -p "${fg}/docs/knowledge-base/concepts"
+  : > "${fg}/docs/knowledge-base/concepts/a.md"
+  printf '%s\n' '## C (1)' '- [A](concepts/a.md)' > "${fg}/docs/knowledge-base/index.md"
+  git -C "${fg}" init -q 2>/dev/null; git -C "${fg}" add -A 2>/dev/null
+  : > "${fg}/docs/knowledge-base/concepts/selftest-fixture-probe.md"
+  local fa fm fb
+  fa="$(LC_ALL=C bash "${chk}" "${fg}" --format tsv 2>&1)"
+  fm="$(ONION_KB_INDEX_FS=1 LC_ALL=C bash "${chk}" "${fg}" --format tsv 2>&1)"
+  : > "${fg}/docs/knowledge-base/concepts/real.md"; git -C "${fg}" add docs/knowledge-base/concepts/real.md 2>/dev/null
+  fb="$(LC_ALL=C bash "${chk}" "${fg}" --format tsv 2>&1)"; rm -rf "${fg}"
+  if [ -z "${fa}" ] && grep -q 'FORA-DO-INDICE.*selftest-fixture-probe' <<< "${fm}" && grep -q 'FORA-DO-INDICE.*concepts/real.md' <<< "${fb}" && ! grep -q 'selftest-fixture-probe' <<< "${fb}"; then
+    record_pass "kb-index: (f) sonda da bancada não rastreada não reprova; .md real rastreado fora do índice reprova; o mutante que conta o disco devolve o falso positivo"
+  else record_fail "kb-index: (f) conjunto rastreado" "sonda=${fa:0:120} | mutante=${fm:0:120} | real=${fb:0:120}"; fi
+  local m1 m2
+  sed "s/    if g\['n'\] != len(files):/    if False:/" "${chk}" > "${f}/m1.sh"
+  sed 's/    if falta:/    if False:/' "${chk}" > "${f}/m2.sh"
+  m1="$(LC_ALL=C bash "${f}/m1.sh" "${f}" --format tsv 2>&1 | grep -c '	CONTAGEM	' || true)"
+  m2="$(LC_ALL=C bash "${f}/m2.sh" "${f}" --format tsv 2>&1 | grep -c '	FORA-DO-INDICE	' || true)"
+  if [ "${m1}" = 0 ] && [ "${m2}" = 0 ] && ! cmp -s "${chk}" "${f}/m1.sh" && ! cmp -s "${chk}" "${f}/m2.sh"; then
+    record_pass "kb-index: (m) os 2 mutantes (sem a comparação da contagem, sem a da listagem) calam o achado que o caso (c) exige"
+  else record_fail "kb-index: (m) mutantes" "contagem sob M1=${m1} listagem sob M2=${m2} (esperado 0 e 0; o sed precisa casar)"; fi
+  rm -rf "${f}"
+}
+_family run_kb_index_selftests
 
 # REGRA 101 (Veto PreToolUse por exit 2 declara onFailure: block) — SAC-83, medido ao vivo em 2026-10-11 (CC
 # 2.1.296, `claude -p` em sandbox): PreToolUse com script ausente saiu 127 e a ação RODOU; com onFailure: block
@@ -39222,6 +40929,413 @@ run_remeasure_hard_selftests() {
   rm -rf "${d}"
 }
 _family run_remeasure_hard_selftests
+# ── remeasure-contract.sh: o CONTRATO KG-SSOT medido no corpus do alvo, dentro do --update (2026-10-20) ──────
+# O caso medido (sinal do hub, 2026-10-19): o vendor v4.9.1 chegou e 1.024 de 1.268 nós reprovavam no MUST
+# form.required.node.provenance, com o lint do alvo em 0 HARD e o relatório calado. Fase 1 de
+# D_U1_CAMADA_SDAAL_NO_UPDATE: medir e relatar, nunca bloquear. O SUT é o helper REAL, contra um alvo git de
+# mentira com o vendor do core copiado (tools + spec): (a) corpus que passa; (b) dívida MUST, com o número de NÓS
+# e de grafos; (c) sem vendor e sem grafo = não se aplica (rc 4, declarado); (d) gate quebrado e alvo fora do git
+# = NÃO MEDIDO (rc 3, nunca 0); (e) as propostas arquivadas do kg-inbox ficam fora do corpus; (f) o alvo é só
+# LIDO (nenhum __pycache__ no vendor carimbado, árvore limpa). (m) UM MUTANTE POR CURA, na cópia do helper.
+run_remeasure_contract_selftests() {
+  local sut="${REPO_ROOT}/.claude/utils/adopt/remeasure-contract.sh"
+  if [ ! -f "${sut}" ]; then record_fail "remeasure-contract" "SUT ausente: ${sut}"; return; fi
+  [ -f "${REPO_ROOT}/vendor/kg-ssot/tools/kg_gate.py" ] || { record_skip "remeasure-contract: vendor/kg-ssot ausente nesta árvore (SUT não exercido)"; return; }
+  python3 -c 'import yaml, jsonschema' >/dev/null 2>&1 || { record_skip "remeasure-contract: PyYAML/jsonschema ausentes (SUT não exercido)"; return; }
+  local d rc out; d="$(mktemp -d)"
+  _rc_git() { git -C "$1" -c user.email=t@t -c user.name=t -c commit.gpgsign=false "${@:2}"; }
+  _rc_ok() {  # $1=arquivo $2=id do grafo → grafo que passa no MUST e no SHOULD
+    printf 'meta:\n  id: %s\n  schema_version: "1"\n  baseline: "2026-10-20"\nnodes:\n  - id: C_A\n    node_type: claim\n    plane: DEV\n    status: open\n    impact: 2\n    confidence: 0.5\n    label: "aberta"\n  - id: C_B\n    node_type: claim\n    plane: DEV\n    status: open\n    impact: 2\n    confidence: 0.5\n    label: "outra aberta"\nedges:\n  - from: C_A\n    to: C_B\n    edge_type: SUPPORTS\n' "$2" > "$1"
+  }
+  _rc_bad() {  # $1=arquivo $2=id → 2 nós sem provenance (um confirmed, um PROD): MUST form.required.node.provenance ×2
+    printf 'meta:\n  id: %s\n  schema_version: "1"\n  baseline: "2026-10-20"\nnodes:\n  - id: C_A\n    node_type: claim\n    plane: DEV\n    status: confirmed\n    impact: 2\n    confidence: 0.9\n    label: "confirmada sem fonte"\n  - id: C_B\n    node_type: claim\n    plane: PROD\n    status: open\n    impact: 2\n    confidence: 0.9\n    label: "PROD sem fonte"\nedges:\n  - from: C_A\n    to: C_B\n    edge_type: SUPPORTS\n' "$2" > "$1"
+  }
+  _rc_target() {  # $1=dir → alvo git com o vendor do core (tools + spec + carimbo)
+    mkdir -p "$1/vendor/kg-ssot/tools" "$1/vendor/kg-ssot/spec" "$1/docs/g"
+    cp "${REPO_ROOT}"/vendor/kg-ssot/tools/*.py "$1/vendor/kg-ssot/tools/"
+    cp "${REPO_ROOT}"/vendor/kg-ssot/spec/*.json "$1/vendor/kg-ssot/spec/"
+    cp "${REPO_ROOT}/vendor/kg-ssot/.kg-ssot-version" "$1/vendor/kg-ssot/"
+    git init -q -b main "$1" >/dev/null 2>&1
+  }
+  _rc_commit() { _rc_git "$1" add -A; _rc_git "$1" commit -qm fx >/dev/null 2>&1; }
+  # o veredito de cada caso, para o fluxo normal e para os mutantes: $1=helper → "a b …" dos casos que passam
+  _rc_judge() {
+    local s="$1" ok="" r o
+    r=0; o="$(bash "${s}" "${d}/passa" 2>&1)" || r=$?
+    [ "${r}" -eq 0 ] && grep -q '2 grafo(s) · 2 passam no MUST · 0 reprovam' <<< "${o}" && ok="${ok} a"
+    r=0; o="$(bash "${s}" "${d}/divida" 2>&1)" || r=$?
+    [ "${r}" -eq 1 ] && grep -q 'MUST   form.required.node.provenance: 2 ocorrência(s) em 1 grafo(s)' <<< "${o}" \
+      && grep -q 'seu corpus reprova no contrato vendorizado: 2 nó(s) em 1 grafo(s)' <<< "${o}" \
+      && grep -q 'caminho: migração' <<< "${o}" && grep -q 'o update segue' <<< "${o}" && ok="${ok} b"
+    local r1=0 r2=0 o1 o2
+    o1="$(bash "${s}" "${d}/sem-vendor" 2>&1)" || r1=$?
+    o2="$(bash "${s}" "${d}/sem-grafo" 2>&1)" || r2=$?
+    [ "${r1}" -eq 4 ] && [ "${r2}" -eq 4 ] && grep -q 'CONTRATO não se aplica' <<< "${o1}" \
+      && grep -q 'CONTRATO não se aplica: nenhum .kg.yaml' <<< "${o2}" && ok="${ok} c"
+    r1=0; r2=0
+    o1="$(bash "${s}" "${d}/quebrado" 2>&1)" || r1=$?
+    o2="$(bash "${s}" "${d}/fora-do-git" 2>&1)" || r2=$?
+    [ "${r1}" -eq 3 ] && [ "${r2}" -eq 3 ] && grep -q 'CONTRATO NÃO MEDIDO' <<< "${o1}" && grep -q 'CONTRATO NÃO MEDIDO' <<< "${o2}" && ok="${ok} d"
+    r=0; o="$(bash "${s}" "${d}/arquivado" 2>&1)" || r=$?
+    [ "${r}" -eq 0 ] && grep -q '1 grafo(s) · 1 passam no MUST' <<< "${o}" && ok="${ok} e"
+    # (f) só leitura, medido DEPOIS de rodar no alvo: sem __pycache__ no vendor e sem nada no git status
+    [ -z "$(find "${d}/divida/vendor" -name __pycache__ 2>/dev/null)" ] && [ -z "$(_rc_git "${d}/divida" status --porcelain --ignored 2>/dev/null)" ] && ok="${ok} f"
+    find "${d}/divida/vendor" -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null
+    # (h) vendor com API diferente (where() de 4-tupla), leituras que DISCORDAM, e vendor anterior (sem where):
+    #     os três são NÃO MEDIDO (rc 3) — nunca o rc 1 da dívida (o traceback que se passava por dívida)
+    local r3=0 o3; r1=0; r2=0
+    o1="$(bash "${s}" "${d}/api4" 2>&1)" || r1=$?
+    o2="$(bash "${s}" "${d}/discorda" 2>&1)" || r2=$?
+    o3="$(bash "${s}" "${d}/antigo" 2>&1)" || r3=$?
+    [ "${r1}" -eq 3 ] && [ "${r2}" -eq 3 ] && [ "${r3}" -eq 3 ] && grep -q 'discordam' <<< "${o2}" \
+      && grep -q 'anterior ou incompatível (falta kg_validate.where)' <<< "${o3}" && ok="${ok} h"
+    # (i) um nó com DOIS códigos MUST (sem provenance e órfão) é 1 nó, e nada "fora de nó"
+    r=0; o="$(bash "${s}" "${d}/dois-codigos" 2>&1)" || r=$?
+    [ "${r}" -eq 1 ] && grep -q 'reprova no contrato vendorizado: 1 nó(s) em 1 grafo(s); caminho' <<< "${o}" && ok="${ok} i"
+    printf '%s' "${ok}"
+  }
+  _rc_target "${d}/passa"; _rc_ok "${d}/passa/docs/g/a.kg.yaml" fx-a; _rc_ok "${d}/passa/docs/g/b.kg.yaml" fx-b; _rc_commit "${d}/passa"
+  _rc_target "${d}/divida"; _rc_ok "${d}/divida/docs/g/a.kg.yaml" fx-a; _rc_bad "${d}/divida/docs/g/b.kg.yaml" fx-b; _rc_commit "${d}/divida"
+  mkdir -p "${d}/sem-vendor/docs"; git init -q -b main "${d}/sem-vendor" >/dev/null 2>&1; _rc_bad "${d}/sem-vendor/docs/b.kg.yaml" fx-b; _rc_commit "${d}/sem-vendor"
+  _rc_target "${d}/sem-grafo"; _rc_commit "${d}/sem-grafo"
+  _rc_target "${d}/quebrado"; _rc_bad "${d}/quebrado/docs/g/b.kg.yaml" fx-b
+  printf 'raise ImportError("vendor quebrado de propósito")\n' > "${d}/quebrado/vendor/kg-ssot/tools/kg_gate.py"; _rc_commit "${d}/quebrado"
+  _rc_target "${d}/fora-do-git"; rm -rf "${d}/fora-do-git/.git"; _rc_bad "${d}/fora-do-git/docs/g/b.kg.yaml" fx-b
+  _rc_target "${d}/arquivado"; _rc_ok "${d}/arquivado/docs/g/a.kg.yaml" fx-a
+  mkdir -p "${d}/arquivado/docs/evolution/kg-inbox/_sealed" "${d}/arquivado/docs/evolution/kg-inbox/_rejected"
+  _rc_bad "${d}/arquivado/docs/evolution/kg-inbox/_sealed/p.kg.yaml" fx-p; _rc_bad "${d}/arquivado/docs/evolution/kg-inbox/_rejected/q.kg.yaml" fx-q
+  _rc_commit "${d}/arquivado"
+  local _v
+  for _v in api4 discorda antigo; do
+    _rc_target "${d}/${_v}"; _rc_ok "${d}/${_v}/docs/g/a.kg.yaml" fx-a; _rc_bad "${d}/${_v}/docs/g/b.kg.yaml" fx-b
+  done
+  printf '\n_w0 = where\ndef where(*a, **k):\n    return [x + ("x",) for x in _w0(*a, **k)]\n' >> "${d}/api4/vendor/kg-ssot/tools/kg_validate.py"
+  printf '\n_w0 = where\ndef where(*a, **k):\n    return [x for x in _w0(*a, **k) if x[0] != "MUST"]\n' >> "${d}/discorda/vendor/kg-ssot/tools/kg_validate.py"
+  printf '\ndel where\n' >> "${d}/antigo/vendor/kg-ssot/tools/kg_validate.py"
+  for _v in api4 discorda antigo; do _rc_commit "${d}/${_v}"; done
+  _rc_target "${d}/dois-codigos"
+  printf 'meta:\n  id: fx-dois\n  schema_version: "1"\n  baseline: "2026-10-20"\nnodes:\n  - id: C_ORFA\n    node_type: claim\n    plane: DEV\n    status: confirmed\n    impact: 2\n    confidence: 0.9\n    label: "órfã e sem fonte"\nedges: []\n' > "${d}/dois-codigos/docs/g/d.kg.yaml"
+  _rc_commit "${d}/dois-codigos"
+  local got; got="$(_rc_judge "${sut}")"
+  case " ${got} " in *" a "*) record_pass "remeasure-contract: (a) corpus que passa → rc 0, '2 grafo(s) · 2 passam no MUST · 0 reprovam'" ;;
+    *) record_fail "remeasure-contract: (a)" "$(bash "${sut}" "${d}/passa" 2>&1 | head -3 | tr '\n' '|')" ;; esac
+  case " ${got} " in *" b "*) record_pass "remeasure-contract: (b) dívida MUST → rc 1, a regra com ocorrências e grafos, '2 nó(s) em 1 grafo(s)', o caminho (migração) e 'o update segue' (o caso do hub)" ;;
+    *) record_fail "remeasure-contract: (b)" "$(bash "${sut}" "${d}/divida" 2>&1 | head -4 | tr '\n' '|')" ;; esac
+  case " ${got} " in *" c "*) record_pass "remeasure-contract: (c) sem vendor e sem grafo → rc 4, 'não se aplica' declarado (nunca omitido)" ;;
+    *) record_fail "remeasure-contract: (c)" "$(bash "${sut}" "${d}/sem-grafo" 2>&1 | head -2 | tr '\n' '|')" ;; esac
+  case " ${got} " in *" d "*) record_pass "remeasure-contract: (d) gate quebrado e alvo fora do git → rc 3, NÃO MEDIDO (nunca 0 calado)" ;;
+    *) record_fail "remeasure-contract: (d)" "$(bash "${sut}" "${d}/quebrado" 2>&1 | head -2 | tr '\n' '|')" ;; esac
+  case " ${got} " in *" e "*) record_pass "remeasure-contract: (e) as propostas arquivadas do kg-inbox (_sealed, _rejected) ficam fora do corpus, como no gate do core" ;;
+    *) record_fail "remeasure-contract: (e)" "$(bash "${sut}" "${d}/arquivado" 2>&1 | head -2 | tr '\n' '|')" ;; esac
+  # (f) SÓ LEITURA: o vendor do alvo é carimbado por sha256; um __pycache__ ali reprovaria o kg_vendor.py check dele
+  case " ${got} " in *" f "*) record_pass "remeasure-contract: (f) o alvo é só lido: nenhum __pycache__ no vendor carimbado, git status --ignored vazio" ;;
+    *) record_fail "remeasure-contract: (f)" "o helper escreveu no alvo" ;; esac
+  case " ${got} " in *" h "*) record_pass "remeasure-contract: (h) vendor de API diferente, leituras que discordam e vendor anterior (sem where) → rc 3 NÃO MEDIDO, nunca o rc 1 da dívida" ;;
+    *) record_fail "remeasure-contract: (h)" "$(bash "${sut}" "${d}/api4" 2>&1 | head -2 | tr '\n' '|') / $(bash "${sut}" "${d}/antigo" 2>&1 | head -1)" ;; esac
+  case " ${got} " in *" i "*) record_pass "remeasure-contract: (i) nó com dois códigos MUST conta 1 nó e nada 'fora de nó' (a subtração antiga inventava 1)" ;;
+    *) record_fail "remeasure-contract: (i)" "$(bash "${sut}" "${d}/dois-codigos" 2>&1 | grep reprova | head -1)" ;; esac
+  # (g) a OFERTA DE CI não declara verde o corpus que reprova: lint (stub) verde, forge GitHub, dívida MUST no corpus
+  #     → rc 0 (a dívida não bloqueia a oferta: o CI ofertado roda só o lint), e a linha diz o número do contrato.
+  #     MUTANTE: o ramo rc 1 do contrato some e a frase cai em "NÃO MEDIDO" — (g) reprova.
+  _rc_target "${d}/oferta"; _rc_bad "${d}/oferta/docs/g/b.kg.yaml" fx-b
+  mkdir -p "${d}/oferta/.claude/validation"; printf '#!/usr/bin/env bash\nexit 0\n' > "${d}/oferta/.claude/validation/lint-artifacts.sh"
+  _rc_commit "${d}/oferta"; _rc_git "${d}/oferta" remote add origin https://github.com/example/oferta.git
+  mkdir -p "${d}/oc"; cp "${REPO_ROOT}/.claude/utils/adopt/offer-onion-ci.sh" "${REPO_ROOT}/.claude/utils/adopt/ci-workflow-onion.tpl" "${sut}" "${d}/oc/"
+  _rc_offer() {  # $1=offer-onion-ci.sh → 0 se a oferta relata a dívida sem bloquear
+    local r=0 o; o="$(bash "$1" "${d}/oferta" 2>&1)" || r=$?
+    [ "${r}" -eq 0 ] && grep -q 'lint do alvo VERDE · contrato do corpus REPROVA no MUST (2 nó(s) em 1 grafo(s))' <<< "${o}"
+  }
+  if _rc_offer "${d}/oc/offer-onion-ci.sh"; then
+    record_pass "remeasure-contract: (g) a oferta de CI diz 'lint VERDE · contrato do corpus REPROVA no MUST (2 nó(s) em 1 grafo(s))' e não bloqueia (o caso do hub: 'lint VERDE' com 1.024 nós reprovando)"
+  else record_fail "remeasure-contract: (g)" "$(bash "${d}/oc/offer-onion-ci.sh" "${d}/oferta" 2>&1 | head -2 | tr '\n' '|')"; fi
+  sed -i 's/^    1) CONTRACT="contrato do corpus REPROVA/    9) CONTRACT="contrato do corpus REPROVA/' "${d}/oc/offer-onion-ci.sh"
+  if ! grep -q '^    9) CONTRACT=' "${d}/oc/offer-onion-ci.sh"; then record_fail "remeasure-contract: (g-MUT) mutante não aplicou" "âncora do ramo rc 1 mudou"
+  elif _rc_offer "${d}/oc/offer-onion-ci.sh"; then record_fail "remeasure-contract: (g-MUT) mutante NÃO morde" "sem o ramo rc 1 a oferta ainda relata a dívida"
+  else record_pass "remeasure-contract: (g-MUT) sem o ramo da dívida a oferta não relata o número e (g) cai"; fi
+  # (m) MUTANTES na CÓPIA do helper: cada um reverte uma cura e EXIGE que o caso nomeado caia
+  local m="${d}/mut.sh" old new want
+  while IFS=$'\x1f' read -r old new want; do
+    [ -n "${old}" ] || continue
+    cp "${sut}" "${m}"
+    if ! python3 -I -B -c 'import sys; p,a,b=sys.argv[1:4]; s=open(p,encoding="utf-8").read(); sys.exit(3) if s.count(a)!=1 else open(p,"w",encoding="utf-8").write(s.replace(a,b))' "${m}" "${old}" "${new}"; then
+      record_fail "remeasure-contract: (m) mutante não aplicou" "${want}"; continue
+    fi
+    case " $(_rc_judge "${m}") " in
+      *" ${want} "*) record_fail "remeasure-contract: (m) mutante NÃO morde" "(${want}) segue verde com a cura revertida" ;;
+      *) record_pass "remeasure-contract: (m) mutante morde → (${want}) cai" ;;
+    esac
+  done <<EOF_MUT
+    return 1 if failing else 0$(printf '\x1f')    return 0$(printf '\x1f')b
+place.startswith("nó ")$(printf '\x1f')place.startswith("XX ")$(printf '\x1f')b
+    if not items:$(printf '\x1f')    if False:$(printf '\x1f')c
+  exit 4$(printf '\x1f')  exit 0$(printf '\x1f')c
+    no(f"o leitor do contrato do alvo não carrega$(printf '\x1f')    sys.exit(0); no(f"o leitor do contrato do alvo não carrega$(printf '\x1f')d
+ARCHIVE = ("docs/evolution/kg-inbox/_rejected/*", "docs/evolution/kg-inbox/_sealed/*")$(printf '\x1f')ARCHIVE = ()$(printf '\x1f')e
+python3 -I -B - "\${TOOLS}"$(printf '\x1f')python3 -I - "\${TOOLS}"$(printf '\x1f')f
+except BaseException as e:  # Broken$(printf '\x1f')except ZeroDivisionError as e:  # Broken$(printf '\x1f')h
+        if seen != set(measured[name]["must"]):$(printf '\x1f')        if False:$(printf '\x1f')h
+    if missing:$(printf '\x1f')    if False:$(printf '\x1f')h
+                    must_nodes.add((name, place))$(printf '\x1f')                    must_nodes.add((name, place)); off_node += 1$(printf '\x1f')i
+EOF_MUT
+  rm -rf "${d}"; unset -f _rc_git _rc_ok _rc_bad _rc_target _rc_commit _rc_judge _rc_offer
+}
+_family run_remeasure_contract_selftests
+# ── plan-contract-migration.sh: a migração do corpus PLANEJADA (dry-run) no --update (fase 2, 2026-10-21) ──────
+# Fase 2 de D_U1_CAMADA_SDAAL_NO_UPDATE: com a dívida MUST que a fase 1 mede, o --update roda o kg_migrate.py PLAN do
+# vendor do alvo com o perfil DELE e cola o resumo e a planilha no relatório; nunca o apply. O SUT é o helper REAL
+# (com o remeasure-contract.sh ao lado), contra alvos git de mentira com o vendor do core copiado. (a) sem dívida a
+# fase não roda (nem cria a pasta da planilha); (b) dívida sem perfil = orienta (o exemplo do vendor) e não inventa
+# perfil; (c) dívida com perfil = o plano no relatório (por ação, recusados pelo contrato, o universo igual ao da
+# medição, fixtures e kg-inbox arquivado fora) e NADA escrito no alvo (sha256 de toda a árvore igual, git status
+# --ignored vazio, sem __pycache__); (d) sem kg_migrate.py no vendor = NÃO MEDIDO; (e) perfil fora do schema, dois
+# perfis e planilha dentro do alvo = NÃO MEDIDO; (f) um migrador que ESCREVE é pego pela foto do próprio helper (rc 5),
+# também sem sha256sum no PATH; (g) TMPDIR dentro do alvo; (h) planilha-symlink para dentro do alvo; (i) universos
+# que divergem, conferidos por identidade (os quatro últimos vêm da passada adversarial de 2026-10-21).
+# (m) UM MUTANTE POR CURA, na cópia do helper, inclusive o que troca o plan pelo apply.
+run_plan_contract_migration_selftests() {
+  local sut="${REPO_ROOT}/.claude/utils/adopt/plan-contract-migration.sh"
+  if [ ! -f "${sut}" ]; then record_fail "plan-contract-migration" "SUT ausente: ${sut}"; return; fi
+  [ -f "${REPO_ROOT}/vendor/kg-ssot/tools/kg_migrate.py" ] || { record_skip "plan-contract-migration: vendor/kg-ssot sem kg_migrate.py nesta árvore (SUT não exercido)"; return; }
+  python3 -c 'import yaml, jsonschema' >/dev/null 2>&1 || { record_skip "plan-contract-migration: PyYAML/jsonschema ausentes (SUT não exercido)"; return; }
+  local d; d="$(mktemp -d)"
+  _pm_git() { git -C "$1" -c user.email=t@t -c user.name=t -c commit.gpgsign=false "${@:2}"; }
+  _pm_target() {  # $1=dir → alvo git com o vendor do core (tools, spec com os exemplos do perfil, carimbo)
+    mkdir -p "$1/vendor/kg-ssot/tools" "$1/vendor/kg-ssot/spec/migrate-examples" "$1/docs/g"
+    cp "${REPO_ROOT}"/vendor/kg-ssot/tools/*.py "$1/vendor/kg-ssot/tools/"
+    cp "${REPO_ROOT}"/vendor/kg-ssot/spec/*.json "$1/vendor/kg-ssot/spec/"
+    cp "${REPO_ROOT}"/vendor/kg-ssot/spec/migrate-examples/*.yaml "$1/vendor/kg-ssot/spec/migrate-examples/"
+    cp "${REPO_ROOT}/vendor/kg-ssot/.kg-ssot-version" "$1/vendor/kg-ssot/"
+    git init -q -b main "$1" >/dev/null 2>&1
+  }
+  _pm_ok() {  # $1=arquivo $2=id → grafo que passa no MUST
+    printf 'meta:\n  id: %s\n  schema_version: "1"\n  baseline: "2026-10-20"\nnodes:\n  - id: C_A\n    node_type: claim\n    plane: DEV\n    status: open\n    impact: 2\n    confidence: 0.5\n    label: "aberta"\n  - id: C_B\n    node_type: claim\n    plane: DEV\n    status: open\n    impact: 2\n    confidence: 0.5\n    label: "outra aberta"\nedges:\n  - from: C_A\n    to: C_B\n    edge_type: SUPPORTS\n' "$2" > "$1"
+  }
+  _pm_bad() {  # $1=arquivo $2=id → 3 nós sem provenance: 2 sem trace (confirmed, PROD) e 1 com trace "placeholder"
+    printf 'meta:\n  id: %s\n  schema_version: "1"\n  baseline: "2026-10-20"\nnodes:\n  - id: C_A\n    node_type: claim\n    plane: DEV\n    status: confirmed\n    impact: 2\n    confidence: 0.9\n    label: "confirmada sem fonte"\n  - id: C_B\n    node_type: claim\n    plane: PROD\n    status: open\n    impact: 2\n    confidence: 0.9\n    verified_at: "2026-10-20"\n    verified_against: "medido"\n    label: "PROD sem fonte"\n  - id: C_C\n    node_type: claim\n    plane: DEV\n    status: confirmed\n    impact: 2\n    confidence: 0.9\n    trace: "placeholder da fonte"\n    label: "confirmada com trace que o perfil manda para um placeholder"\nedges:\n  - from: C_A\n    to: C_B\n    edge_type: SUPPORTS\n  - from: C_C\n    to: C_B\n    edge_type: SUPPORTS\n' "$2" > "$1"
+  }
+  _pm_profile() {  # $1=arquivo → perfil válido: o trace "placeholder" gera fonte placeholder (recusada pelo contrato)
+    printf 'profile_version: "1"\ncontract: kg-ssot-v4.13.0\nrules:\n  - id: placeholder\n    when: {trace_matches: "^placeholder"}\n    then:\n      provenance: {source: "tbd", locator: "x", method: {class: leitura, detail: "teste"}, locality: repo}\n  - id: sem-trace\n    when: {trace_empty: true}\n    then:\n      provenance: {source: "docs/fonte.md", locator: "a seção 1", method: {class: leitura, detail: "documento de teste"}, locality: repo}\n' > "$1"
+  }
+  _pm_commit() { _pm_git "$1" add -A; _pm_git "$1" commit -qm fx >/dev/null 2>&1; }
+  _pm_tree() { (cd "$1" && find . -path ./.git -prune -o -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | cut -d' ' -f1; }
+  # o veredito de cada caso: $1=helper → "a b …" dos casos que passam
+  _pm_judge() {
+    local s="$1" ok="" r o t0 t1
+    rm -rf "${d}/out-a"
+    r=0; o="$(bash "${s}" "${d}/passa" --out-dir "${d}/out-a" 2>&1)" || r=$?
+    [ "${r}" -eq 4 ] && grep -q 'MIGRAÇÃO não roda: o corpus passa no MUST' <<< "${o}" && [ ! -e "${d}/out-a" ] && ok="${ok} a"
+    t0="$(_pm_tree "${d}/sem-perfil")"
+    r=0; o="$(bash "${s}" "${d}/sem-perfil" --out-dir "${d}/out-b" 2>&1)" || r=$?
+    t1="$(_pm_tree "${d}/sem-perfil")"
+    [ "${r}" -eq 2 ] && grep -q 'MIGRAÇÃO sem perfil: o contrato acusa 3 nó(s) na dívida MUST' <<< "${o}" \
+      && grep -q 'company-brain.profile.yaml' <<< "${o}" && grep -q 'O core não escreve o perfil' <<< "${o}" \
+      && [ "${t0}" = "${t1}" ] && [ ! -e "${d}/sem-perfil/.kg-ssot/migrate-profile.yaml" ] && ok="${ok} b"
+    rm -rf "${d}/out-c"
+    t0="$(_pm_tree "${d}/com-perfil")"
+    r=0; o="$(bash "${s}" "${d}/com-perfil" --out-dir "${d}/out-c" 2>&1)" || r=$?
+    t1="$(_pm_tree "${d}/com-perfil")"
+    [ "${r}" -eq 0 ] && grep -q 'MIGRAÇÃO planejada (dry-run' <<< "${o}" && grep -q 'com o perfil .kg-ssot/migrate-profile.yaml' <<< "${o}" \
+      && grep -q '3 nó(s) no plano: 2 com provenance proposta · 0 rebaixado(s) para unverifiable · 1 sem proposta' <<< "${o}" \
+      && grep -q 'recusados pelo contrato: 1' <<< "${o}" && grep -q 'o plano cobre, nó a nó, os 3 nó(s)' <<< "${o}" \
+      && grep -q "planilha: ${d}/out-c/kg-migrate-plan.tsv" <<< "${o}" && [ "$(grep -c 'docs/g/b.kg.yaml' "${d}/out-c/kg-migrate-plan.tsv" 2>/dev/null)" = "3" ] \
+      && grep -q 'Nada rastreado nem não rastreado do alvo mudou' <<< "${o}" && grep -qF 'kg_migrate.py apply --profile .kg-ssot/migrate-profile.yaml --exclude \*/\*\*/fixtures/\*\* --exclude docs/materials/\*\*' <<< "${o}" \
+      && [ "${t0}" = "${t1}" ] && [ "$(_pm_git "${d}/com-perfil" status --porcelain --ignored 2>/dev/null)" = '!! segredo.local' ] \
+      && [ -z "$(find "${d}/com-perfil" -name __pycache__ 2>/dev/null)" ] && ok="${ok} c"
+    find "${d}/com-perfil" -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null
+    _pm_git "${d}/com-perfil" checkout -q -- . 2>/dev/null; _pm_git "${d}/com-perfil" clean -qfd 2>/dev/null
+    r=0; o="$(bash "${s}" "${d}/sem-migrador" --out-dir "${d}/out-d" 2>&1)" || r=$?
+    [ "${r}" -eq 3 ] && grep -q 'MIGRAÇÃO NÃO MEDIDA: o vendor do alvo (kg-ssot .*) não traz o tools/kg_migrate.py' <<< "${o}" \
+      && grep -q '3 nó(s) seguem na dívida MUST' <<< "${o}" && ok="${ok} d"
+    local r1=0 r2=0 r3=0 o1 o2 o3
+    o1="$(bash "${s}" "${d}/perfil-quebrado" --out-dir "${d}/out-e1" 2>&1)" || r1=$?
+    o2="$(bash "${s}" "${d}/dois-perfis" --out-dir "${d}/out-e2" 2>&1)" || r2=$?
+    o3="$(bash "${s}" "${d}/com-perfil" --out-dir "${d}/com-perfil/planilha" 2>&1)" || r3=$?
+    [ "${r1}" -eq 3 ] && grep -q 'MIGRAÇÃO NÃO MEDIDA: o kg_migrate.py plan do alvo saiu rc 2' <<< "${o1}" && grep -q 'ENTRADA QUEBRADA' <<< "${o1}" \
+      && [ "${r2}" -eq 3 ] && grep -q 'o alvo tem dois perfis' <<< "${o2}" \
+      && [ "${r3}" -eq 3 ] && grep -q 'fica dentro do alvo' <<< "${o3}" && [ ! -e "${d}/com-perfil/planilha" ] && ok="${ok} e"
+    rm -rf "${d}/com-perfil/planilha"
+    _pm_git "${d}/escreve" checkout -q -- . 2>/dev/null
+    r=0; o="$(bash "${s}" "${d}/escreve" --out-dir "${d}/out-f" 2>&1)" || r=$?
+    # e sem sha256sum no PATH (o macOS não o tem): a foto é do Python e continua vendo a escrita
+    _pm_git "${d}/escreve" checkout -q -- . 2>/dev/null
+    r1=0; o1="$(env PATH="${d}/bin" "${d}/bin/bash" "${s}" "${d}/escreve" --out-dir "${d}/out-f2" 2>&1)" || r1=$?
+    [ "${r}" -eq 5 ] && grep -q 'o alvo MUDOU durante o plan' <<< "${o}" && [ "${r1}" -eq 5 ] && grep -q 'o alvo MUDOU' <<< "${o1}" && ok="${ok} f"
+    _pm_git "${d}/escreve" checkout -q -- . 2>/dev/null
+    # (g) TMPDIR dentro do alvo, sem --out-dir: recusado antes de qualquer mktemp (nada nasce na pasta)
+    mkdir -p "${d}/com-perfil/tmpdentro"
+    r=0; o="$(TMPDIR="${d}/com-perfil/tmpdentro" bash "${s}" "${d}/com-perfil" 2>&1)" || r=$?
+    [ "${r}" -eq 3 ] && grep -q 'o TMPDIR (.*) fica dentro do alvo' <<< "${o}" && [ -z "$(ls -A "${d}/com-perfil/tmpdentro")" ] && ok="${ok} g"
+    rm -rf "${d}/com-perfil/tmpdentro"
+    # (h) a planilha pré-existente é um SYMLINK para um arquivo ignorado do alvo: apagada, nunca seguida
+    rm -rf "${d}/out-h"; mkdir -p "${d}/out-h"; ln -s "${d}/com-perfil/segredo.local" "${d}/out-h/kg-migrate-plan.tsv"
+    r=0; o="$(bash "${s}" "${d}/com-perfil" --out-dir "${d}/out-h" 2>&1)" || r=$?
+    [ "${r}" -eq 0 ] && [ "$(cat "${d}/com-perfil/segredo.local")" = "segredo" ] && [ ! -L "${d}/out-h/kg-migrate-plan.tsv" ] \
+      && [ -s "${d}/out-h/kg-migrate-plan.tsv" ] && ok="${ok} h"
+    # (i) universos que divergem: grafo em vendor/outra (a fase 1 mede, o migrador sempre exclui) e fixtures/ na RAIZ
+    #     (fora do */fixtures/* da fase 1, logo dentro dos dois): o nó da dívida fora do plano sai listado, por nome
+    rm -rf "${d}/out-i"
+    r=0; o="$(bash "${s}" "${d}/universo" --out-dir "${d}/out-i" 2>&1)" || r=$?
+    [ "${r}" -eq 0 ] && grep -q '6 nó(s) no plano' <<< "${o}" && grep -q '3 nó(s) da dívida MUST fora do plano, 0 no plano fora da dívida' <<< "${o}" \
+      && grep -q 'fora do plano: vendor/outra/x.kg.yaml · C_A — vendor/\*\*' <<< "${o}" && ! grep -q 'fora do plano: fixtures/' <<< "${o}" && ok="${ok} i"
+    # (j) identidade sem falso "fora do plano": id repetido num grafo (2 ocorrências dos dois lados) e grafo por symlink
+    rm -rf "${d}/out-j"
+    r=0; o="$(bash "${s}" "${d}/identidade" --out-dir "${d}/out-j" 2>&1)" || r=$?
+    [ "${r}" -eq 0 ] && grep -q 'o plano cobre, nó a nó' <<< "${o}" && ! grep -q 'fora do plano' <<< "${o}" && ok="${ok} j"
+    printf '%s' "${ok}"
+  }
+  _pm_target "${d}/passa"; _pm_ok "${d}/passa/docs/g/a.kg.yaml" fx-a; _pm_commit "${d}/passa"
+  _pm_target "${d}/sem-perfil"; _pm_ok "${d}/sem-perfil/docs/g/a.kg.yaml" fx-a; _pm_bad "${d}/sem-perfil/docs/g/b.kg.yaml" fx-b; _pm_commit "${d}/sem-perfil"
+  # com-perfil: a dívida em docs/g/b, MAIS dívida fora do corpus (fixtures e proposta arquivada do kg-inbox), que nem
+  # a medição nem o plano contam; o universo do plano tem de ser o da medição (3 nós)
+  _pm_target "${d}/com-perfil"; _pm_ok "${d}/com-perfil/docs/g/a.kg.yaml" fx-a; _pm_bad "${d}/com-perfil/docs/g/b.kg.yaml" fx-b
+  mkdir -p "${d}/com-perfil/docs/fixtures" "${d}/com-perfil/docs/evolution/kg-inbox/_sealed" "${d}/com-perfil/.kg-ssot"
+  _pm_bad "${d}/com-perfil/docs/fixtures/f.kg.yaml" fx-f; _pm_bad "${d}/com-perfil/docs/evolution/kg-inbox/_sealed/p.kg.yaml" fx-p
+  _pm_profile "${d}/com-perfil/.kg-ssot/migrate-profile.yaml"; printf '*.local\n' > "${d}/com-perfil/.gitignore"; _pm_commit "${d}/com-perfil"
+  printf 'segredo' > "${d}/com-perfil/segredo.local"
+  _pm_target "${d}/universo"; _pm_bad "${d}/universo/docs/g/b.kg.yaml" fx-b; mkdir -p "${d}/universo/vendor/outra" "${d}/universo/fixtures" "${d}/universo/.kg-ssot"
+  _pm_bad "${d}/universo/vendor/outra/x.kg.yaml" fx-v; _pm_bad "${d}/universo/fixtures/root.kg.yaml" fx-r
+  _pm_profile "${d}/universo/.kg-ssot/migrate-profile.yaml"; _pm_commit "${d}/universo"
+  _pm_target "${d}/identidade"; mkdir -p "${d}/identidade/docs/g2" "${d}/identidade/.kg-ssot"; _pm_bad "${d}/identidade/docs/g2/real.kg.yaml" fx-real
+  ln -s g2/real.kg.yaml "${d}/identidade/docs/link.kg.yaml"
+  printf 'meta:\n  id: fx-dup\n  schema_version: "1"\n  baseline: "2026-10-20"\nnodes:\n  - id: C_DUP\n    node_type: claim\n    plane: DEV\n    status: confirmed\n    impact: 2\n    confidence: 0.9\n    label: "primeira"\n  - id: C_DUP\n    node_type: claim\n    plane: DEV\n    status: confirmed\n    impact: 2\n    confidence: 0.9\n    label: "repetida"\nedges:\n  - from: C_DUP\n    to: C_DUP\n    edge_type: SUPPORTS\n' > "${d}/identidade/docs/g/dup.kg.yaml"
+  _pm_profile "${d}/identidade/.kg-ssot/migrate-profile.yaml"; _pm_commit "${d}/identidade"
+  # um PATH sem sha256sum, com o resto do que o helper e a fase 1 chamam
+  mkdir -p "${d}/bin"; local _c
+  for _c in bash env git python3 sed head tail mktemp rm mkdir cut grep paste ls dirname cat tr sort find xargs; do
+    command -v "${_c}" >/dev/null 2>&1 && ln -sf "$(command -v "${_c}")" "${d}/bin/${_c}"
+  done
+  _pm_target "${d}/sem-migrador"; _pm_bad "${d}/sem-migrador/docs/g/b.kg.yaml" fx-b; rm -f "${d}/sem-migrador/vendor/kg-ssot/tools/kg_migrate.py"; _pm_commit "${d}/sem-migrador"
+  _pm_target "${d}/perfil-quebrado"; _pm_bad "${d}/perfil-quebrado/docs/g/b.kg.yaml" fx-b; mkdir -p "${d}/perfil-quebrado/.kg-ssot"
+  printf 'profile_version: "1"\ncontract: kg-ssot-v4.13.0\nrules: []\n' > "${d}/perfil-quebrado/.kg-ssot/migrate-profile.yaml"; _pm_commit "${d}/perfil-quebrado"
+  _pm_target "${d}/dois-perfis"; _pm_bad "${d}/dois-perfis/docs/g/b.kg.yaml" fx-b; mkdir -p "${d}/dois-perfis/.kg-ssot"
+  _pm_profile "${d}/dois-perfis/.kg-ssot/migrate-profile.yaml"; _pm_profile "${d}/dois-perfis/kg-migrate.profile.yaml"; _pm_commit "${d}/dois-perfis"
+  # escreve: um migrador falso cujo "plan" grava no grafo do alvo — a foto do helper tem de pegar (rc 5)
+  _pm_target "${d}/escreve"; _pm_bad "${d}/escreve/docs/g/b.kg.yaml" fx-b; mkdir -p "${d}/escreve/.kg-ssot"; _pm_profile "${d}/escreve/.kg-ssot/migrate-profile.yaml"
+  printf 'import pathlib, sys\na = sys.argv\nroot = a[a.index("--root") + 1]\nout = a[a.index("--out") + 1]\np = pathlib.Path(root, "docs/g/b.kg.yaml")\np.write_text(p.read_text() + "# escrito\\n")\npathlib.Path(out).write_text("arquivo\\tid\\tregra\\tação\\tproposta\\trevisar\\tsupports\\n")\n' > "${d}/escreve/vendor/kg-ssot/tools/kg_migrate.py"
+  _pm_commit "${d}/escreve"
+  local got; got="$(_pm_judge "${sut}")"
+  case " ${got} " in *" a "*) record_pass "plan-contract-migration: (a) corpus sem dívida MUST → rc 4 'não roda', e nem a pasta da planilha nasce" ;;
+    *) record_fail "plan-contract-migration: (a)" "$(bash "${sut}" "${d}/passa" 2>&1 | head -2 | tr '\n' '|')" ;; esac
+  case " ${got} " in *" b "*) record_pass "plan-contract-migration: (b) dívida sem perfil → rc 2, orienta pelo exemplo do vendor e não inventa perfil (árvore do alvo igual)" ;;
+    *) record_fail "plan-contract-migration: (b)" "$(bash "${sut}" "${d}/sem-perfil" 2>&1 | head -2 | tr '\n' '|')" ;; esac
+  case " ${got} " in *" c "*) record_pass "plan-contract-migration: (c) dívida com perfil → rc 0, o plano por ação (2 propostas, 1 recusada pelo contrato), o universo da medição (fixtures e kg-inbox arquivado fora), a planilha fora do alvo e NADA escrito nele (sha256 da árvore, git status --ignored, __pycache__)" ;;
+    *) record_fail "plan-contract-migration: (c)" "$(bash "${sut}" "${d}/com-perfil" --out-dir "${d}/out-c" 2>&1 | head -4 | tr '\n' '|')" ;; esac
+  case " ${got} " in *" d "*) record_pass "plan-contract-migration: (d) vendor do alvo sem kg_migrate.py → rc 3 NÃO MEDIDO, com a dívida dita" ;;
+    *) record_fail "plan-contract-migration: (d)" "$(bash "${sut}" "${d}/sem-migrador" 2>&1 | head -2 | tr '\n' '|')" ;; esac
+  case " ${got} " in *" e "*) record_pass "plan-contract-migration: (e) perfil fora do schema, dois perfis e planilha dentro do alvo → rc 3 NÃO MEDIDO, nunca um plano" ;;
+    *) record_fail "plan-contract-migration: (e)" "$(bash "${sut}" "${d}/perfil-quebrado" 2>&1 | head -2 | tr '\n' '|')" ;; esac
+  case " ${got} " in *" f "*) record_pass "plan-contract-migration: (f) migrador que escreve no alvo → rc 5 'o alvo MUDOU' (a foto antes/depois do próprio helper)" ;;
+    *) record_fail "plan-contract-migration: (f)" "$(bash "${sut}" "${d}/escreve" 2>&1 | head -2 | tr '\n' '|')" ;; esac
+  case " ${got} " in *" g "*) record_pass "plan-contract-migration: (g) TMPDIR dentro do alvo → rc 3 antes de qualquer mktemp, nada nasce nele" ;;
+    *) record_fail "plan-contract-migration: (g)" "TMPDIR dentro do alvo não foi recusado limpo" ;; esac
+  case " ${got} " in *" h "*) record_pass "plan-contract-migration: (h) planilha pré-existente que é symlink para arquivo ignorado do alvo → apagada, nunca seguida (o arquivo do alvo intacto)" ;;
+    *) record_fail "plan-contract-migration: (h)" "o symlink da planilha foi seguido ou o plano não saiu" ;; esac
+  case " ${got} " in *" i "*) record_pass "plan-contract-migration: (i) universos divergentes (vendor/outra, fixtures/ na raiz) → a conferência por identidade lista o nó da dívida fora do plano, por nome" ;;
+    *) record_fail "plan-contract-migration: (i)" "$(bash "${sut}" "${d}/universo" --out-dir "${d}/out-i" 2>&1 | grep -E 'plano|fora' | head -4 | tr '\n' '|')" ;; esac
+  case " ${got} " in *" j "*) record_pass "plan-contract-migration: (j) id repetido e grafo por symlink → a identidade bate (multiset, caminho real), sem falso 'fora do plano'" ;;
+    *) record_fail "plan-contract-migration: (j)" "$(bash "${sut}" "${d}/identidade" --out-dir "${d}/out-j" 2>&1 | grep -E 'plano|fora|NÃO' | head -4 | tr '\n' '|')" ;; esac
+  # (m) MUTANTES na CÓPIA do helper (com o remeasure-contract.sh ao lado): cada um reverte uma cura e EXIGE que o
+  #     caso nomeado caia. Pares múltiplos de troca separados por \x1e. Sem mutante para o `-B` do plan: desde a
+  #     kg-ssot 4.13.1 o próprio kg_migrate.py liga sys.dont_write_bytecode, e o mutante ficou equivalente (medido no
+  #     rebase de 2026-10-21); o `-B` fica como cinto para o vendor 4.13.0, e o (c) segue cobrando o __pycache__.
+  mkdir -p "${d}/mut"; cp "${REPO_ROOT}/.claude/utils/adopt/remeasure-contract.sh" "${d}/mut/"
+  local m="${d}/mut/plan-contract-migration.sh" old new want
+  while IFS=$'\x1f' read -r old new want; do
+    [ -n "${old}" ] || continue
+    cp "${sut}" "${m}"
+    if ! python3 -I -B -c 'import sys; p,a,b=sys.argv[1:4]; s=open(p,encoding="utf-8").read(); A=a.split("\x1e"); B=b.split("\x1e"); sys.exit(3) if len(A)!=len(B) or any(s.count(x)!=1 for x in A) else None
+for x,y in zip(A,B): s=s.replace(x,y)
+open(p,"w",encoding="utf-8").write(s)' "${m}" "${old}" "${new}"; then
+      record_fail "plan-contract-migration: (m) mutante não aplicou" "${want}"; continue
+    fi
+    case " $(_pm_judge "${m}") " in
+      *" ${want} "*) record_fail "plan-contract-migration: (m) mutante NÃO morde" "(${want}) segue verde com a cura revertida: ${new%%$'\x1e'*}" ;;
+      *) record_pass "plan-contract-migration: (m) mutante morde → (${want}) cai" ;;
+    esac
+    find "${d}" -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null
+    _pm_git "${d}/com-perfil" checkout -q -- . 2>/dev/null; _pm_git "${d}/com-perfil" clean -qfd 2>/dev/null
+  done <<EOF_MUT
+  1) ;;$(printf '\x1f')  1|0) ;;$(printf '\x1f')a
+  elif [ "\${#FOUND[@]}" -eq 0 ]; then$(printf '\x1e')    PROFILE="\${T}/\${FOUND[0]}"$(printf '\x1f')  elif false; then$(printf '\x1e')    PROFILE="\${VENDOR}/spec/migrate-examples/company-brain.profile.yaml"$(printf '\x1f')b
+"\${MIG}" plan --profile$(printf '\x1f')"\${MIG}" apply --profile$(printf '\x1f')c
+EXCL=(--exclude '*/**/fixtures/**' --exclude 'docs/materials/**'$(printf '\x1f')EXCL=(--exclude 'nada/**' --exclude 'docs/materials/**'$(printf '\x1f')c
+refused = [r for r in nodes if r["revisar"].startswith("a proposta reprovaria no contrato")]$(printf '\x1f')refused = []$(printf '\x1f')c
+[ -f "\${MIG}" ] || no$(printf '\x1f')[ -f "\${MIG}" ] || true$(printf '\x1f')d
+if [ "\${PRC}" -ne 0 ]; then$(printf '\x1f')if false; then$(printf '\x1f')e
+    no "o alvo tem dois perfis$(printf '\x1f')    : "o alvo tem dois perfis$(printf '\x1f')e
+inside "\${OUT_DIR}" && no$(printf '\x1f')false && no$(printf '\x1f')e
+if [ "\${BEFORE}" != "\${AFTER}" ]; then$(printf '\x1f')if false; then$(printf '\x1f')f
+print(h.hexdigest())$(printf '\x1e')BEFORE="\$(snapshot)" && [ -n "\${BEFORE}" ] ||$(printf '\x1e')AFTER="\$(snapshot)" && [ -n "\${AFTER}" ] ||$(printf '\x1f')print("")$(printf '\x1e')BEFORE="\$(snapshot)" ||$(printf '\x1e')AFTER="\$(snapshot)" ||$(printf '\x1f')f
+inside "\${TMPBASE}" && no$(printf '\x1f')false && no$(printf '\x1f')g
+rm -f -- "\${SHEET}" || no$(printf '\x1f'): || no$(printf '\x1f')h
+missing, extra = sorted((debt - planned).elements()), sorted((planned - debt).elements())$(printf '\x1f')missing, extra = [], []$(printf '\x1f')i
+EXCL=(--exclude '*/**/fixtures/**'$(printf '\x1f')EXCL=(--exclude '**/fixtures/**'$(printf '\x1f')i
+planned = collections.Counter((r["arquivo"], r["id"]) for r in nodes)$(printf '\x1f')planned = collections.Counter(set((r["arquivo"], r["id"]) for r in nodes))$(printf '\x1f')j
+EOF_MUT
+  rm -rf "${d}"; unset -f _pm_git _pm_target _pm_ok _pm_bad _pm_profile _pm_commit _pm_tree _pm_judge
+}
+_family run_plan_contract_migration_selftests
+# ── applied-delta.sh: "Arquivos aplicados" do relatório do --update, MEDIDO NO ALVO (2026-10-20) ──────
+# O caso medido (sinal do hub, 2026-10-19): a fonte disse 239, chegaram 540, porque vendor/kg-ssot já existia
+# no core no pin e só entrou no MANIFESTO depois — chega inteiro no alvo e o delta da fonte não o vê. A fixture
+# reproduz o buraco em miniatura: o manifesto CRESCE (vendor/x entra depois do pin, já existindo nele), o delta
+# da fonte conta 1 e o alvo recebe 4. (a) é o número certo; (b) prova que a fixture tem o buraco (o jeito velho
+# subconta nela); (c) e (d) são o NÃO MEDIDO, nunca um número inventado. MUTANTE: trocar o merge-base pela ponta
+# da integração (o `..` de duas pontas) conta o commit que a integração ganhou depois — reprova (a).
+run_applied_delta_selftests() {
+  local sut="${REPO_ROOT}/.claude/utils/adopt/applied-delta.sh"
+  if [ ! -f "${sut}" ]; then record_fail "applied-delta" "SUT ausente: ${sut}"; return; fi
+  local d rc out old mut pin; d="$(mktemp -d)"
+  _ad_git() { git -C "$1" -c user.email=t@t -c user.name=t -c commit.gpgsign=false "${@:2}"; }
+  # FONTE: no pin, A/ está no manifesto e vendor/x/ já existe no repo, FORA dele; depois do pin muda só A/a.txt
+  # e o manifesto passa a incluir vendor/x/.
+  mkdir -p "${d}/src/A" "${d}/src/vendor/x"
+  git init -q -b main "${d}/src" >/dev/null 2>&1
+  echo v1 > "${d}/src/A/a.txt"; for i in 1 2 3; do echo "${i}" > "${d}/src/vendor/x/${i}.txt"; done
+  _ad_git "${d}/src" add -A; _ad_git "${d}/src" commit -qm pin
+  pin="$(_ad_git "${d}/src" rev-parse HEAD)"
+  echo v2 > "${d}/src/A/a.txt"; _ad_git "${d}/src" commit -qam muda-A
+  old="$(_ad_git "${d}/src" diff --name-only "${pin}..HEAD" -- A vendor/x | wc -l)"
+  # ALVO: a integração tem só A/ (o que o manifesto do pin levou); a onion/vendor traz A/ novo + vendor/x
+  # inteiro; a branch do update a mergeia; DEPOIS a integração ganha um commit alheio (z.txt), e a árvore tem
+  # a config pós-merge sem commit (settings modificado + carimbo novo).
+  mkdir -p "${d}/alvo/A" "${d}/alvo/.claude"
+  git init -q -b main "${d}/alvo" >/dev/null 2>&1
+  echo v1 > "${d}/alvo/A/a.txt"; echo '{}' > "${d}/alvo/.claude/settings.json"
+  _ad_git "${d}/alvo" add -A; _ad_git "${d}/alvo" commit -qm base
+  _ad_git "${d}/alvo" checkout -qb onion/vendor
+  cp -r "${d}/src/A" "${d}/src/vendor" "${d}/alvo/"; _ad_git "${d}/alvo" add -A; _ad_git "${d}/alvo" commit -qm vendor
+  _ad_git "${d}/alvo" checkout -q main; _ad_git "${d}/alvo" checkout -qb chore/onion-update-x
+  _ad_git "${d}/alvo" merge -q --no-ff -m merge onion/vendor
+  _ad_git "${d}/alvo" checkout -q main; echo z > "${d}/alvo/z.txt"; _ad_git "${d}/alvo" add z.txt; _ad_git "${d}/alvo" commit -qm alheio
+  _ad_git "${d}/alvo" checkout -q chore/onion-update-x
+  echo '{"hooks":{}}' > "${d}/alvo/.claude/settings.json"; echo 'source_commit: x' > "${d}/alvo/.claude/.onion-version"
+
+  rc=0; out="$(bash "${sut}" "${d}/alvo" main 2>&1)" || rc=$?
+  if [ "${rc}" -eq 0 ] && grep -q ': 4 commitados + 2 pendentes$' <<< "${out}" && grep -qE '^ +3  vendor/x$' <<< "${out}"; then
+    record_pass "applied-delta: (a) manifesto que CRESCE → 4 commitados (vendor/x inteiro: 3) + 2 pendentes, medido no alvo"
+  else record_fail "applied-delta: (a)" "rc=${rc}: ${out}"; fi
+  if [ "${old}" -eq 1 ]; then
+    record_pass "applied-delta: (b) a fixture tem o buraco: o diff da fonte <pin>..HEAD -- <manifesto> conta 1 dos 4 (o 239 de 540)"
+  else record_fail "applied-delta: (b)" "o jeito velho contou ${old}, esperado 1 — a fixture não reproduz o buraco"; fi
+  rc=0; bash "${sut}" "${d}/alvo" nao-existe >/dev/null 2>&1 || rc=$?
+  if [ "${rc}" -eq 3 ]; then record_pass "applied-delta: (c) integração inexistente → rc=3 (NÃO MEDIDO)"
+  else record_fail "applied-delta: (c)" "integração inexistente saiu rc=${rc}"; fi
+  mkdir -p "${d}/nao-repo"; rc=0; bash "${sut}" "${d}/nao-repo" main >/dev/null 2>&1 || rc=$?
+  if [ "${rc}" -eq 3 ]; then record_pass "applied-delta: (d) alvo que não é repo git → rc=3 (NÃO MEDIDO)"
+  else record_fail "applied-delta: (d)" "não-repo saiu rc=${rc}"; fi
+  mut="${d}/mut.sh"
+  sed 's/^base="\$(git -C "\${W}" merge-base "\${INT}" HEAD 2>\/dev\/null)" || nm .*$/base="${INT}" # ONION_MUTANTE ponta da integração/' "${sut}" > "${mut}"
+  if ! grep -q 'ONION_MUTANTE ponta da integração' "${mut}"; then
+    record_fail "applied-delta: (m) mutante" "o sed não casou a linha do merge-base — o mutante não foi aplicado"
+  else
+    out="$(bash "${mut}" "${d}/alvo" main 2>&1)" || true
+    if grep -q ': 4 commitados' <<< "${out}"; then record_fail "applied-delta: (m) mutante" "a ponta da integração passou em (a): ${out}"
+    else record_pass "applied-delta: (m) mutante (ponta da integração em vez do merge-base) MORDE: conta o commit alheio"; fi
+  fi
+  rm -rf "${d}"; unset -f _ad_git
+}
+_family run_applied_delta_selftests
 
 # ── REGRA 89: a divida de Aufhebung, e as SEIS evasoes que uma passada adversarial provou ─────
 # POR QUE EXISTE (2026-09-23): a 1a versao desta guarda varria so os `kg:` das baselines — a
@@ -40111,7 +42225,7 @@ DEC_PY
     record_pass "decide: (b) nó citado por id aparece com as opções lidas literalmente; o não citado fora da janela não"
   else record_fail "decide: (b)" "$(_emit "${out}" | grep '^seal' | tr '\t\n' '  ')"; fi
   # (j) quem CHEGA por aresta é listado: as opções às vezes vivem como nós vizinhos (C_OPCAO_* → D_), não na prosa
-  if grep -q "^seal$(printf '\t')Q_CITADO$(printf '\t').*$(printf '\t')D_NOVO (decision, SUPPORTS)\$" <<< "${out}"; then
+  if grep -q "^seal$(printf '\t')Q_CITADO$(printf '\t').*$(printf '\t')D_NOVO (decision, SUPPORTS)$(printf '\t')faço-eu$(printf '\t')" <<< "${out}"; then
     record_pass "decide: (j) o nó vizinho que chega por aresta é listado com tipo e aresta"
   else record_fail "decide: (j)" "$(_emit "${out}" | grep '^seal.Q_CITADO' | tr '\t\n' '  ')"; fi
   # (c) a janela traz o nó cujo id/label mudou dentro dela (D_NOVO, commit de 2026-10-10)
@@ -40174,6 +42288,140 @@ DEC_PY
   if [ -z "${_kb}" ]; then
     record_pass "decide: (k) grafo vazio, nó em flow-style e clone raso viram aviso nomeado; opção sem valor sai rc 2"
   else record_fail "decide: (k)" "${_kb}"; fi
+  # ── QUEM EXECUTA (coluna actor/action, pedido do maestro em 2026-10-19) ──────────────────────
+  # (l) cada linha diz quem faz o ato seguinte: o PR deste repo, o checkpoint, a triagem e a worktree ONDE o
+  #     medidor roda são faço-eu, com o comando pronto; a worktree de OUTRA sessão é outro-dono (I3) e não ganha
+  #     oferta de push. Mutante que morde: sem a comparação de dono, a wt2 sai faço-eu.
+  local _lb="" T; T="$(printf '\t')"
+  "${G[@]}" -C "${r}" worktree add -q "${sb}/wt2" -b feat/outra 2>/dev/null
+  : > "${sb}/wt2/novo.txt"; "${G[@]}" -C "${sb}/wt2" add novo.txt; "${G[@]}" -C "${sb}/wt2" commit -q -m wt2
+  if out="$(DECIDE_TODAY=2026-10-12 DECIDE_GH="${sb}/gh-ok" bash "${sut}" "${r}" --tsv --cite "${sb}/cite.txt" 2>&1)"; then rc=0; else rc=$?; fi
+  [ "${rc}" -eq 0 ] || _lb="${_lb} rc=${rc}"
+  grep -q "${T}incoming${T}actor${T}action${T}hint\$" <<< "${out%%$'\n'*}" || _lb="${_lb} cabecalho"
+  grep -q "^merge${T}PR#7${T}.*${T}faço-eu${T}investigo e conserto o check vermelho: \`gh pr checks 7\`" <<< "${out}" || _lb="${_lb} merge-vermelho"
+  grep -q "^checkpoint${T}docs/b/b.kg.yaml${T}.*${T}faço-eu${T}depois do \"selar\": \`bash .claude/validation/kg-drive-project.sh docs/b/b.kg.yaml --seal\`" <<< "${out}" || _lb="${_lb} checkpoint"
+  grep -q "^triage${T}docs/evolution/inbox${T}.*${T}faço-eu${T}trio pelo comando da casa: \`/meta:co-evolve\`" <<< "${out}" || _lb="${_lb} triagem"
+  grep -qE "^thread${T}(main|master)${T}\.${T}.*${T}faço-eu${T}está em (main|master): crio uma branch de tópico" <<< "${out}" || _lb="${_lb} wt-propria"
+  grep -q "^thread${T}feat/outra${T}.*${T}outro-dono${T}é de outra sessão ou agente (I3): não toco" <<< "${out}" || _lb="${_lb} wt-alheia"
+  grep -q "^thread${T}feat/outra${T}.*${T}faço-eu${T}" <<< "${out}" && _lb="${_lb} wt-alheia-com-oferta"
+  if out="$(DECIDE_TODAY=2026-10-12 DECIDE_GH="${sb}/gh-ok" bash "${sut}" "${r}" --markdown --cite "${sb}/cite.txt" 2>&1)"; then rc=0; else rc=$?; fi
+  grep -q '^quem executa: 🤖 faço-eu 4 · ⌨️ maestro-com-! 0 · 🙋 maestro-fora 0 · ↪️ outro-dono 1 · 🗳️ decisões a selar 2$' <<< "${out}" || _lb="${_lb} contagem-md"
+  "${G[@]}" -C "${r}" worktree remove --force "${sb}/wt2" 2>/dev/null; "${G[@]}" -C "${r}" branch -q -D feat/outra 2>/dev/null
+  if [ -z "${_lb}" ]; then
+    record_pass "decide: (l) cada linha traz quem executa e o comando; a worktree de outra sessão é outro-dono, sem oferta"
+  else record_fail "decide: (l)" "${_lb} :: $(_emit "${out}" | grep -E '^(quem|thread|merge)' | head -4 | tr '\t\n' '  ')"; fi
+  # (m) PR de OUTRO repo (--foreign-repo) verde é maestro-com-!: a trava veta `gh pr merge` com -R, o escape é o `!`.
+  #     O método vem do repo medido (aqui só rebase), e o vermelho de lá é faço-eu (ler o CI). Mutante: classe
+  #     faço-eu no verde, ou --squash cravado, reprova.
+  local _mb=""
+  cat > "${sb}/gh-multi" <<'GHM'
+#!/usr/bin/env bash
+case " $* " in
+  *" repo view dono/alheio "*) printf '%s\n' '{"squashMergeAllowed":false,"rebaseMergeAllowed":true,"mergeCommitAllowed":false}' ;;
+  *" -R dono/alheio "*) printf '%s\n' '[{"number":11,"title":"rascunho lá","headRefName":"feat/rl","isDraft":true,"statusCheckRollup":[{"name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]},{"number":9,"title":"feat lá","headRefName":"feat/la","isDraft":false,"statusCheckRollup":[{"name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]},{"number":10,"title":"fix lá","headRefName":"fix/la","isDraft":false,"statusCheckRollup":[{"name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]}]' ;;
+  *" -R dono/vazio "*) printf '%s\n' '[]' ;;
+  *" pr list "*) printf '%s\n' '[]' ;;
+  *) exit 1 ;;
+esac
+GHM
+  chmod +x "${sb}/gh-multi"
+  if out="$(DECIDE_TODAY=2026-10-12 DECIDE_GH="${sb}/gh-multi" bash "${sut}" "${r}" --tsv --foreign-repo dono/alheio --foreign-repo dono/vazio 2>&1)"; then rc=0; else rc=$?; fi
+  [ "${rc}" -eq 0 ] || _mb="${_mb} rc=${rc}"
+  grep -q "^merge${T}dono/alheio#9${T}feat/la${T}.*${T}maestro-com-!${T}no SEU prompt, com o prefixo: \`! gh pr merge 9 -R dono/alheio --rebase --delete-branch\` · conferir: \`gh pr view 9 -R dono/alheio --json state -q .state\` = MERGED" <<< "${out}" || _mb="${_mb} verde-nao-e-maestro"
+  grep -q "^merge${T}dono/alheio#10${T}.*${T}faço-eu${T}leio o CI e trago o diagnóstico: \`gh pr checks 10 -R dono/alheio\`" <<< "${out}" || _mb="${_mb} vermelho-alheio"
+  grep -q "^warn${T}-${T}-${T}repo alheio dono/vazio: 0 PRs abertos (medido)" <<< "${out}" || _mb="${_mb} vazio-calado"
+  grep -q "^merge${T}dono/alheio#11${T}.*${T}maestro-com-!${T}é RASCUNHO (o gh recusa o merge)" <<< "${out}" || _mb="${_mb} rascunho-alheio"
+  grep -q "^merge${T}dono/alheio#11${T}.*gh pr merge" <<< "${out}" && _mb="${_mb} rascunho-com-merge"
+  if out="$(DECIDE_TODAY=2026-10-12 DECIDE_GH="${sb}/gh-multi" bash "${sut}" "${r}" --tsv --foreign-repo dono/alheio --foreign-repo dono/alheio 2>&1)"; then rc=0; else rc=$?; fi
+  [ "$(grep -c "^merge${T}dono/alheio#9${T}" <<< "${out}")" = 1 ] || _mb="${_mb} repetido-duplica"
+  for _bad in '-R/x' 'dono/' '/x' 'a/../b'; do
+    if out="$(bash "${sut}" "${r}" --no-gh --foreign-repo "${_bad}" 2>&1)"; then rc=0; else rc=$?; fi
+    [ "${rc}" -eq 2 ] || _mb="${_mb} torto(${_bad})-rc${rc}"
+  done
+  if out="$(bash "${sut}" "${r}" --no-gh --foreign-repo semdono 2>&1)"; then rc=0; else rc=$?; fi
+  [ "${rc}" -eq 2 ] && grep -q 'foreign-repo exige dono/nome' <<< "${out}" || _mb="${_mb} sem-barra-rc${rc}"
+  if out="$(bash "${sut}" "${r}" --no-gh --foreign-repo 'dono/x;rm' 2>&1)"; then rc=0; else rc=$?; fi
+  [ "${rc}" -eq 2 ] || _mb="${_mb} caractere-rc${rc}"
+  if [ -z "${_mb}" ]; then
+    record_pass "decide: (m) PR verde de outro repo é maestro-com-! com o método medido; o vermelho é faço-eu; --foreign-repo torto sai rc 2"
+  else record_fail "decide: (m)" "${_mb}"; fi
+  # (n) gh que falha por CREDENCIAL vira linha access maestro-fora com o login (interativo, fora da sessão); a falha
+  #     que não é credencial (binário ausente, caso f) continua só aviso. Mutante: sem o AUTH_PAT, nenhuma linha access.
+  local _nb=""
+  printf '#!/usr/bin/env bash\nprintf "HTTP 401: Bad credentials (https://api.github.com/graphql)\\nTry authenticating with:  gh auth login -h github.com\\n" >&2\nexit 1\n' > "${sb}/gh-401"
+  chmod +x "${sb}/gh-401"
+  # o runner do CI TEM GH_TOKEN/GITHUB_TOKEN no ambiente: o caso tira as duas para medir o ramo do login, e as
+  # repõe de propósito para medir o ramo da variável (que vence o login guardado, e aí o login não cura nada)
+  if out="$(env -u GH_TOKEN -u GITHUB_TOKEN DECIDE_TODAY=2026-10-12 DECIDE_GH="${sb}/gh-401" bash "${sut}" "${r}" --tsv 2>&1)"; then rc=0; else rc=$?; fi
+  [ "${rc}" -eq 0 ] || _nb="${_nb} rc=${rc}"
+  grep -q "^access${T}gh-auth${T}este repo${T}o gh não autentica: HTTP 401.*${T}maestro-fora${T}num terminal FORA da sessão.*\`gh auth login -h github.com\` · conferir: \`gh auth status\`" <<< "${out}" || _nb="${_nb} sem-access"
+  [ "$(grep -c '^access' <<< "${out}")" = 1 ] || _nb="${_nb} access-duplicado"
+  if out="$(env -u GITHUB_TOKEN GH_TOKEN=invalido DECIDE_TODAY=2026-10-12 DECIDE_GH="${sb}/gh-401" bash "${sut}" "${r}" --tsv 2>&1)"; then rc=0; else rc=$?; fi
+  grep -q "^access${T}.*${T}maestro-fora${T}a credencial vem de GH_TOKEN no AMBIENTE" <<< "${out}" || _nb="${_nb} env-mandou-login"
+  if out="$(DECIDE_TODAY=2026-10-12 DECIDE_GH="${sb}/gh-nao-existe" bash "${sut}" "${r}" --tsv 2>&1)"; then rc=0; else rc=$?; fi
+  grep -q '^access' <<< "${out}" && _nb="${_nb} binario-ausente-virou-access"
+  if [ -z "${_nb}" ]; then
+    record_pass "decide: (n) gh sem credencial vira linha maestro-fora com o login e a conferência; binário ausente fica aviso"
+  else record_fail "decide: (n)" "${_nb}"; fi
+  # (o) a linha seal traz a PISTA literal de ato manual do nó (hint), e o nó sem a forma não traz nenhuma.
+  #     Mutante: hint vazio sempre reprova; padrão largo demais (casar "maestro") pinta Q_CITADO e reprova.
+  local _ob="" r3="${sb}/r3"
+  "${G[@]}" -C "${sb}" init -q r3; mkdir -p "${r3}/docs"
+  _dec_graph m "$(_dec_node D_MANUAL decision open 'trocar a chave do bridge' 'o maestro decide; depois roda com `!` no prompt o wrapper de deploy, porque o veto barra a sessão.')" \
+    "$(_dec_node D_LIMPO decision open 'escolher o nome do maestro' '(a) nome curto; (b) nome longo.')" > "${r3}/docs/m.kg.yaml"
+  "${G[@]}" -C "${r3}" add -A; "${G[@]}" -C "${r3}" commit -q -m o1
+  printf 'D_MANUAL D_LIMPO\n' > "${sb}/cite3.txt"
+  if out="$(DECIDE_TODAY=2026-10-12 bash "${sut}" "${r3}" --tsv --no-gh --cite "${sb}/cite3.txt" 2>&1)"; then rc=0; else rc=$?; fi
+  [ "${rc}" -eq 0 ] || _ob="${_ob} rc=${rc}"
+  grep -q "^seal${T}D_MANUAL${T}.*${T}faço-eu${T}depois da resposta: \`bash .claude/validation/kg-decide-seal.sh docs/m.kg.yaml D_MANUAL .*${T}.*depois roda com \`!\` no prompt o wrapper" <<< "${out}" || _ob="${_ob} sem-pista"
+  grep -q "^seal${T}D_LIMPO${T}.*${T}faço-eu${T}[^${T}]*${T}\$" <<< "${out}" || _ob="${_ob} pista-espuria"
+  if out="$(DECIDE_TODAY=2026-10-12 bash "${sut}" "${r3}" --markdown --no-gh --cite "${sb}/cite3.txt" 2>&1)"; then rc=0; else rc=$?; fi
+  grep -q '^  - pista de ATO MANUAL depois do selo (cópia literal; leia o nó, o card é seu): «.*com `!` no prompt' <<< "${out}" || _ob="${_ob} md-sem-pista"
+  [ "$(grep -c 'pista de ATO MANUAL' <<< "${out}")" = 1 ] || _ob="${_ob} md-pista-conta"
+  if [ -z "${_ob}" ]; then
+    record_pass "decide: (o) a pista literal de ato manual sai no nó que a tem, e só nele"
+  else record_fail "decide: (o)" "${_ob} :: $(_emit "${out}" | grep -E 'seal|pista' | head -3 | tr '\t\n' '  ')"; fi
+  # (p) o ramo que é o centro da tese: PR DESTE repo. Com o caminho verificado rastreado, o verde é ele; o rascunho
+  #     é `gh pr ready`; o sem-check e o pendente nunca viram oferta de merge; o PR cuja branch está na worktree de
+  #     outra sessão é outro-dono (I3). Sem o caminho verificado (adotante), o verde leva o método medido do repo, e
+  #     o PR de update do Onion leva merge commit. Mutantes: tirar o has_verified, o ramo do rascunho, o do
+  #     sem-check, a herança de dono ou o UPDATE_HEAD reprova.
+  local _pb="" r4="${sb}/r4"
+  "${G[@]}" -C "${sb}" init -q r4; mkdir -p "${r4}/ops"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${r4}/ops/pr-merge-verified.sh"
+  "${G[@]}" -C "${r4}" add -A; "${G[@]}" -C "${r4}" commit -q -m p1
+  "${G[@]}" -C "${r4}" worktree add -q "${sb}/wt4" -b feat/alheia 2>/dev/null
+  cat > "${sb}/gh-p" <<'GHP'
+#!/usr/bin/env bash
+ok='[{"name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]'
+case " $* " in
+  *" repo view "*) printf '%s\n' '{"squashMergeAllowed":true,"rebaseMergeAllowed":true,"mergeCommitAllowed":true}' ;;
+  *" pr list "*) printf '%s\n' "[{\"number\":1,\"title\":\"verde\",\"headRefName\":\"feat/verde\",\"isDraft\":false,\"statusCheckRollup\":${ok}},
+{\"number\":2,\"title\":\"rascunho\",\"headRefName\":\"feat/rascunho\",\"isDraft\":true,\"statusCheckRollup\":${ok}},
+{\"number\":3,\"title\":\"sem ci\",\"headRefName\":\"feat/semci\",\"isDraft\":false,\"statusCheckRollup\":[]},
+{\"number\":4,\"title\":\"pendente\",\"headRefName\":\"feat/pend\",\"isDraft\":false,\"statusCheckRollup\":[{\"name\":\"ci\",\"status\":\"IN_PROGRESS\",\"conclusion\":\"\"}]},
+{\"number\":5,\"title\":\"de outro\",\"headRefName\":\"feat/alheia\",\"isDraft\":false,\"statusCheckRollup\":${ok}},
+{\"number\":6,\"title\":\"update\",\"headRefName\":\"chore/onion-update-abc123\",\"isDraft\":false,\"statusCheckRollup\":${ok}}]" ;;
+  *) exit 1 ;;
+esac
+GHP
+  chmod +x "${sb}/gh-p"
+  if out="$(DECIDE_TODAY=2026-10-12 DECIDE_GH="${sb}/gh-p" bash "${sut}" "${r4}" --tsv 2>&1)"; then rc=0; else rc=$?; fi
+  [ "${rc}" -eq 0 ] || _pb="${_pb} rc=${rc}"
+  grep -q "^merge${T}PR#1${T}.*${T}faço-eu${T}depois do \"sim\", pelo caminho verificado: \`bash ops/pr-merge-verified.sh 1 --sync\`" <<< "${out}" || _pb="${_pb} verde-sem-verificado"
+  grep -q "^merge${T}PR#2${T}.*${T}faço-eu${T}depois do \"sim\": \`gh pr ready 2\`" <<< "${out}" || _pb="${_pb} rascunho"
+  grep -q "^merge${T}PR#3${T}.*${T}faço-eu${T}sem check nenhum no head" <<< "${out}" || _pb="${_pb} sem-ci"
+  grep -q "^merge${T}PR#4${T}.*${T}faço-eu${T}acompanho o CI em segundo plano" <<< "${out}" || _pb="${_pb} pendente"
+  grep -q "^merge${T}PR#5${T}.*${T}outro-dono${T}a branch está na worktree ${sb}/wt4" <<< "${out}" || _pb="${_pb} dono-nao-herdado"
+  grep -qE "^merge${T}PR#[34]${T}.*(pr-merge-verified|gh pr merge)" <<< "${out}" && _pb="${_pb} merge-oferecido-sem-ci-verde"
+  "${G[@]}" -C "${r4}" rm -q ops/pr-merge-verified.sh; "${G[@]}" -C "${r4}" commit -q -m p2
+  if out="$(DECIDE_TODAY=2026-10-12 DECIDE_GH="${sb}/gh-p" bash "${sut}" "${r4}" --tsv 2>&1)"; then rc=0; else rc=$?; fi
+  grep -q "^merge${T}PR#1${T}.*${T}faço-eu${T}depois do \"sim\": \`gh pr checks 1\` (todos verdes) e \`gh pr merge 1 --rebase\` (inferido: o 1º que o repo aceita" <<< "${out}" || _pb="${_pb} adotante-sem-metodo"
+  grep -q "^merge${T}PR#6${T}.*\`gh pr merge 6 --merge\` (PR de update do Onion: merge commit" <<< "${out}" || _pb="${_pb} update-sem-merge-commit"
+  "${G[@]}" -C "${r4}" worktree remove --force "${sb}/wt4" 2>/dev/null
+  if [ -z "${_pb}" ]; then
+    record_pass "decide: (p) PR deste repo: verde pelo caminho verificado, rascunho, sem-CI e pendente sem oferta de merge, branch alheia é outro-dono, update é merge commit"
+  else record_fail "decide: (p)" "${_pb} :: $(_emit "${out}" | grep '^merge' | cut -f2,9,10 | tr '\t\n' '  ')"; fi
 
   # ── o SELADOR, sobre cópia descartável fora de git (o gate é só o radar) ──────────────────
   g="${sb}/s.kg.yaml"; cp "${r}/docs/a/a.kg.yaml" "${g}"

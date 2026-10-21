@@ -48,7 +48,11 @@ O v4 é uma versão **maior**: o que alertava passou a reprovar.
 | `form.pattern.node.provenance.source` (`source` marcador) | — | **MUST** |
 | `form.pattern.node.provenance.method` (fora de `<classe>: <detalhe>`) | — | SHOULD (MUST no v5) |
 
-As versões menores da linha 4 só acrescentaram, sem mudar o veredito MUST de um grafo bem escrito:
+As versões menores da linha 4 acrescentaram sem mudar o veredito MUST de um grafo bem escrito, com uma exceção
+registrada: a 4.11.0, a 4.12.0 e a 4.13.0 passaram a reprovar construções raras do YAML (o perfil estrito), e foram menores
+porque nenhum dos grafos reais medidos em quatro repos adotantes mudou de veredito. Mesmo assim, contam como MUST novo
+para o critério de estável, e cada uma zerou o relógio de 30 dias. Desde a 4.11.0, o contrato tem rótulo próprio
+(v4.4 na 4.11.0, v4.5 na 4.12.0, v4.6 na 4.13.0, v4.7 na 4.14.0, v4.8 na 4.15.0, v4.9 na 4.15.1), que não é o número da release.
 
 | Release | O que entrou |
 |---|---|
@@ -59,6 +63,14 @@ As versões menores da linha 4 só acrescentaram, sem mudar o veredito MUST de u
 | 4.5 | O veredito estruturado `kg-ssot.verdict/1` (`kg_validate.py --format json`) |
 | 4.6 | O armazém que só grava o que o contrato aprova (`kg_store.py`) |
 | 4.7 | O servidor MCP de referência (`kg_mcp.py`) e o teto de aninhamento e de aliases do leitor |
+| 4.8 | O `.kg.json` como formato do contrato, lido no perfil JSON; o vendor com o próprio `.gitattributes` (4.8.1) e o veredito com a linha de cada ocorrência (4.8.2) |
+| 4.9 | O pacote PyPI (`kg-ssot`) e o npm; na 4.9.1, o armazém no Windows |
+| 4.10 | O servidor MCP pronto para produção: perfil atrás de proxy, as duas eras do protocolo, o gate externo por comando e a imagem OCI |
+| 4.11 | Contrato v4.4: o aviso `integrity.refutes-unreconciled` e o perfil YAML estrito em três construções raras (MUST novo) |
+| 4.12 | Contrato v4.5: `verified_scope`, `locality: privado`, a `REFUTES` externa contando com o corpus e o tab no começo de continuação entre aspas (MUST novo) |
+| 4.13 | Contrato v4.6: a continuação entre aspas mais indentada que a coleção dona (MUST novo) e o `\r` como quebra de linha no leitor JS; na 4.13.1, a identidade do contrato acusa a versão que só o leitor muda, e o migrador lê o corpus do gate |
+| 4.14 | Contrato v4.7: a ponta externa pode ser um `.kg.json`; o armazém grava um conjunto de grafos de uma vez (`write_many`) |
+| 4.15 | Contrato v4.8: a cadência da verificação (`reverify_every`, `reverify_on`), a retenção (`retain_for`), o `owner` como papel e o relatório de vencimento (`kg_validate.py --due`), fora do veredito; na 4.15.1, o contrato v4.9 deixa de alertar a cadência sem `verified_at`, que é o estado inicial de uma regra de coleta |
 
 ## Versões e tags
 
@@ -73,7 +85,9 @@ existindo). Pelo histórico das releases:
 
 O gate guarda o sha256 dos dois schemas como a identidade do contrato. Uma tag que muda os bytes dos schemas,
 mesmo que só no texto das descrições (a 4.7.2) ou no `$id` (a 4.7.3), pede `kg_gate.py --update` no PR que traz a tag, e o gate mostra
-que nenhum veredito mudou.
+que nenhum veredito mudou. Uma regra que só o leitor vê (o perfil YAML, a quebra de linha) também entra na descrição
+do schema MUST, como "No v4.6 ...": desde a 4.13.1, a higiene da release cobra essa linha para a versão que o leitor
+declara, e assim toda versão do contrato move a identidade.
 
 Um aviso SHOULD novo pode subir a dívida medida pelo gate. Isso é intencional: a rampa de um contrato é alertar
 numa versão e reprovar na seguinte, e o adotante vê a dívida antes de ela virar erro.

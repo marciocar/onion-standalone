@@ -45,6 +45,12 @@ manifestos que ele tem de aceitar (`good/`) e os que tem de recusar (`bad/`).
 **igual** ao esperado, tanto em `codes` quanto em `warnings`. Igualdade, não inclusão: um leitor que
 acusa tudo não pode passar. Ordem e repetição não contam.
 
+**A versão do contrato que um caso exige vai marcada na `description`**, do grupo ou do caso, numa destas formas:
+"Desde o v4.6", "(v4.6)" ou "do v4.6". A conferência do mantenedor exige que a maior marca seja a versão que o leitor
+de referência declara (`CONTRACT_VERSION` em `tools/kg_validate.py`), e que a descrição de um dos schemas a declare
+("No v4.6"). Assim, uma regra nova que só o leitor vê também muda os bytes dos schemas, que o `kg_gate.py` guarda como
+a identidade do contrato.
+
 ## Códigos
 
 Cada código é um slug estável por camada, e o metaschema confere a forma.
@@ -53,7 +59,7 @@ Cada código é um slug estável por camada, e o metaschema confere a forma.
 |---|---|---|
 | parse | `parse.<motivo>` | `parse.yaml-error`, `parse.duplicate-key`, `parse.empty-document`, `parse.not-single-document`, `parse.root-not-mapping` |
 | form | `form.<tipo>.<escopo>.<campo>` | `form.required.node.label`, `form.enum.node.node_type`, `form.range.node.impact`, `form.pattern.edge.to`, `form.type.node.item` |
-| integrity | `integrity.<regra>` | `integrity.duplicate-id`, `integrity.dangling-from`, `integrity.dangling-to`, `integrity.dangling-trigger`, `integrity.orphan-node` (MUST); `integrity.testimony-in-prod`, `integrity.verified-before-fact`, `integrity.untraced-decision` (SHOULD) |
+| integrity | `integrity.<regra>` | `integrity.duplicate-id`, `integrity.dangling-from`, `integrity.dangling-to`, `integrity.dangling-trigger`, `integrity.orphan-node` (MUST); `integrity.testimony-in-prod`, `integrity.verified-before-fact`, `integrity.untraced-decision`, `integrity.refutes-unreconciled` (SHOULD) |
 | yaml | `yaml.<regra>` | `yaml.forbidden-key-on` (MUST), `yaml.unquoted-date` (SHOULD) |
 | semantic | `semantic.<regra>` | `semantic.contradiction` (MUST); `semantic.supersedes-unreconciled`, `semantic.answered-question-open`, `semantic.decision-done-dev`, `semantic.stale-missing`, `semantic.stale-old`, `semantic.review-overdue`, `semantic.testimony-unmarked` e os `semantic.domain-*` da camada domain (SHOULD) — só em `optional/` |
 
@@ -99,7 +105,7 @@ Os tipos são `SUPERSEDES`, `CONSTRAINS`, `SUPPORTS`, `REFUTES`, `TRACES_TO` e `
 
 | Código | Quando reprova |
 |---|---|
-| `form.pattern.top.external_edges.to` (ou `.from`) | as duas pontas externas, as duas locais, ou a referência fora da forma (caminho absoluto, sem `.kg.yaml#`) |
+| `form.pattern.top.external_edges.to` (ou `.from`) | as duas pontas externas, as duas locais, ou a referência fora da forma (caminho absoluto, sem `.kg.yaml#` nem `.kg.json#`) |
 | `form.enum.top.external_edges.edge_type` | tipo fora dos seis (os da camada domain não cruzam grafos) |
 | `integrity.dangling-external-local` | a ponta local não existe neste arquivo |
 | `integrity.dangling-external` | **com o corpus**: o arquivo ou o id da ponta externa não existe |
@@ -132,6 +138,42 @@ e o veredito MUST do YAML não muda (`latest/yaml/json-profile/`):
 
 O v4.2 acrescenta `provenance.locality`, opcional, com o enum `repo`, `web`, `host` ou `pessoa`. O valor fora do enum
 alerta como `form.enum.node.provenance.locality` (`latest/form/provenance-locality/`), e nenhum veredito muda.
+
+O v4.4 acrescenta `integrity.refutes-unreconciled` (`latest/integrity/coherence/`): nó que recebe `REFUTES` e segue
+vivo, isto é, nem `superseded` nem `refuted`. A `question` `done` não alerta, porque já está respondida. O grafo afirma e
+refuta a mesma coisa. Em `optional/semantic/`, o mesmo grafo reprova como `semantic.contradiction`, que é o que o radar
+faz; no contrato o caso é SHOULD agora e vira MUST numa versão futura, depois que os adotantes medirem a própria dívida.
+
+O v4.4 também fecha três construções raras do YAML em que os leitores discordavam (`latest/yaml/strict-profile/`),
+com o veredito mais estrito nos três, por decisão de contrato de 2026-10-19. Todas reprovam como `parse.yaml-error`:
+- a tag `!` sem nome, também na forma `!<!>`, em escalar ou coleção;
+- o `!!timestamp` explícito cujo texto não é data na forma estrita: a interseção do construtor do PyYAML com o do
+  `yaml` do JS (minuto e segundo com 2 dígitos, fração com pelo menos um dígito, fuso até ±29, só espaço entre a
+  data e a hora);
+- o tab fora de aspas, de bloco literal e de comentário (como espaço ou dentro de um texto sem aspas), como no parser
+  puro do PyYAML.
+Medido em 2026-10-20: nenhum dos 1.391 `.kg.yaml` de quatro repos adotantes muda de veredito.
+
+O v4.5 acrescenta quatro coisas:
+- `verified_scope`, opcional, o alcance do `verified_at` (`latest/form/verified-scope/`). O MUST só aceita a chave; no
+  SHOULD, o enum é `fato`, `mecanismo` ou `nenhum` (fora dele alerta `form.enum.node.verified_scope`), e
+  `verified_scope` sem `verified_at` alerta `form.required.node.verified_at`.
+- `privado` no enum de `provenance.locality`: documento fora do repo, não público e reverificável por quem tem acesso.
+- Com o corpus, a `REFUTES` que chega de outro grafo pelas `external_edges` a um nó vivo conta para
+  `integrity.refutes-unreconciled` (`latest/integrity/external-corpus/`); sem o corpus, não conta.
+- O tab no espaço inicial de uma linha de continuação de texto entre aspas reprova como `parse.yaml-error`, nos dois
+  leitores e pela mesma regra explícita (`latest/yaml/strict-profile/`).
+Medido em 2026-10-20: nenhum dos 1.457 `.kg.yaml` de quatro repos adotantes muda no MUST nem no SHOULD.
+
+O v4.6 fecha mais duas diferenças do YAML entre os leitores (`latest/yaml/strict-profile/`):
+- a linha de continuação de um texto entre aspas tem de ser mais indentada que a coleção em bloco que o contém (a
+  coluna do mapa ou do `-` da lista; na raiz, ao menos um espaço), como pede a especificação; menos que isso reprova
+  como `parse.yaml-error`. Linha só de espaço não conta;
+- o `\r\n` e o `\r` sozinho são quebra de linha nos dois leitores, como na especificação: o leitor JS deixou de
+  guardar o `\r` como caractere dentro das aspas;
+- o texto entre aspas tem de fechar: a aspa escapada (`''` ou `\"`) no fim de uma linha não fecha o texto, e o leitor JS
+  deixou de cortar o escalar ali.
+Medido em 2026-10-20: nenhum dos 1.507 `.kg.yaml` de quatro repos adotantes muda no MUST nem no SHOULD.
 O mesmo código pode aparecer como MUST num caso e como SHOULD em outro, porque a severidade é do
 caso, não do código.
 
@@ -154,7 +196,7 @@ duas). Dentro de cada pasta, o grupo é livre; por convenção, `latest/<camada>
 aceitar o que o grupo exige (ex.: `trigger` em `integrity-trigger`). O PR da promoção esvazia
 `pending_on` e cita o nó selado. Nada antecipa decisão aberta.
 
-**O placar de hoje.** O leitor de referência passa em 100% de `latest/`: 261 casos contra o contrato v4, 30 deles
+**O placar de hoje.** O leitor de referência passa em 100% de `latest/`: 349 casos contra o contrato v4, 32 deles
 `.kg.json`. Os grupos do
 rascunho do v4 saíram de `proposals/` para `latest/form/` (`provenance-required`, `placeholder-source`,
 `unknown-key`, `method-vocabulary`, `should-remains`), e os casos herdados do v3 que o v4 muda de veredito

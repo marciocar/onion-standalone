@@ -15,6 +15,12 @@ Convenções: **obr.** = obrigatório; *data* = texto `AAAA-MM-DD` que existe no
   `off` são texto.
 - Chaves comparadas na forma JSON: `1` e `"1"` colidem (`parse.duplicate-key`).
 - `.nan` e `.inf` reprovam em qualquer posição, porque o JSON não os representa.
+- Texto entre aspas em várias linhas: cada linha de continuação mais indentada que o mapa ou a lista que o contém.
+- Tab só dentro de aspas (fora do espaço inicial de uma linha de continuação), de bloco literal (`|` ou `>`) e de comentário. Como espaço (depois de `:`, no fim da linha,
+  entre a data e a hora) ou dentro de um texto sem aspas, reprova (`parse.yaml-error`). Use espaço.
+- A tag `!` sem nome (também `!<!>`) reprova, e o `!!timestamp` explícito só aceita texto na forma de data
+  (`AAAA-M-D`, com hora opcional `H:MM:SS`, fração com dígito e fuso `Z` ou `±H[:MM]`, até ±29). A forma é conferida,
+  o calendário não. Sem tag, escreva a data entre aspas.
 - O perfil JSON vale também no `.kg.yaml`, como aviso: inteiro fora de ±(2^53−1) (`yaml.unsafe-integer`), surrogate
   solto (`yaml.lone-surrogate`) e mais de 128 coleções aninhadas (`yaml.depth-over-128`).
 
@@ -72,10 +78,14 @@ com `.kg.yaml`.
 | `trace` | texto | onde a afirmação aparece (arquivo, caminho) |
 | `verified_at` | *data* | SHOULD em nó PROD |
 | `verified_against` | texto | SHOULD em `claim` com `verified_at` |
+| `verified_scope` | enum | opcional, desde o v4.5: o alcance do `verified_at`. `fato` (o que o nó afirma foi conferido), `mecanismo` (só o mecanismo, como código ou configuração; o fato depende de outro ambiente) ou `nenhum` (conferido contra o repo na data, e nada ali sustenta nem refuta o fato). Fora do enum alerta; sem `verified_at` alerta |
+| `reverify_every` | duração | opcional, desde o v4.8: de quanto em quanto tempo a verificação tem de ser refeita, em duração ISO 8601 só com data (`P3M`, `P1Y`, `P2W`, `P1Y6M`). Fora da forma alerta. Sem `verified_at` não alerta desde o v4.9: é a regra que ainda não teve a primeira verificação, e o `--due` a lista como sem carimbo. O vencimento nunca muda o veredito: `kg_validate.py --due` o lista |
+| `reverify_on` | texto | opcional, desde o v4.8: o gatilho por evento ("a cada mudança de configuração", "por admissão") |
+| `retain_for` | duração | opcional, desde o v4.8: por quanto tempo a evidência tem de ser guardada, na mesma duração |
 | `valid_from` | data parcial | `AAAA`, `AAAA-MM` ou `AAAA-MM-DD` |
 | `source_tier` | inteiro | 1 a 10 |
 | `source_kind` | texto | |
-| `owner` | texto | |
+| `owner` | texto | o papel que responde pelo nó (`cto`, `engenharia`), e não o nome de uma pessoa: a pessoa muda, o papel fica |
 | `drive_kind` · `evidence_class` | texto | |
 | `sealed_by` · `sealed_at` | texto | quem selou a decisão e quando |
 | `narrative` | texto | a história por trás do `label` |
@@ -89,7 +99,7 @@ com `.kg.yaml`.
 | `source` | texto | obr. Não vazio e não marcador (`unknown`, `n/a`, `tbd`, `?`...) |
 | `locator` | texto | obr. Não vazio |
 | `method` | texto | obr. Não vazio. SHOULD: `<classe>: <detalhe>`, classe em `medição` `leitura` `juízes` `derivado` `testemunho` |
-| `locality` | enum | opcional. `repo` `web` `host` `pessoa` (fora do enum alerta) |
+| `locality` | enum | opcional. `repo` `web` `host` `pessoa` `privado` (fora do enum alerta). Vale onde está a cópia lida, não a classificação do documento |
 | `x_*` | qualquer | outra chave alerta, não reprova |
 
 `provenance: null` reprova. Ou o objeto vem inteiro, ou não vem.
@@ -116,7 +126,7 @@ com `.kg.yaml`.
 | `label` | texto | |
 | `x_*` | qualquer | |
 
-Uma referência externa é `<caminho>.kg.yaml#<id>`, com o caminho relativo à raiz do repositório e escrito com
+Uma referência externa é `<caminho>.kg.yaml#<id>`, ou `<caminho>.kg.json#<id>` desde o v4.7, com o caminho relativo à raiz do repositório e escrito com
 `/`. Cada segmento começa por letra, dígito ou `_`. Caminho absoluto, `..`, `\` e `:` reprovam.
 
 ## Integridade (fora do schema)
@@ -133,5 +143,6 @@ O schema não alcança estas regras, e todo leitor tem de aplicá-las:
 | nó PROD sustentado só por testemunho | SHOULD | `integrity.testimony-in-prod` |
 | `verified_at` anterior a `valid_from` | SHOULD | `integrity.verified-before-fact` |
 | `decision` viva sem `trace`, sem `provenance` e sem `TRACES_TO` saindo dela | SHOULD | `integrity.untraced-decision` |
+| nó que recebe `REFUTES` e segue vivo (nem `superseded` nem `refuted`; a `question` `done` já está respondida) | SHOULD (MUST depois) | `integrity.refutes-unreconciled` |
 
 Uma aresta externa conta como ligação: o nó ligado só por ela não é órfão.

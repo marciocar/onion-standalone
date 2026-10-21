@@ -1300,7 +1300,7 @@ _rule_glob_matches() { # $1=glob
       *)                                           # '**/*.kg.yaml' → '*.kg.yaml', procurado SOB o prefixo
         _hit="$(find "${root}" ${_depth} -name "${pat}" -not -path '*/.git/*' -print -quit 2>/dev/null)" ;;
     esac
-    [ -n "${_hit}" ] && return 0                   # sem pipe: `find | grep -q` é a corrida EPIPE de sempre
+    [ -n "${_hit}" ] && return 0                   # sem pipe: find seguido de grep -q é a corrida EPIPE de sempre
   done <<< "${_alts_ng}"
   return 1
 }
@@ -1727,8 +1727,8 @@ check_capability_conformance() {
         [ -n "${r}" ] || continue
         ty="${r%%:*}"; va="${r#*:}"; ok=0
         case "${ty}" in
-          agent)      find "${REPO_ROOT}/.claude/agents" -name "${va}.md" 2>/dev/null | grep -q . && ok=1 ;;
-          command)    find "${REPO_ROOT}/.claude/commands" -name "${va}.md" 2>/dev/null | grep -q . && ok=1 ;;
+          agent)      grep -q . <<< "$(find "${REPO_ROOT}/.claude/agents" -name "${va}.md" 2>/dev/null)" && ok=1 ;;
+          command)    grep -q . <<< "$(find "${REPO_ROOT}/.claude/commands" -name "${va}.md" 2>/dev/null)" && ok=1 ;;
           skill)      [ -d "${REPO_ROOT}/.claude/skills/${va}" ] && ok=1 ;;
           validation) [ -f "${REPO_ROOT}/.claude/validation/${va}" ] && ok=1 ;;
           util)       [ -d "${REPO_ROOT}/.claude/utils/${va}" ] && ok=1 ;;
@@ -2716,7 +2716,7 @@ check_door_staleness() {
       # ⚠️ INFORMATIVA POR INTEIRO DESDE A F3 DAS PORTAS (2026-10-10, SAC-92, D_MATRIZ_DE_PORTAS_2026_10:
       # "publicar é sob demanda e nunca trava o desenvolvimento"). SEM-BASELINE e PIN-DESCONHECIDO eram
       # HARD por serem "registro quebrado, não questão de momento" — e o argumento valia enquanto o pin do
-      # registro era a verdade sobre a porta. Com o /meta:publish o selo é o CARIMBO da porta, lido do
+      # registro era a verdade sobre a porta. Com o /meta:publish (core-only) o selo é o CARIMBO da porta, lido do
       # remoto (`ops/publish-door.sh --status`), e o `onion_version` do members.yaml virou CACHE: ninguém
       # mais o avança por PR. Cobrar HARD sobre um cache faria todo PR comum depender de manter um campo
       # que não é mais a fonte — o deadlock que a matriz decidiu desfazer. O sinal FICA, rotulado.
@@ -3400,15 +3400,42 @@ check_inventory_total_drift() {
     #     repo inteiro". FALSO — o grep original era case-sensitive e não viu os dois acima. A
     #     frase justificava a regra com uma medição feita pela mesma régua enviesada que a regra
     #     usa, dentro de um commit que abria com "medição antes da regra". O Elenxo pegou.
-    while IFS= read -r line; do
-      [ -z "${line}" ] && continue
-      n="$(printf '%s' "${line}" | sed 's/^|[^|]*|//' | grep -oE '[0-9]+' | head -1 || true)"
+    #     ⚠️ VOCABULÁRIO DA POPULAÇÃO (2026-10-20, falso-positivo medido na main): a 1ª redação
+    #     pegava o 1º inteiro de QUALQUER linha 'Total' — e numa tabela de CUSTO
+    #     (`docs/evolution/research/chat-agent-isolation-2026-10/SYNTHESIS.md`,
+    #     `| **Total** | | **8.749.759** | **122** | …`, coluna 'Tokens') o `grep -oE '[0-9]+'`
+    #     cortava o separador de milhar e lia `8`, que não bate com SSOT nenhuma ⇒ acusação.
+    #     Dois defeitos, duas curas, nenhuma isenção de arquivo:
+    #       (1) 'Total' só é total de INVENTÁRIO quando o NOME DA POPULAÇÃO vem junto — no
+    #           cabeçalho da coluna do valor (`| Categoria | Comandos |`) OU na própria célula
+    #           (`| **Total** | **117 comandos** |`). Sem população nomeada, 'Total' é de outra
+    #           grandeza (tokens, minutos, R$) e a regra não tem o que comparar;
+    #       (2) o número é o TOKEN inteiro, com separador de milhar (`8.749.759` → 8749759,
+    #           nunca 8) — contagem lida pela metade é a mesma mentira por outro caminho.
+    #     A comparação continua contra o CONJUNTO (o conservadorismo acima fica intacto); só a
+    #     elegibilidade da linha estreitou, e por vocabulário, não por nome de arquivo.
+    #     O case-sensitive de 'Total' (acima) segue LOAD-BEARING. O awk é POSIX (sem `{n}`).
+    while IFS= read -r n; do
       [ -z "${n}" ] && continue
       case "${n}" in
         "${cmd}"|"${agent}"|"${skill}"|"${kb}") : ;;
         *) violation "SOFT" "${f}" "linha 'Total' de tabela com valor que não bate com nenhuma contagem da SSOT: '${n}' (comandos ${cmd} · agentes ${agent} · skills ${skill} · KBs ${kb}) — /meta:inventory" ;;
       esac
-    done < <(grep -E '^\|[[:space:]]*\*{0,2}Total\*{0,2}[[:space:]]*\|' "${f}" 2>/dev/null)
+    done < <(awk '
+      function is_pop(t) { t = tolower(t); return (t ~ /comandos|agentes|skills|knowledge[ \t]+bases|kbs/) }
+      /^\|[ \t:|-]+\|[ \t]*$/ && prev ~ /^\|/ { hdr = prev; prev = $0; next }
+      !/^\|/ { hdr = ""; prev = $0; next }
+      /^\|[ \t]*(\*\*)?Total(\*\*)?[ \t]*\|/ {
+        nc = split($0, c, "|"); nh = split(hdr, h, "|")
+        for (i = 3; i < nc; i++) {
+          if (!match(c[i], /[0-9]+([.,][0-9][0-9][0-9])*/)) continue
+          tok = substr(c[i], RSTART, RLENGTH)
+          if (is_pop(c[i]) || (i <= nh && is_pop(h[i]))) { gsub(/[.,]/, "", tok); print tok }
+          break
+        }
+      }
+      { prev = $0 }
+    ' "${f}" 2>/dev/null)
   # PRÉ-FILTRO (perf, 2026-07-13): só varre .md que CONTÊM uma frase-de-contagem candidata.
   #   Antes: 750 arquivos × ~8 greps/arquivo (esta é ~50% do tempo total do lint); ~90% dos .md
   #   não têm número+substantivo-de-inventário → puro overhead. O pattern abaixo é SUPERSET de
@@ -3447,7 +3474,7 @@ check_inventory_total_drift() {
 # ===========================================================================
 check_frontmatter_scalar_colon() {
   while IFS= read -r -d '' f; do
-    head -1 "${f}" | grep -q '^---$' || continue   # só arquivos com bloco de frontmatter
+    grep -q '^---$' <<< "$(head -1 "${f}")" || continue   # só arquivos com bloco de frontmatter
     awk '
       NR==1 && $0=="---" { infm=1; next }
       infm && $0=="---"  { exit }
@@ -5104,7 +5131,7 @@ check_radar_aufhebung() {
           : # passivo conhecido, contabilizado no resumo abaixo
         else
           fresh=$((fresh + 1))
-          violation "HARD" "${val}" "REGRA 89 (Rodada de radar selada reconcilia o corpus que superou (Aufhebung), com catraca): rodada selada SEM Aufhebung e FORA do baseline — a catraca SO ENCOLHE. Reconcilie (no novo + SUPERSEDES datado), ou declare no bloco meta 'supersedes_none: <razao>' se nao derrubou nada, ou, se a Aufhebung e cross-file, 'external_edges:' no topo com '- to: <grafo>#<no>' e 'edge_type: SUPERSEDES' (contrato v4.3; a chave velha supersedes_external nao conta mais: migre com kg-migrate-v3.py --external-edges). Declaracao SEM VALOR nao conta"
+          violation "HARD" "${val}" "REGRA 89 (Rodada de radar selada reconcilia o corpus que superou (Aufhebung), com catraca): rodada selada SEM Aufhebung e FORA do baseline — a catraca SO ENCOLHE. Reconcilie (no novo + SUPERSEDES datado), ou declare no bloco meta 'supersedes_none: <razao>' se nao derrubou nada, ou, se a Aufhebung e cross-file, 'external_edges:' no topo com '- to: <grafo>#<no>' e 'edge_type: SUPERSEDES' (contrato v4.3; a chave velha supersedes_external nao conta mais: migre com kg-migrate-v3.py --external-edges (core-only)). Declaracao SEM VALOR nao conta"
         fi
         ;;
     esac
@@ -5230,7 +5257,7 @@ check_commands_without_model() {
 #   (`generate-marketplace.sh --from-manifests`), com `source` apontando o subdiretório do plugin no repo
 #   público — instalar pela raiz instala o PUBLICADO. Depende só de manifesto + face pública, então um PR
 #   que muda o corpo de uma fonte bundlada não a toca. A metade da PUBLICAÇÃO (o catálogo do bundle bate
-#   com a raiz) roda no /meta:publish onion-plugins (plugin-bundle-check.sh). Cura:
+#   com a raiz) roda no /meta:publish onion-plugins (core-only) (plugin-bundle-check.sh). Cura:
 #   marketplace-root-check.sh --write (temp+mv — redirecionar direto TRUNCA o arquivo antes de o gerador
 #   ler o top-level); o pre-commit regenera quando um manifesto entra no commit.
 # ===========================================================================
@@ -5258,7 +5285,7 @@ check_marketplace_root_sync() {
 # REGRA 74 — Caminho .claude/ NU dentro de plugin só resolve no core, com catraca [HARD + SOFT]
 # previne: baseline de passivo crescendo calado — um PR transformava ref NOVA (HARD) em PASSIVO (SOFT) acrescentando linha
 #   F4 das portas (2026-10-10): a varredura dos plugins MONTADOS saiu para a publicação (plugin-bundle-check.sh,
-#   passo 5d do /meta:publish), porque o core não versiona mais plugins/. A CATRACA ficou aqui — a passada
+#   passo 5d do /meta:publish (core-only)), porque o core não versiona mais plugins/. A CATRACA ficou aqui — a passada
 #   adversarial da F4 mediu que ela tinha sumido de todo gate (achado I2): a raiz temporária da publicação não
 #   é repo git, e nada mais comparava o baseline com origin/main. A catraca não precisa de bundle: compara
 #   `plugin-bare-path-baseline.txt` com o de origin/main e reprova se CRESCEU. Só ela é julgada aqui.
@@ -5808,7 +5835,7 @@ check_direct_provider_api
 # ─────────────────────────────────────────────────────────────────────────────
 # REGRA 106 — Superfície que viaja passa pela varredura de vazamento da publicação [HARD + SOFT]
 # previne: id de adotante com prefixo onion- ou caminho de máquina entrando por PR verde e só sendo barrado no fim, pelo motor de publicação das portas.
-#   DANO MEDIDO (2026-10-13, duas vezes na mesma noite): o ensaio de `/meta:publish --all` reprovou três
+#   DANO MEDIDO (2026-10-13, duas vezes na mesma noite): o ensaio de `/meta:publish --all` (core-only) reprovou três
 #   portas no passo (5a) do motor ("VAZAMENTO no bundle — a porta é PÚBLICA") por duas classes que
 #   entraram por PRs mergeados com o lint verde: caminho de máquina em comentários e fixtures que viajam
 #   (8 ocorrências, curado no #1096) e o id do repo privado de um adotante com prefixo `onion-` em 23
@@ -5973,6 +6000,80 @@ check_adoption_graph_pin() {
   return 0
 }
 check_adoption_graph_pin
+
+# ===========================================================================
+# REGRA 109 — CLAUDE.md não cresce sem tirar o equivalente ou citar um nó [HARD + SOFT]
+# previne: o arquivo que carrega em TODA sessão e compactação engordar sem ninguém decidir
+#   DANO MEDIDO (2026-10-19): o CLAUDE.md do core foi de 17.041 B (2026-09-03) para 25.918 B (+52%) em ~20
+#   commits, depois do selo de 2026-09-25 que mandava medir antes de podar (D_PODA_INSTRUCTION_BLOAT_CLAUDE_MD_E_SKILLS);
+#   decisão do maestro de 2026-10-19: D_PODA_CATRACA_E_L2_DIRIGIDO_1019. Passar do `ceiling:` do baseline é HARD;
+#   subir o teto contra a integração sem `raise:` que cite nó existente é HARD; folga > 512 B é SOFT (trave o ganho).
+#   Lógica em claude-md-size-check.sh; baseline em claude-md-size-ceiling.txt. Sem baseline, sem objeto.
+# ===========================================================================
+check_claude_md_size() {
+  local helper="${SCRIPT_DIR}/claude-md-size-check.sh"
+  [ -f "${helper}" ] || return 0
+  [ "${IS_DERIVED}" -eq 1 ] && return 0   # adotante/porta: o CLAUDE.md é do projeto dele, e o baseline não viaja
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      "${REPO_ROOT}/CLAUDE.md"|*/claude-md-size-*) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  local _out _hrc=0 _err
+  _err="$(mktemp 2>/dev/null || echo /dev/null)"
+  if _out="$(bash "${helper}" "${REPO_ROOT}" --format tsv 2>"${_err}")"; then _hrc=0; else _hrc=$?; fi
+  while IFS=$'\t' read -r _sev _code _path _msg; do
+    [ -n "${_path:-}" ] || continue
+    violation "${_sev:-SOFT}" "${REPO_ROOT}/${_path#./}" "REGRA 109 (CLAUDE.md não cresce sem tirar o equivalente ou citar um nó): [${_code}] ${_msg}"
+  done <<< "${_out}"
+  if [ "${_hrc}" -ge 2 ] || { [ "${_hrc}" -ne 0 ] && [ -z "${_out}" ]; }; then
+    violation "HARD" "${REPO_ROOT}/.claude/validation/claude-md-size-check.sh" "REGRA 109 (CLAUDE.md não cresce sem tirar o equivalente ou citar um nó): a guarda NÃO RODOU (rc=${_hrc}: $(head -1 "${_err}" 2>/dev/null)) — isto não é aprovação"
+  fi
+  [ "${_err}" = /dev/null ] || rm -f "${_err}"
+  return 0
+}
+check_claude_md_size
+
+# ===========================================================================
+# REGRA 110 — Índice da KB conta o que o disco tem [HARD no core · SOFT no derivado]
+# previne: o índice de docs/knowledge-base declarar uma contagem e listar outra, com arquivos fora dele
+#   DANO MEDIDO (2026-10-19, sinal de campo de um hub adotante no --update): "Conceitos Fundamentais (42)",
+#   44 entradas, 53 arquivos em concepts/ — o único conflito do merge do update. No core, no mesmo dia: 35
+#   arquivos de conteúdo fora do índice e a pasta decisions/ sem seção. O /docs:build-index manda contar no
+#   scan; a prosa não impede o esquecimento, e nenhuma guarda comparava. Seção `## … (N)`, estatísticas e a
+#   árvore da estrutura são conferidas contra o disco, e cada arquivo de conteúdo tem de ter entrada.
+#   Lógica em kb-index-check.sh. No derivado é SOFT: a KB vendorizada pode ganhar KB local, e o índice é do core.
+# ===========================================================================
+check_kb_index_counts() {
+  local helper="${SCRIPT_DIR}/kb-index-check.sh"
+  [ -f "${helper}" ] || return 0
+  [ -f "${REPO_ROOT}/docs/knowledge-base/index.md" ] || return 0
+  # GATE POR RELEVÂNCIA sob --only: a pergunta é sobre o ÍNDICE, então só o índice (e a própria guarda) a
+  # disparam. CI do #1222 (2026-10-20): a bancada lintava uma KB plantada com --only (o caso r22-kb-links, que
+  # pergunta sobre LINKS daquele arquivo) e a REGRA 110 acusava o índice por não listá-la — uma resposta a outra
+  # pergunta. O lint completo (CI, pr-finalize) segue julgando o índice contra os arquivos RASTREADOS.
+  if [ -n "${ONLY_PATH}" ]; then
+    case "${ONLY_PATH}" in
+      "${REPO_ROOT}"/docs/knowledge-base/index.md|*/kb-index-check.sh) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  local _out _hrc=0 _err _flag=""
+  [ "${IS_DERIVED}" -eq 1 ] && _flag="--derived"
+  _err="$(mktemp 2>/dev/null || echo /dev/null)"
+  if _out="$(bash "${helper}" "${REPO_ROOT}" --format tsv ${_flag} 2>"${_err}")"; then _hrc=0; else _hrc=$?; fi
+  while IFS=$'\t' read -r _sev _code _path _msg; do
+    [ -n "${_path:-}" ] || continue
+    violation "${_sev:-SOFT}" "${REPO_ROOT}/${_path}" "REGRA 110 (Índice da KB conta o que o disco tem): [${_code}] ${_msg}"
+  done <<< "${_out}"
+  if [ "${_hrc}" -ne 0 ]; then
+    violation "HARD" "${helper}" "REGRA 110 (Índice da KB conta o que o disco tem): a guarda NÃO RODOU (rc=${_hrc}: $(head -1 "${_err}" 2>/dev/null)) — isto não é aprovação"
+  fi
+  [ "${_err}" = /dev/null ] || rm -f "${_err}"
+  return 0
+}
+check_kb_index_counts
 
 # ===========================================================================
 # SUMÁRIO FINAL

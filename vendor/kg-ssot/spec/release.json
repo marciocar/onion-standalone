@@ -1,6 +1,6 @@
 {
-  "version": "4.9.1",
-  "tag": "kg-ssot-v4.9.1",
+  "version": "4.15.1",
+  "tag": "kg-ssot-v4.15.1",
   "contract": {
     "must": "spec/kg-contract-v4.schema.json",
     "should": "spec/kg-contract-v4.should.schema.json"
@@ -17,6 +17,7 @@
     "spec/kg-contract-v4.schema.json",
     "spec/kg-contract-v4.should.schema.json",
     "spec/verdict.schema.json",
+    "spec/due.schema.json",
     "spec/conformance/README.md",
     "spec/conformance/manifest.schema.json",
     "spec/conformance/fixtures/",
@@ -28,6 +29,11 @@
     "tools/kg_prov_export.py",
     "tools/kg_store.py",
     "tools/kg_mcp.py",
+    "tools/kg_migrate.py",
+    "spec/kg-migrate-profile.schema.json",
+    "spec/migrate-examples/",
+    "tools/test_kg_migrate.py",
+    "tools/fixtures/migrate/",
     "tools/requirements.txt",
     "packaging/python/",
     "packaging/npm/",
@@ -38,7 +44,8 @@
     "tools/runners/ajv/package-lock.json",
     "packaging/mcpb/",
     "packaging/mirror/",
-    "packaging/mcp-registry/"
+    "packaging/mcp-registry/",
+    "packaging/oci/"
   ],
   "profiles": {
     "gate": [

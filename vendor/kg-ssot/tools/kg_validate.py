@@ -26,7 +26,12 @@ arquivo *.json vira JsonText (as_source), e '-' segue --stdin-format yaml|json. 
 inicial reprovam como parse.yaml-error. No .kg.yaml, os três primeiros são os avisos yaml.unsafe-integer,
 yaml.lone-surrogate e yaml.depth-over-128.
 
---corpus DIR liga a conferência da ponta externa das external_edges (v4.3) contra os .kg.yaml sob DIR.
+--corpus DIR liga a conferência da ponta externa das external_edges (v4.3) contra os .kg.yaml e .kg.json sob DIR.
+--due AAAA-MM-DD troca o veredito pelo relatório de vencimento (v4.8): o nó com reverify_every cujo verified_at
+somado à cadência já passou na data, o que tem cadência e não tem carimbo, e o que só tem reverify_on (por evento,
+sem data). Vence o que vence na data ou antes. Nunca muda o veredito nem julga o grafo: o rc é 0, ou 2 com entrada
+quebrada; um arquivo que não parseia sai no relatório (NÃO LIDO, broken no JSON). Com --format json, o relatório sai no
+formato kg-ssot.due/1 (spec/due.schema.json).
 --where acrescenta, por arquivo, uma linha por ocorrência com o nó ou a aresta (where()); a saída padrão não muda.
 --spike troca a saída humana e o rc pelos do spike (check() e classify(), perfil Yaml12BoolLoader), para
 reproduzir a medição do spike. --json OUT grava SEMPRE o formato do spike ({summary, results}),
@@ -38,9 +43,11 @@ quebrada (schema ou arquivo ilegível, git show que falha).
 Uso:
   kg_validate.py [--schema S [--should-schema S2]] [--stdin-format yaml|json] FILE...
   kg_validate.py --schema S --git REPO --rev SHA --list LISTFILE [--json OUT] [--spike]
+  kg_validate.py --due AAAA-MM-DD [--format json] FILE...
 """
 import argparse
 import bisect
+import calendar
 import collections
 import datetime
 import functools
@@ -69,6 +76,10 @@ _ROOT = _home()
 # O contrato VIGENTE, num lugar só: a suíte, o gate e as outras ferramentas leem daqui.
 CONTRACT_MUST = _ROOT / "spec" / "kg-contract-v4.schema.json"
 CONTRACT_SHOULD = _ROOT / "spec" / "kg-contract-v4.should.schema.json"
+# A versão do contrato que este leitor julga. Uma regra que só o leitor vê (o perfil YAML, a quebra de linha) não muda
+# os bytes dos schemas sozinha: a higiene cobra que a descrição de um deles declare "No v<versão>", e é isso que
+# move o sha256 que o gate guarda como identidade.
+CONTRACT_VERSION = "4.9"
 
 
 class Yaml12BoolLoader(yaml.SafeLoader):
@@ -86,6 +97,17 @@ Yaml12BoolLoader.yaml_implicit_resolvers = {
 }
 Yaml12BoolLoader.add_implicit_resolver(
     "tag:yaml.org,2002:bool", re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF"))
+
+
+def _bool_loader_timestamp(loader, node):
+    """O !!timestamp explícito com texto que não é data: o construtor do PyYAML quebrava com AttributeError (match None),
+    e o check() saía com traceback. Vira erro de parse; a data válida segue o construtor de sempre."""
+    if not yaml.constructor.SafeConstructor.timestamp_regexp.match(loader.construct_scalar(node)):
+        raise yaml.constructor.ConstructorError(None, None, "!!timestamp sem data", node.start_mark)
+    return yaml.constructor.SafeConstructor.construct_yaml_timestamp(loader, node)
+
+
+Yaml12BoolLoader.add_constructor("tag:yaml.org,2002:timestamp", _bool_loader_timestamp)
 
 
 class DuplicateKeyError(yaml.constructor.ConstructorError):
@@ -120,6 +142,76 @@ class Yaml12CoreLoader(Yaml12BoolLoader):
                 raise DuplicateKeyError(None, None, f"chave repetida: {jk!r}", key_node.start_mark)
             mapping[jk] = self.construct_object(value_node, deep=deep)
         return mapping
+
+    def compose_node(self, parent, index):
+        """Duas construções raras que o perfil recusa (decisão de contrato de 2026-10-19, «o mais estrito nos três»): a tag
+        ! sem nome (também !<!>), em escalar ou coleção, e o !!timestamp explícito cujo texto não é data na forma
+        estrita (STRICT_TIMESTAMP). Só no parser puro: o loader_for manda para cá todo texto em que elas podem estar."""
+        event = self.peek_event()
+        tag = getattr(event, "tag", None)
+        if tag == "!":
+            raise yaml.composer.ComposerError(None, None, "tag ! sem nome", event.start_mark)
+        if (tag == "tag:yaml.org,2002:timestamp" and isinstance(event, yaml.ScalarEvent)
+                and not STRICT_TIMESTAMP.fullmatch(event.value)):
+            raise yaml.composer.ComposerError(None, None, f"!!timestamp sem data: {event.value!r}", event.start_mark)
+        if (isinstance(event, yaml.ScalarEvent) and event.style in ("'", '"')
+                and event.start_mark.line != event.end_mark.line):
+            if QUOTED_TAB_INDENT(event):
+                raise yaml.composer.ComposerError(None, None, "tab no começo de uma continuação entre aspas", event.start_mark)
+            cols = getattr(self, "_block_cols", [])
+            if QUOTED_SHORT_INDENT(event, cols[-1] if cols else -1):
+                raise yaml.composer.ComposerError(None, None, "continuação entre aspas menos indentada que a coleção dona",
+                                                  event.start_mark)
+        if isinstance(event, (yaml.MappingStartEvent, yaml.SequenceStartEvent)) and not event.flow_style:
+            # a coluna da coleção em bloco que contém o que vem dentro dela (para a indentação da continuação)
+            if not hasattr(self, "_block_cols"):
+                self._block_cols = []
+            # a coluna do bloco vem do end_mark: o start_mark aponta a âncora ou a tag, quando há (achado da revisão)
+            end = event.end_mark
+            col = end.column
+            if isinstance(event, yaml.SequenceStartEvent) and end.buffer[end.pointer:end.pointer + 1] != "-":
+                col -= 1
+            self._block_cols.append(col)
+            try:
+                return super().compose_node(parent, index)
+            finally:
+                self._block_cols.pop()
+        return super().compose_node(parent, index)
+
+
+# O !!timestamp explícito aceito pelo perfil: a interseção do construtor do PyYAML com o do leitor JS, sem tab. Mês e dia
+# com 1 ou 2 dígitos, hora com 1 ou 2, minuto e segundo com 2, fração com pelo menos um dígito, fuso Z, ±H, ±HH ou ±HH:MM
+# (hora do fuso até 29) e só espaço entre a data e a hora. A data sem tag segue o resolvedor implícito (yaml.unquoted-date).
+STRICT_TIMESTAMP = re.compile(
+    r"[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:(?:[Tt]| +)[0-9]{1,2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?: *(?:Z|[-+][012]?[0-9](?::[0-9]{2})?))?)?")
+
+
+def QUOTED_TAB_INDENT(event):
+    """O texto entre aspas de várias linhas tem tab no espaço inicial de alguma linha de continuação? O perfil a recusa nos
+    dois leitores (decisão de contrato de 2026-10-20, v4.5): o yaml do JS já recusava parte dos casos pela coluna, e a
+    regra explícita, mais estrita, é a mesma nos dois. Lê o texto cru do escalar pelas marcas do parser puro, e só
+    \r e \n quebram linha, como no leitor JS."""
+    buf = getattr(event.start_mark, "buffer", None)
+    if not isinstance(buf, str):  # só o parser puro tem o texto nas marcas; sem ele, falha fechado
+        raise yaml.composer.ComposerError(None, None, "texto entre aspas sem o texto cru para conferir o tab", event.start_mark)
+    raw = buf[event.start_mark.pointer:event.end_mark.pointer]
+    return any("\t" in re.match(r"[ \t]*", line).group() for line in re.split(r"\r\n|\r|\n", raw)[1:])
+
+
+def QUOTED_SHORT_INDENT(event, column):
+    """A linha de continuação do texto entre aspas tem indentação menor ou igual à coluna da coleção em bloco que o
+    contém (column; -1 na raiz)? A especificação do YAML 1.2 pede a continuação mais indentada que o bloco, o yaml do
+    JS a recusa, e o perfil recusa nos dois (decisão de contrato de 2026-10-20, v4.6). Linha só de espaço não conta (é
+    linha vazia). Lê o texto cru pelas marcas do parser puro; sem ele, falha fechado."""
+    buf = getattr(event.start_mark, "buffer", None)
+    if not isinstance(buf, str):
+        raise yaml.composer.ComposerError(None, None, "texto entre aspas sem o texto cru para conferir a indentação",
+                                          event.start_mark)
+    raw = buf[event.start_mark.pointer:event.end_mark.pointer]
+    for line in re.split(r"\r\n|\r|\n", raw)[1:]:
+        if line.strip(" \t") and len(line) - len(line.lstrip(" ")) <= column:
+            return True
+    return False
 
 
 class UnquotedDate(str):
@@ -350,7 +442,7 @@ def classify(error):
 
 # fullmatch nos três (EXTERNAL_REF, SLUG, ISO_PREFIX): o $ do Python casa antes de um \n final, e o do ECMA-262, o dos
 # patterns do contrato e do leitor JS, não; com match, "a.kg.yaml#ID\n" passava aqui e virava dangling-external.
-EXTERNAL_REF = re.compile(r"^(?:[A-Za-z0-9_][A-Za-z0-9_.-]*/)*[A-Za-z0-9_][A-Za-z0-9_.-]*\.kg\.yaml#[A-Za-z][A-Za-z0-9_]*$")
+EXTERNAL_REF = re.compile(r"^(?:[A-Za-z0-9_][A-Za-z0-9_.-]*/)*[A-Za-z0-9_][A-Za-z0-9_.-]*\.kg\.(?:yaml|json)#[A-Za-z][A-Za-z0-9_]*$")
 
 
 def is_external(ref):
@@ -381,7 +473,7 @@ def index_texts(items):
     """[(caminho, texto)] → {caminho: {ids}}: o corpus montado de textos já lidos (por exemplo, por git show)."""
     index = {}
     for name, text in items:
-        _, doc, _ = parse_v1(text)
+        _, doc, _ = parse_v1(text if isinstance(text, JsonText) else as_source(name, text))  # o .kg.json pelo perfil JSON
         nodes = doc.get("nodes") if doc and isinstance(doc.get("nodes"), list) else []
         index[name] = {str(n["id"]) for n in nodes if isinstance(n, dict) and n.get("id") is not None}
     return index
@@ -413,17 +505,19 @@ def uses_external(text):
 
 def corpus_index(root, files=None):
     """O corpus para conferir a ponta externa (v4.3): {caminho relativo a root: {ids}}. files: os caminhos a ler (o gate
-    passa os .kg.yaml rastreados); sem files, os .kg.yaml rastreados se root é repo git, senão todo .kg.yaml sob root.
+    passa os grafos rastreados); sem files, os .kg.yaml e .kg.json rastreados se root é repo git, senão todo grafo sob
+    root (desde o v4.7, a ponta externa pode ser um .kg.json).
     Arquivo ilegível entra sem ids. root que não é diretório é entrada quebrada (ValueError)."""
     root = pathlib.Path(root)
     if not root.is_dir():
         raise ValueError(f"corpus {root} não é um diretório")
     if files is None:  # num repo git, os rastreados (como o gate); fora dele, todo arquivo regular sob root
-        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", "*.kg.yaml"], capture_output=True)
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", "*.kg.yaml", "*.kg.json"],
+                             capture_output=True)
         if out.returncode == 0:
             files = [n for n in out.stdout.decode("utf-8").split("\0") if n]
         else:
-            files = sorted(p.relative_to(root).as_posix() for p in root.rglob("*.kg.yaml")
+            files = sorted(p.relative_to(root).as_posix() for g in ("*.kg.yaml", "*.kg.json") for p in root.rglob(g)
                            if ".git" not in p.relative_to(root).parts)
     names = [n for n in files if (root / n).is_file()]  # FIFO, diretório e apagado ficam fora
     items = []
@@ -572,11 +666,16 @@ def form_codes(error):
 # Onde o parser em C (libyaml) e o puro divergem, medido pela revisão de 2026-10-13 em 63 entradas estranhas: tab
 # como separador ou no fim da linha, a diretiva %YAML, escape de surrogate, BOM fora do início e aninhamento
 # muito profundo. O puro é a referência do perfil; o C é só um atalho, usado quando o texto não tem nenhuma dessas
-# construções. Qual dos dois o YAML 1.2 manda para o tab é decisão de contrato, ainda não tomada.
+# construções. O tab fora de aspas, de bloco e de comentário reprova: o puro o recusa, e o contrato ficou com o mais
+# estrito (decisão de contrato de 2026-10-19), que o leitor JS segue. Pelo mesmo selo, a tag ! sem nome e o !!timestamp
+# explícito são julgados só pelo puro (Yaml12CoreLoader.compose_node): o texto que tem tag ! isolada, !!timestamp, a
+# forma longa ...2002:timestamp, uma diretiva %TAG ou uma tag com escape %xx (que o parser decodifica: !<%21> é a
+# tag !) cai nele. O : entra no que pode vir antes da tag, por causa da chave JSON no flow ({"a":! b}).
 # O escape \u só diverge na faixa dos surrogates (D800 a DFFF): medido em 2026-10-13 nos 65.536 valores, em 6 contextos
 # de aspas duplas. O \ufeff de texto extraído de PDF caía no puro e custava ao SGE mais que o dobro do tempo. O \U
 # segue arriscado inteiro (é raro, e acima de 10FFFF os dois erram por motivos diferentes).
-RISKY = re.compile(r"\t|%YAML|\\u[dD][89a-fA-F]|\\U|.\ufeff", re.S)
+RISKY = re.compile(r"\t|%YAML|%TAG|!!timestamp|2002:timestamp|\\u[dD][89a-fA-F]|\\U|.\ufeff"
+                   r"|(?:^|(?<=[\s\[{,:\ufeff]))!(?:<!>)?(?=[\s,\[\]{}]|$)|!(?:<[^>\s]*|[^\s\[\]{},]*)%[0-9A-Fa-f]{2}", re.S)
 SAFE_DEPTH = 200
 MAX_DEPTH = 1000  # coleções abertas de uma vez: acima disto o parser estoura a pilha (segfault medido)
 _DEEP_HINT = re.compile(r"(?m)^[ \t]*(?:[-?][ \t]+){2,}|^ {%d,}" % (MAX_DEPTH // 2))
@@ -821,9 +920,25 @@ def parse_v1(text):
         return None, None, "parse.yaml-error"
     loader = loader_for(text)
     raw_doc, doc, code, raw = _parse(text, loader)
-    if loader is not Yaml12CoreLoader and raw is not None and _depth(raw) > SAFE_DEPTH:
+    if loader is not Yaml12CoreLoader and (raw is not None or code == "parse.duplicate-key") and (
+            (raw is not None and _depth(raw) > SAFE_DEPTH) or _multiline_quoted(text)):
         raw_doc, doc, code, raw = _parse(text, Yaml12CoreLoader)
     return raw_doc, doc, code
+
+
+def _multiline_quoted(text):
+    """O texto tem algum escalar entre aspas de várias linhas? As regras da continuação entre aspas (o tab e a
+    indentação) são conferidas só no parser puro; este teste, feito pelos tokens do scanner em C, manda ao puro só
+    o texto que as precisa. Medido em 2026-10-20 no maior grafo do SGE (454 KB): 0,03 s, contra 0,7 s do puro."""
+    if "'" not in text and '"' not in text:
+        return False
+    try:
+        for tok in yaml.scan(text, Loader=FAST_LOADER):
+            if isinstance(tok, yaml.ScalarToken) and tok.style in ("'", '"') and tok.start_mark.line != tok.end_mark.line:
+                return True
+    except yaml.YAMLError:
+        return True  # o C não leu: o puro decide
+    return False
 
 
 def code_counts(text, validator, corpus=None):
@@ -870,7 +985,7 @@ ISO_PREFIX = re.compile(r"^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$")
 TESTIMONY_METHOD = re.compile(r"^testemunho: ")
 
 
-def coherence_located(doc):
+def coherence_located(doc, corpus=None):
     """Os avisos SHOULD que o schema não exprime, porque cruzam campos ou arestas:
 
     - integrity.testimony-in-prod: nó PROD cuja base é testemunho (evidence_class: testimony ou method da classe
@@ -879,6 +994,10 @@ def coherence_located(doc):
       (AAAA, AAAA-MM ou AAAA-MM-DD); data que não está nessa forma não é comparada;
     - integrity.untraced-decision: decision viva (não superseded nem refuted) sem origem: nem trace com texto, nem
       provenance, nem aresta TRACES_TO saindo dela.
+    - integrity.refutes-unreconciled: nó que recebe REFUTES e segue vivo (nem superseded nem refuted; uma question
+      done já está respondida): o grafo afirma e refuta a mesma coisa. É a contradição do radar, como aviso no v4.4.
+      Desde o v4.5, com o corpus (corpus_index), conta também a REFUTES que chega de outro grafo pelas external_edges
+      (from externo, to local); sem ele, a ponta externa não foi conferida e a aresta não conta.
     Um campo de tipo errado (from ou id em lista ou mapa) já reprova no MUST: aqui ele é ignorado, nunca quebra.
     """
     out = []
@@ -886,6 +1005,13 @@ def coherence_located(doc):
     # só texto entra no conjunto: um from ou id em lista ou mapa já reprova no MUST, e aqui não pode quebrar o leitor
     traced = {e.get("from") for e in edges
               if isinstance(e, dict) and e.get("edge_type") == "TRACES_TO" and isinstance(e.get("from"), str)}
+    refuted = {e.get("to") for e in edges
+               if isinstance(e, dict) and e.get("edge_type") == "REFUTES" and isinstance(e.get("to"), str)}
+    if corpus is not None:
+        ext = doc.get("external_edges") if isinstance(doc.get("external_edges"), list) else []
+        refuted |= {e.get("to") for e in ext
+                    if isinstance(e, dict) and e.get("edge_type") == "REFUTES" and is_external(e.get("from"))
+                    and isinstance(e.get("to"), str) and not is_external(e.get("to"))}
     for n, place in _located(doc, "nodes"):
         prov = n.get("provenance") if isinstance(n.get("provenance"), dict) else {}
         method = prov.get("method")
@@ -902,6 +1028,10 @@ def coherence_located(doc):
                 and not (isinstance(trace, str) and trace.strip()) and not prov
                 and not (isinstance(n.get("id"), str) and n["id"] in traced)):
             out.append(("integrity.untraced-decision", place))
+        status = n.get("status")
+        if (isinstance(n.get("id"), str) and n["id"] in refuted and status not in ("superseded", "refuted")
+                and not (status == "done" and n.get("node_type") == "question")):
+            out.append(("integrity.refutes-unreconciled", place))
     return out
 
 
@@ -922,12 +1052,12 @@ def yaml_profile_warnings(text, raw):
     return out
 
 
-def coherence_warnings(doc):
+def coherence_warnings(doc, corpus=None):
     """Os avisos de coherence_located() contados por código (Counter)."""
-    return collections.Counter(code for code, _ in coherence_located(doc))
+    return collections.Counter(code for code, _ in coherence_located(doc, corpus))
 
 
-def warning_counts(text, validator, should_validator):
+def warning_counts(text, validator, should_validator, corpus=None):
     """Os códigos SHOULD de warnings() com a contagem de ocorrências (as chaves são as de warnings())."""
     raw, doc, parse_code = parse_v1(text)
     if parse_code:
@@ -938,7 +1068,7 @@ def warning_counts(text, validator, should_validator):
     if _has_unquoted_date(raw):
         out["yaml.unquoted-date"] += 1
     out.update(yaml_profile_warnings(text, raw))
-    out.update(coherence_warnings(doc))
+    out.update(coherence_warnings(doc, corpus))
     return out
 
 
@@ -959,14 +1089,14 @@ def where(text, validator, should_validator=None, corpus=None):
     return [(level, code, place) for level, code, place, _ in occurrences(text, validator, should_validator, corpus)]
 
 
-def warnings(text, validator, should_validator):
+def warnings(text, validator, should_validator, corpus=None):
     """Os códigos SHOULD: o que o schema SHOULD acusa e o MUST não, mais data sem aspas e os avisos de coerência
     (coherence_warnings).
 
     Arquivo que já reprova no parse não recebe alerta de forma. Chave desconhecida cujo nome não é
     slug (<<, 1.0) alerta como form.pattern.<escopo>.key, o código que o schema SHOULD emite para ela.
     """
-    return sorted(warning_counts(text, validator, should_validator))
+    return sorted(warning_counts(text, validator, should_validator, corpus))
 
 
 VERDICT_SCHEMA_VERSION = "kg-ssot.verdict/1"
@@ -1113,6 +1243,7 @@ MESSAGES = {
     "integrity.verified-before-fact": "A data de verificação (verified_at) é anterior à data do fato (valid_from): "
                                       "ou o fato tem vigência futura, ou as datas estão trocadas.",
     "integrity.untraced-decision": "A decisão não diz de onde veio: falta trace, provenance ou aresta TRACES_TO.",
+    "integrity.refutes-unreconciled": "O nó recebe REFUTES e segue valendo: o grafo afirma e refuta a mesma coisa.",
     "yaml.unquoted-date": "Há uma data sem aspas; leitores YAML diferentes a leem de formas diferentes.",
     "yaml.forbidden-key-on": "A aresta usa a chave on, proibida (em YAML 1.1 ela vira o booleano True).",
     "yaml.unsafe-integer": "Há um número inteiro fora de ±(2^53−1); um leitor JS (double) perde o valor exato dele.",
@@ -1143,6 +1274,7 @@ HINTS = {
                                       "valid_from é quando o fato passou a valer, e verified_at, quando foi conferido.",
     "integrity.duplicate-id": "Dê um id único a cada nó.",
     "integrity.untraced-decision": "Acrescente trace, provenance ou uma aresta TRACES_TO saindo da decisão.",
+    "integrity.refutes-unreconciled": "Se a refutação procede, mude o status do alvo para refuted ou superseded; se não, tire a aresta ou use CONSTRAINS (o dissent que limita sem derrubar).",
     "integrity.testimony-in-prod": "Deixe o nó em DEV, ou apoie-o numa medição ou leitura conferida.",
     "form.required.node.provenance": "Acrescente provenance com source, locator e method; sem fonte recuperável, "
                                      "mude o status para unverifiable.",
@@ -1215,7 +1347,7 @@ def occurrences(text, validator, should_validator=None, corpus=None):
         if _has_unquoted_date(raw):
             out.append(("SHOULD", "yaml.unquoted-date", "arquivo", []))
         out += [("SHOULD", code, "arquivo", []) for code in yaml_profile_warnings(text, raw)]
-        out += [("SHOULD", code, place, place_path(doc, place)) for code, place in coherence_located(doc)]
+        out += [("SHOULD", code, place, place_path(doc, place)) for code, place in coherence_located(doc, corpus)]
     return out
 
 
@@ -1305,6 +1437,100 @@ def load_sources(args):
                 continue
             with open(name, encoding="utf-8") as fh:
                 yield name, as_source(name, fh.read())
+
+
+DURATION = re.compile(r"^P(?:([0-9]+)Y)?(?:([0-9]+)M)?(?:([0-9]+)W)?(?:([0-9]+)D)?$")  # o pattern do SHOULD, sem hora
+ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")  # só AAAA-MM-DD: o fromisoformat aceitaria também 2026-W43-1
+
+
+def parse_duration(value):
+    """(anos, meses, semanas, dias) de uma duração ISO 8601 só com data (P3M, P1Y2W), ou None fora da forma ou
+    zerada (P0D venceria no próprio dia do carimbo, para sempre; o SHOULD também a alerta)."""
+    m = DURATION.fullmatch(value) if isinstance(value, str) else None
+    if not m or not any(m.groups()):
+        return None
+    out = tuple(int(g or 0) for g in m.groups())
+    return out if any(out) else None
+
+
+def iso_date(value):
+    """A data de um texto AAAA-MM-DD, ou None."""
+    try:
+        return datetime.date.fromisoformat(value) if isinstance(value, str) and ISO_DATE.fullmatch(value) else None
+    except ValueError:
+        return None
+
+
+def add_duration(day, duration):
+    """day somado à duração: anos e meses pelo calendário (o dia passa para o último do mês quando não existe, como
+    31 de janeiro + P1M = 28 ou 29 de fevereiro), depois semanas e dias."""
+    years, months, weeks, days = duration
+    total = day.month - 1 + months + 12 * years
+    year, month = day.year + total // 12, total % 12 + 1
+    if year > datetime.MAXYEAR:
+        raise OverflowError("a data passa do ano 9999")
+    last = calendar.monthrange(year, month)[1]
+    return datetime.date(year, month, min(day.day, last)) + datetime.timedelta(weeks=weeks, days=days)
+
+
+def _as_date(value):
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    if isinstance(value, datetime.date):
+        return value
+    return iso_date(value)
+
+
+def due_report(sources, as_of):
+    """O relatório de vencimento (v4.8), fora do veredito: {as_of, due, unstamped, event, broken}. due: o nó com
+    reverify_every válido cujo verified_at + a cadência é igual ou anterior a as_of; unstamped: cadência válida sem
+    verified_at legível; event: só reverify_on; broken: o arquivo que não parseia. A cadência fora da forma não entra
+    (o SHOULD já alerta form.pattern.node.reverify_every)."""
+    out = {"as_of": as_of.isoformat(), "due": [], "unstamped": [], "event": [], "broken": []}
+    for name, text in sources:
+        _, doc, err = parse_v1(text)
+        if err or not isinstance(doc, dict):
+            out["broken"].append({"file": name, "error": str(err or "a raiz não é um mapa")})
+            continue
+        nodes = doc.get("nodes") if isinstance(doc.get("nodes"), list) else []
+        for n in nodes:
+            if not isinstance(n, dict) or n.get("id") is None:
+                continue
+            nid, every = str(n["id"]), n.get("reverify_every")
+            duration = parse_duration(every)
+            if duration is None:
+                if isinstance(n.get("reverify_on"), str) and n["reverify_on"].strip():
+                    out["event"].append({"file": name, "id": nid, "reverify_on": n["reverify_on"]})
+                continue
+            stamped = _as_date(n.get("verified_at"))
+            if stamped is None:
+                out["unstamped"].append({"file": name, "id": nid, "reverify_every": every})
+                continue
+            try:
+                due_on = add_duration(stamped, duration)
+            except (OverflowError, ValueError):
+                continue  # vence depois do ano 9999: não vence na data pedida
+            if due_on <= as_of:
+                out["due"].append({"file": name, "id": nid, "verified_at": stamped.isoformat(), "reverify_every": every,
+                                   "due_on": due_on.isoformat(), "days_late": (as_of - due_on).days,
+                                   "reverify_on": n.get("reverify_on") if isinstance(n.get("reverify_on"), str) else None})
+    return out
+
+
+def due_lines(rep):
+    lines = []
+    for d in rep["due"]:
+        lines.append(f"VENCIDO      {d['file']}  {d['id']}: verificado em {d['verified_at']}, a cada {d['reverify_every']},"
+                     f" venceu em {d['due_on']}" + (f" ({d['days_late']} dias)" if d["days_late"] else " (hoje)"))
+    for d in rep["unstamped"]:
+        lines.append(f"SEM CARIMBO  {d['file']}  {d['id']}: cadência {d['reverify_every']} sem verified_at")
+    for d in rep["event"]:
+        lines.append(f"POR EVENTO   {d['file']}  {d['id']}: {d['reverify_on']}")
+    for d in rep["broken"]:
+        lines.append(f"NÃO LIDO     {d['file']}: {d['error']}")
+    lines.append(f"· em {rep['as_of']}: {len(rep['due'])} vencido(s), {len(rep['unstamped'])} sem carimbo,"
+                 f" {len(rep['event'])} por evento; o relatório não muda o veredito")
+    return lines
 
 
 def summarize(results):
@@ -1397,7 +1623,9 @@ def main(argv=None):
     ap.add_argument("--spike", action="store_true", help="saída humana e rc do spike (check/classify)")
     ap.add_argument("--where", action="store_true", help="lista cada ocorrência com o nó ou a aresta em que ela sai")
     ap.add_argument("--corpus", metavar="DIR", help="raiz do repo: confere a ponta externa das external_edges contra os"
-                                                     " .kg.yaml sob DIR (sem ela, só a forma e a ponta local)")
+                                                     " .kg.yaml e .kg.json sob DIR (sem ela, só a forma e a ponta"
+                                                     " local)")
+    ap.add_argument("--due", metavar="AAAA-MM-DD", help="o relatório de vencimento na data (v4.8), no lugar do veredito")
     ap.add_argument("--format", choices=("human", "json"), default="human",
                     help="json: o veredito estruturado kg-ssot.verdict/1 (spec/verdict.schema.json) em stdout")
     ap.add_argument("--limit", type=int, default=50, help="no --format json, ocorrências por arquivo (default 50)")
@@ -1417,6 +1645,24 @@ def main(argv=None):
     if args.where and args.spike:
         say("ENTRADA QUEBRADA  --where não vale com --spike (o spike tem saída própria, congelada)")
         return 2
+    if args.due is not None:
+        if args.spike or args.json or args.where or args.corpus:
+            say("ENTRADA QUEBRADA  --due não se combina com --spike, --json, --where nem --corpus")
+            return 2
+        as_of = iso_date(args.due)
+        if as_of is None:
+            say(f"ENTRADA QUEBRADA  --due {args.due!r}: a data é AAAA-MM-DD")
+            return 2
+        try:
+            rep = due_report(list(load_sources(args)), as_of)
+        except (OSError, ValueError, UnicodeDecodeError, subprocess.CalledProcessError) as exc:
+            say(f"ENTRADA QUEBRADA  {exc}")
+            return 2
+        if args.format == "json":
+            print(json.dumps({"schema_version": "kg-ssot.due/1", **rep}, ensure_ascii=False, indent=1))
+        else:
+            print("\n".join(due_lines(rep)))
+        return 0
     should_path = args.should_schema or should_for(args.schema)
     try:
         with open(args.schema, encoding="utf-8") as fh:
@@ -1447,7 +1693,7 @@ def main(argv=None):
             continue
         must = code_counts(text, validator, corpus)
         unchecked += corpus is None and uses_external(text)
-        should = warning_counts(text, validator, should_v) if should_v is not None else collections.Counter()
+        should = warning_counts(text, validator, should_v, corpus) if should_v is not None else collections.Counter()
         failed += bool(must)
         warned += bool(should)
         lines += report(name, must, should, isinstance(text, JsonText))
