@@ -5,6 +5,18 @@
 #
 # Uso:
 #   trust-topology-check.sh --from <id> --to <id> --action relay|advise|correct [--repo <path>] [--dry-run]
+#   trust-topology-check.sh --check-log-dest   # julga o destino A2A_TRUST_LOG (motivo no stdout se inseguro)
+#   trust-topology-check.sh --ensure-log       # julga e, se ausente ou vazio, cria o destino com cabeçalho, 0600
+#
+# DESTINO DO LOG (2026-10-22): A2A_TRUST_LOG=<arquivo absoluto> grava o log FORA do repo. Sem ela, o log segue
+# em <repo>/docs/evolution/trust-log.md (o comportamento de sempre). Medido em 2026-10-22: o onion-bridge roda
+# o gate dentro do CLONE SERVIDO do core, e a trilha de auditoria caía num arquivo RASTREADO desse clone, que
+# cada update-bridge guardava num stash (7 stashes, 16 eventos que nunca chegaram ao repo). O destino é julgado
+# FAIL-CLOSED: caminho relativo, não normalizado ou com caractere de controle; diretório ausente, symlink em
+# qualquer componente, dono diferente de quem roda, diretório gravável por grupo/outros, ancestral de outro dono
+# (que não o root) ou gravável por outros sem sticky; arquivo com escrita de grupo ou qualquer bit de outros,
+# não gravável ou com mais de um link → recusa (exit 2 no relay; rc 1 no --check-log-dest), sem gravar no lugar errado em silêncio.
+# A2A_TRUST_LOG vazia vale como ausente (o idioma ${X:-} dos outros env do transporte).
 #
 # Exit:
 #   0 = autorizado
@@ -22,6 +34,7 @@ FROM_ID=""
 TO_ID=""
 ACTION=""
 DRY_RUN=0
+LOG_MODE=""
 REPO="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
 while [[ $# -gt 0 ]]; do
@@ -31,6 +44,8 @@ while [[ $# -gt 0 ]]; do
     --action)  ACTION="$2";   shift 2 ;;
     --repo)    REPO="$2";     shift 2 ;;
     --dry-run) DRY_RUN=1;     shift ;;
+    --check-log-dest) LOG_MODE=check;  shift ;;
+    --ensure-log)     LOG_MODE=ensure; shift ;;
     *)
       echo "ERROR: argumento desconhecido: $1" >&2
       echo "Uso: $0 --from <id> --to <id> --action relay|advise|correct [--repo <path>] [--dry-run]" >&2
@@ -38,6 +53,74 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# --- Destino do log: julgamento fail-closed de A2A_TRUST_LOG (ver cabeçalho) ---
+TRUST_LOG_DEST="${A2A_TRUST_LOG:-}"
+_mode_uid() {  # <path> → "<modo octal> <uid> <nlink>" (GNU stat; o -f é o do BSD/macOS)
+  stat -c '%a %u %h' -- "$1" 2>/dev/null || stat -f '%Lp %u %l' -- "$1" 2>/dev/null
+}
+# imprime o motivo e devolve 1 quando o destino é inseguro; 0 quando serve. Ordem: forma do texto → o diretório
+# (literal, físico, do dono, fechado) → os ancestrais (do dono ou do root, sem escrita alheia salvo sticky) → o
+# arquivo, se existir (regular, do dono, sem bit de outros, gravável, um link só). Refutador de 2026-10-22: o
+# symlink num componente do MEIO e o ancestral 777 passavam (o -L só olhava as duas pontas).
+trust_log_dest_problem() {
+  local p="$1" d a m u n me
+  case "$p" in /*) ;; *) echo "relative"; return 1 ;; esac
+  case "$p" in *[[:cntrl:]]*) echo "control-char"; return 1 ;; esac
+  case "$p/" in */../*|*/./*|*//*) echo "not-normalized"; return 1 ;; esac
+  d="$(dirname "$p")"
+  if [ -L "$p" ]; then echo "symlink"; return 1; fi
+  if [ -L "$d" ]; then echo "dir-symlink"; return 1; fi
+  if [ ! -d "$d" ]; then echo "dir-missing"; return 1; fi
+  if [ "$(cd -P -- "$d" 2>/dev/null && pwd -P)" != "$d" ]; then echo "dir-path-has-symlink"; return 1; fi
+  me="$(id -u)"
+  read -r m u n <<<"$(_mode_uid "$d")" || true
+  case "${m:-}" in ''|*[!0-7]*) echo "dir-unstattable"; return 1 ;; esac
+  if [ "${u:-}" != "$me" ]; then echo "dir-not-owned"; return 1; fi
+  if (( (8#$m & 8#022) != 0 )); then echo "dir-writable-by-others"; return 1; fi
+  a="$d"
+  while [ "$a" != "/" ]; do
+    a="$(dirname "$a")"
+    read -r m u n <<<"$(_mode_uid "$a")" || true
+    case "${m:-}" in ''|*[!0-7]*) echo "ancestor-unstattable"; return 1 ;; esac
+    if [ "${u:-}" != "$me" ] && [ "${u:-}" != "0" ]; then echo "ancestor-not-owned"; return 1; fi
+    if (( (8#$m & 8#022) != 0 && (8#$m & 8#1000) == 0 )); then echo "ancestor-writable-by-others"; return 1; fi
+  done
+  if [ -e "$p" ]; then
+    if [ ! -f "$p" ]; then echo "not-regular"; return 1; fi
+    read -r m u n <<<"$(_mode_uid "$p")" || true
+    case "${m:-}" in ''|*[!0-7]*) echo "unstattable"; return 1 ;; esac
+    if [ "${u:-}" != "$me" ]; then echo "not-owned"; return 1; fi
+    if (( (8#$m & 8#027) != 0 )); then echo "file-mode-unsafe"; return 1; fi
+    if [ "${n:-}" != "1" ]; then echo "hardlinked"; return 1; fi
+    if [ ! -w "$p" ]; then echo "not-writable"; return 1; fi
+  fi
+  return 0
+}
+write_log_header() {  # <arquivo> — o cabeçalho tem UM dono (este script); o a2a-verify pede pelo --ensure-log
+  cat > "$1" <<EOF
+# Log de Tentativas de Relay — Onion Trust Topology
+# Gerado por trust-topology-check.sh (RFC-0003)
+# Toda tentativa é registrada — autorizada ou bloqueada.
+
+| Timestamp | FROM | TO | ACTION | STATUS | Razão |
+|---|---|---|---|---|---|
+EOF
+}
+if [ -n "$LOG_MODE" ]; then
+  [ -n "$TRUST_LOG_DEST" ] || { echo "unset"; exit 1; }
+  why="$(trust_log_dest_problem "$TRUST_LOG_DEST")" || { echo "$why"; exit 1; }
+  if [ "$LOG_MODE" = "ensure" ] && [ ! -s "$TRUST_LOG_DEST" ]; then
+    ( umask 077; write_log_header "$TRUST_LOG_DEST" ) || { echo "create-failed"; exit 1; }
+  fi
+  echo "ok"; exit 0
+fi
+if [ -n "$TRUST_LOG_DEST" ]; then
+  if ! why="$(trust_log_dest_problem "$TRUST_LOG_DEST")"; then
+    echo "ERROR: A2A_TRUST_LOG inseguro (${why}): ${TRUST_LOG_DEST} — nada gravado" >&2
+    exit 2
+  fi
+fi
 
 # --- Validação de argumentos obrigatórios ---
 if [ -z "$FROM_ID" ] || [ -z "$TO_ID" ] || [ -z "$ACTION" ]; then
@@ -55,7 +138,7 @@ esac
 
 # --- Configuração de paths ---
 MEMBERS="$REPO/docs/evolution/federation/members.yaml"
-TRUST_LOG="$REPO/docs/evolution/trust-log.md"
+TRUST_LOG="${TRUST_LOG_DEST:-$REPO/docs/evolution/trust-log.md}"
 
 if [ ! -f "$MEMBERS" ]; then
   echo "ERROR: members.yaml não encontrado em $MEMBERS" >&2
@@ -148,20 +231,21 @@ log_attempt() {
     return 0
   fi
 
-  mkdir -p "$(dirname "$TRUST_LOG")"
-
-  if [ ! -f "$TRUST_LOG" ]; then
-    cat > "$TRUST_LOG" <<EOF
-# Log de Tentativas de Relay — Onion Trust Topology
-# Gerado por trust-topology-check.sh (RFC-0003)
-# Toda tentativa é registrada — autorizada ou bloqueada.
-
-| Timestamp | FROM | TO | ACTION | STATUS | Razão |
-|---|---|---|---|---|---|
-EOF
+  if [ -n "$TRUST_LOG_DEST" ]; then
+    # destino explícito: o diretório já foi julgado (existe, é do dono, não é gravável por outros); nunca
+    # mkdir -p aqui, e o arquivo nasce 0600
+    [ -s "$TRUST_LOG" ] || ( umask 077; write_log_header "$TRUST_LOG" )
+  else
+    mkdir -p "$(dirname "$TRUST_LOG")"
+    [ -f "$TRUST_LOG" ] || write_log_header "$TRUST_LOG"
   fi
 
-  echo "| ${TIMESTAMP} | ${FROM_ID} | ${TO_ID} | ${ACTION} | ${STATUS} | ${REASON} |" >> "$TRUST_LOG"
+  # falha ao gravar é erro de CONFIGURAÇÃO (exit 2), nunca o 1 de "bloqueado" que o set -e daria a um relay
+  # AUTORIZADO (refutador de 2026-10-22: arquivo 0400 aceito pelo juiz saía rc 1)
+  if ! echo "| ${TIMESTAMP} | ${FROM_ID} | ${TO_ID} | ${ACTION} | ${STATUS} | ${REASON} |" >> "$TRUST_LOG"; then
+    echo "ERROR: não gravei a tentativa em ${TRUST_LOG}" >&2
+    exit 2
+  fi
 }
 
 # --- Lógica principal de autorização ---

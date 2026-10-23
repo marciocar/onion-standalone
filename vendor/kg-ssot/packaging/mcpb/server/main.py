@@ -25,9 +25,11 @@ def backend_for(root):
     raiz não abrir, o kg_mcp com --store-optional sobe sem armazém e diz o porquê)."""
     try:
         kg_store.open_store("versioned", root, init=True)
-    except kg_store.StoreError as exc:
-        if "repo git" in str(exc) and shutil.which("git"):
+    except kg_store.InsideGitWorktree:  # pelo tipo, não pela frase, que segue a língua do ambiente
+        if shutil.which("git"):
             return "git"
+    except kg_store.StoreError:
+        pass
     except (OSError, ValueError, RuntimeError):  # o kg_mcp abre de novo e diz o motivo ao modelo
         pass
     return "versioned"
@@ -35,13 +37,14 @@ def backend_for(root):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--root", required=True, help="o diretório do armazém de grafos")
-    ap.add_argument("--read-only", default="false", help="true deixa o servidor sem kg_write nem kg_delete")
+    ap.add_argument("--root", required=True, help="the directory of the graph store")
+    ap.add_argument("--read-only", default="false", help="true leaves the server without kg_write and kg_delete")
     a = ap.parse_args(argv)
     read_only = a.read_only.strip().lower() in ("true", "1", "yes", "sim")
     if "${" in a.root:  # o host não expandiu a variável: um armazém ali nasceria dentro da pasta da extensão
-        reason = (f"o host passou a raiz {a.root!r} com a variável sem expandir; escolha a pasta do armazém nas "
-                  "configurações da extensão")
+        # vai ao modelo (protocolo MCP): em inglês, como o resto do servidor desde a 4.18.0
+        reason = (f"the host passed the root {a.root!r} with the variable unexpanded; choose the store folder in the "
+                  "extension settings")
         print(f"kg-ssot: {reason}", file=sys.stderr)
         kg_mcp.serve_stdio(kg_mcp.Server(None, read_only=read_only, store_error=reason))
         return 0

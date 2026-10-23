@@ -21,12 +21,13 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HERE = pathlib.Path(__file__).resolve().parent
-# os módulos que viajam no pacote: o leitor, a suíte, o gate, o armazém, o servidor MCP e o exportador PROV-O.
+# os módulos que viajam no pacote: o leitor, a suíte, o gate, o armazém, a consulta, o diff, o vocabulário, o critério pré-registrado, o servidor MCP e o exportador
+# PROV-O.
 # O kg_vendor.py fica de fora: ele serve ao vendor por pin, que é outro canal.
-MODULES = ["kg_validate", "kg_conformance", "kg_gate", "kg_store", "kg_mcp", "kg_prov_export"]
+MODULES = ["kg_validate", "kg_conformance", "kg_gate", "kg_store", "kg_query", "kg_diff", "kg_vocab", "kg_criterion", "kg_audit", "kg_mcp", "kg_prov_export"]
 # kg-ssot é o servidor MCP (o mesmo kg-mcp): o MCP Registry e os clientes rodam `uvx kg-ssot` pelo nome do pacote
 SCRIPTS = {"kg-ssot": "kg_mcp", "kg-validate": "kg_validate", "kg-conformance": "kg_conformance", "kg-gate": "kg_gate",
-           "kg-store": "kg_store", "kg-mcp": "kg_mcp", "kg-prov-export": "kg_prov_export"}
+           "kg-store": "kg_store", "kg-query": "kg_query", "kg-diff": "kg_diff", "kg-vocab": "kg_vocab", "kg-criterion": "kg_criterion", "kg-audit": "kg_audit", "kg-mcp": "kg_mcp", "kg-prov-export": "kg_prov_export"}
 MIRROR = "https://github.com/marciocar/kg-ssot"
 
 PYPROJECT = """[build-system]
@@ -36,7 +37,7 @@ build-backend = "hatchling.build"
 [project]
 name = "kg-ssot"
 version = "{version}"
-description = "Contrato formal do grafo de conhecimento verificável (.kg.yaml e .kg.json): leitor de referência, suíte de conformidade, gate por grafo, armazém e servidor MCP."
+description = "Verifiable knowledge graphs in plain text (.kg.yaml and .kg.json): the formal contract, reference reader, conformance suite, per-graph CI gate, gated store and MCP server."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -47,6 +48,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
+    "Natural Language :: English",
     "Natural Language :: Portuguese (Brazilian)",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
@@ -77,11 +79,12 @@ packages = ["src/kg_ssot"]
 include = ["src/kg_ssot", "README.md", "LICENSE", "NOTICE", "pyproject.toml"]
 """
 
-INIT = '''"""KG-SSOT: o contrato formal do grafo de conhecimento verificável.
+INIT = '''"""KG-SSOT: the formal contract of the verifiable knowledge graph.
 
-Os módulos são os do kit de adoção (kg_validate, kg_conformance, kg_gate, kg_store, kg_mcp, kg_prov_export), e o
-contrato, a suíte e o schema do veredito ficam em kg_ssot/spec. Os comandos kg-validate, kg-conformance, kg-gate,
-kg-store, kg-mcp e kg-prov-export são os mesmos scripts do kit. Manual: {mirror}/tree/main/docs/manual
+The modules are the adoption kit's (kg_validate, kg_conformance, kg_gate, kg_store, kg_query, kg_diff, kg_vocab,
+kg_criterion, kg_audit, kg_mcp, kg_prov_export), and the contract, the suite and the output schemas live in
+kg_ssot/spec. The commands kg-validate, kg-conformance, kg-gate, kg-store, kg-query, kg-diff, kg-vocab, kg-criterion,
+kg-audit, kg-mcp and kg-prov-export are the same scripts as the kit's. Manual: {mirror}/tree/main/docs/manual
 """
 __version__ = "{version}"
 '''
@@ -107,8 +110,10 @@ def stage(dest):
     version = rel["version"]
     pkg = dest / "src" / "kg_ssot"
     pkg.mkdir(parents=True)
-    for m in MODULES:
+    for m in MODULES + ["kg_i18n"]:
         shutil.copy2(ROOT / "tools" / f"{m}.py", pkg / f"{m}.py")
+    # o catálogo da tradução, ao lado do módulo (o kg_i18n procura em kg_ssot/locale/)
+    shutil.copytree(ROOT / "locale", pkg / "locale", ignore=shutil.ignore_patterns("*.mo"))
     # o spec/ que a release leva (arquivos e diretórios listados), e nada além dele
     spec_entries = [e for e in rel["files"] if e.startswith("spec/")]
     if not spec_entries:

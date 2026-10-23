@@ -48,6 +48,7 @@ Uso:
 import argparse
 import bisect
 import calendar
+import ast
 import collections
 import datetime
 import functools
@@ -57,12 +58,22 @@ import math
 import pathlib
 import subprocess
 import sys
+import threading
 
 import re
 
 import yaml
 from jsonschema import Draft202012Validator, FormatChecker, validators
 from jsonschema.exceptions import ValidationError
+
+if __package__:  # no pacote kg_ssot
+    from . import kg_i18n
+else:  # como script, no repo e no vendor
+    # sem .pyc do kg_i18n dentro do vendor, que o kg_vendor check acusaria como arquivo a mais
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    import kg_i18n  # noqa: E402
+_ = kg_i18n._
 
 
 def _home():
@@ -79,7 +90,7 @@ CONTRACT_SHOULD = _ROOT / "spec" / "kg-contract-v4.should.schema.json"
 # A versão do contrato que este leitor julga. Uma regra que só o leitor vê (o perfil YAML, a quebra de linha) não muda
 # os bytes dos schemas sozinha: a higiene cobra que a descrição de um deles declare "No v<versão>", e é isso que
 # move o sha256 que o gate guarda como identidade.
-CONTRACT_VERSION = "4.9"
+CONTRACT_VERSION = "4.13"
 
 
 class Yaml12BoolLoader(yaml.SafeLoader):
@@ -469,14 +480,28 @@ def _located(doc, key):
     return [(x, item_place(key, i, x)) for i, x in enumerate(raw) if isinstance(x, dict)] if isinstance(raw, list) else []
 
 
-def index_texts(items):
-    """[(caminho, texto)] → {caminho: {ids}}: o corpus montado de textos já lidos (por exemplo, por git show)."""
+def index_texts(items, cache=None):
+    """[(caminho, texto)] → {caminho: {ids}}: o corpus montado de textos já lidos (por exemplo, por git show).
+    cache (JudgeCache): os ids de um texto já visto vêm dele, sem parse."""
     index = {}
     for name, text in items:
-        _, doc, _ = parse_v1(text if isinstance(text, JsonText) else as_source(name, text))  # o .kg.json pelo perfil JSON
-        nodes = doc.get("nodes") if doc and isinstance(doc.get("nodes"), list) else []
-        index[name] = {str(n["id"]) for n in nodes if isinstance(n, dict) and n.get("id") is not None}
+        source = text if isinstance(text, JsonText) else as_source(name, text)  # o .kg.json pelo perfil JSON
+        index[name] = set((cache.facts(source) if cache is not None else text_facts(source))[0])
     return index
+
+
+def text_facts(text):
+    """(ids, pontas externas) de um texto já na forma do leitor (as_source): os ids dos nós, como o corpus os indexa,
+    e as pontas externas bem formadas das external_edges, [(caminho, id)], que são tudo o que o veredito lê do corpus
+    (integrity_located). Texto que não parseia não tem nenhum dos dois."""
+    _, doc, err = parse_v1(text)
+    if not doc or err:
+        return frozenset(), ()
+    nodes = doc.get("nodes") if isinstance(doc.get("nodes"), list) else []
+    ids = frozenset(str(n["id"]) for n in nodes if isinstance(n, dict) and n.get("id") is not None)
+    ends = {tuple(ref.rsplit("#", 1)) for e, _ in _located(doc, "external_edges") for end in ("from", "to")
+            for ref in (e.get(end),) if isinstance(ref, str) and "#" in ref and is_external(ref)}
+    return ids, tuple(sorted(ends))
 
 
 def external_info(text):
@@ -503,6 +528,36 @@ def uses_external(text):
     return external_info(text)[0]
 
 
+VENDOR_STAMP = ".kg-ssot-version"  # o carimbo que o kg_vendor.py grava na raiz do vendor
+
+
+def vendor_dirs(paths):
+    """As pastas do vendor do KG-SSOT entre caminhos relativos (com /): cada pasta abaixo da raiz que tem o carimbo
+    VENDOR_STAMP, com a barra final. É a regra pública desde a 4.20.0: uma pasta com o carimbo é o vendor, e nada dentro
+    dela é grafo do adotante, onde quer que ela esteja. O carimbo na própria raiz não conta: quem lê uma raiz que é o
+    vendor quer ler os grafos dela, e o corpus não fica vazio em silêncio."""
+    return tuple(sorted({p[: -len(VENDOR_STAMP)] for p in paths if p.endswith("/" + VENDOR_STAMP)}))
+
+
+def in_vendor(name, dirs):
+    """O caminho relativo name está dentro de uma das pastas de vendor_dirs()?"""
+    return any(name.startswith(d) for d in dirs)
+
+
+def find_vendor_dirs(root):
+    """vendor_dirs() de uma raiz: os carimbos rastreados, se root está num repo git; senão, os do disco sob root. A lista
+    do git vem sem pathspec e é filtrada aqui, como no gate: GIT_GLOB_PATHSPECS e GIT_LITERAL_PATHSPECS mudariam o que
+    um pathspec casa."""
+    out = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True)
+    if out.returncode == 0:
+        paths = [n for n in out.stdout.decode("utf-8", "surrogateescape").split("\0") if n]
+    else:
+        base = pathlib.Path(root)
+        paths = [p.relative_to(base).as_posix() for p in base.rglob(VENDOR_STAMP)
+                 if ".git" not in p.relative_to(base).parts]
+    return vendor_dirs(paths)
+
+
 def corpus_index(root, files=None):
     """O corpus para conferir a ponta externa (v4.3): {caminho relativo a root: {ids}}. files: os caminhos a ler (o gate
     passa os grafos rastreados); sem files, os .kg.yaml e .kg.json rastreados se root é repo git, senão todo grafo sob
@@ -510,7 +565,7 @@ def corpus_index(root, files=None):
     Arquivo ilegível entra sem ids. root que não é diretório é entrada quebrada (ValueError)."""
     root = pathlib.Path(root)
     if not root.is_dir():
-        raise ValueError(f"corpus {root} não é um diretório")
+        raise ValueError(_("corpus {root} is not a directory").format(root=root))
     if files is None:  # num repo git, os rastreados (como o gate); fora dele, todo arquivo regular sob root
         out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", "*.kg.yaml", "*.kg.json"],
                              capture_output=True)
@@ -629,6 +684,21 @@ def inner_names(path):
     return [p for p in rest if not isinstance(p, int)]
 
 
+_REQUIRED_MESSAGE = re.compile(r"^('(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\") is a required property$", re.S)
+
+
+def _required_name(message):
+    """O campo de um erro required do jsonschema, tirado da mensagem (o repr do nome); None quando ela não tem a forma."""
+    m = _REQUIRED_MESSAGE.match(message)
+    if not m:
+        return None
+    try:
+        name = ast.literal_eval(m.group(1))
+    except (ValueError, SyntaxError):
+        return None
+    return name if isinstance(name, str) else None
+
+
 def form_codes(error):
     """Erro do jsonschema -> códigos da suíte de conformidade: form.<tipo>.<escopo>.<campo>.
 
@@ -648,16 +718,25 @@ def form_codes(error):
     kind = FORM_TYPE.get(error.validator, error.validator)
     if error.validator == "not" and isinstance(error.validator_value, dict) and "pattern" in error.validator_value:
         kind = "pattern"  # o v4 diz "não pode casar com placeholder" por not+pattern, sem lookahead (portável a RE2)
+    if error.validator == "not" and isinstance(error.validator_value, dict) and "required" in error.validator_value:
+        kind = "exclusive"  # v4.12: campos que se excluem (ref e text no x_criterion), por not+required
     if error.validator in ("additionalProperties", "required"):
         # O erro é do OBJETO (o topo, o meta, um nó, uma aresta ou um objeto dentro deles).
         if error.validator == "required":
-            return [f"form.{kind}.{scope}.{'.'.join(prefix + [p])}" for p in error.validator_value if p not in error.instance]
+            # o jsonschema dá um erro por campo ausente, com o nome só na mensagem ('x' is a required property): listar
+            # todos os ausentes em cada erro contava N vezes cada um, num objeto com N campos faltando
+            missing = [p for p in error.validator_value if p not in error.instance]
+            named = _required_name(error.message)
+            return [f"form.{kind}.{scope}.{'.'.join(prefix + [p])}" for p in ([named] if named in missing else missing)]
         extra = sorted(set(error.instance) - set(error.schema.get("properties", {})))
         return [f"form.{kind}.{scope}.{'.'.join(prefix + [k])}" for k in extra]
     # O erro é de um VALOR. Um item de lista que não é mapa (nodes: [a]) vira o campo `item`.
     scope = scope_of(path) if len(path) >= 2 else "top"
     if path and isinstance(path[-1], int):
-        lead = [p for p in path[:-1] if not isinstance(p, int)] if scope == "top" else []
+        # Num item de lista DENTRO do nó (x_term.labels, v4.11), o código leva o caminho até a lista; o item da lista
+        # nodes (ou edges) segue form.<tipo>.node.item, porque o caminho dentro do escopo é vazio.
+        lead = ([p for p in path[:-1] if not isinstance(p, int)] if scope == "top"
+                else inner_names(path[:-1]) if len(path) > 2 else [])
         return [f"form.{kind}.{scope}.{'.'.join(lead + ['item'])}"]
     names = inner_names(path) if scope != "top" else [p for p in path if not isinstance(p, int)]
     return [f"form.{kind}.{scope}.{'.'.join(names) if names else 'root'}"]
@@ -729,6 +808,69 @@ def _expands_beyond(value, budget):
     return False
 
 
+
+class _AnchorRedefLoader(Yaml12CoreLoader):
+    """Só para ordenar os erros (v4.10): a âncora repetida e o alias sem âncora seguem recusados pelo perfil, mas a chave
+    repetida que vem antes deles no documento dá parse.duplicate-key, como no leitor JS, que confere a chave antes de
+    descer no valor dela. Aqui a âncora pode ser redefinida e o alias sem âncora vale null, só para achar a chave."""
+
+    def compose_node(self, parent, index):
+        event = self.peek_event()
+        if isinstance(event, yaml.AliasEvent) and event.anchor not in self.anchors:
+            m = event.end_mark
+            if m.buffer[m.pointer:m.pointer + 1] == ":":  # *x: é um alias de nome "x:" no YAML 1.2 (erro de sintaxe no JS)
+                raise yaml.composer.ComposerError(None, None, "alias seguido de :", event.start_mark)
+            self.get_event()
+            return yaml.ScalarNode("tag:yaml.org,2002:null", "", event.start_mark, event.end_mark)
+        anchor = getattr(event, "anchor", None)
+        if anchor is not None and not isinstance(event, yaml.AliasEvent) and anchor in self.anchors:
+            del self.anchors[anchor]
+        return super().compose_node(parent, index)
+
+
+def _duplicate_key_first(text, exc):
+    """A âncora repetida ou o alias sem âncora (exc) tem antes dele, na ordem do documento, uma chave repetida?"""
+    why = f"{exc.context} {exc.problem}"
+    if ("duplicate anchor" not in why and "undefined alias" not in why) or exc.problem_mark is None:
+        return False
+    loader = _AnchorRedefLoader(text)
+    try:
+        roots = []
+        while loader.check_node():  # o stream inteiro antes: o erro de sintaxe em qualquer documento vence, como no JS
+            roots.append(loader.get_node())
+        for root in roots:
+            idx = _first_dup(loader, root, set())
+            if idx is not None:
+                return idx < exc.problem_mark.index
+    except Exception:  # noqa: BLE001 — qualquer outro erro deixa o parse.yaml-error da âncora
+        return False
+    return False
+
+
+def _first_dup(loader, node, seen):
+    """O índice da primeira chave repetida dentro de node, na ordem do documento; None se não há."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if id(n) in seen:
+            continue
+        seen.add(id(n))
+        if isinstance(n, yaml.SequenceNode):
+            stack.extend(reversed(n.value))
+        elif isinstance(n, yaml.MappingNode):
+            keys = set()
+            for key_node, value_node in n.value:
+                if not isinstance(key_node, yaml.ScalarNode):
+                    raise ValueError("chave composta")
+                jk = json_key(loader.construct_object(key_node, deep=True))
+                if jk in keys:
+                    return key_node.start_mark.index
+                keys.add(jk)
+                sub = _first_dup(loader, value_node, seen)
+                if sub is not None:
+                    return sub
+    return None
+
 def loader_for(text):
     return Yaml12CoreLoader if FAST_LOADER is Yaml12CoreLoader or RISKY.search(text) else FAST_LOADER
 
@@ -776,6 +918,8 @@ def _parse(text, loader):
         raw = list(yaml.load_all(text, Loader=loader))
     except DuplicateKeyError:
         return None, None, "parse.duplicate-key", None
+    except yaml.composer.ComposerError as exc:  # âncora repetida ou alias sem âncora depois de chave repetida (v4.10)
+        return None, None, "parse.duplicate-key" if _duplicate_key_first(text, exc) else "parse.yaml-error", None
     except (yaml.YAMLError, UnicodeEncodeError, RecursionError):
         # UnicodeEncodeError: texto com surrogate que o parser em C recusa; RecursionError: aninhamento além da pilha
         return None, None, "parse.yaml-error", None
@@ -998,6 +1142,7 @@ def coherence_located(doc, corpus=None):
       done já está respondida): o grafo afirma e refuta a mesma coisa. É a contradição do radar, como aviso no v4.4.
       Desde o v4.5, com o corpus (corpus_index), conta também a REFUTES que chega de outro grafo pelas external_edges
       (from externo, to local); sem ele, a ponta externa não foi conferida e a aresta não conta.
+    - desde o v4.12, os avisos do critério pré-registrado entre nós do mesmo grafo (criterion_located).
     Um campo de tipo errado (from ou id em lista ou mapa) já reprova no MUST: aqui ele é ignorado, nunca quebra.
     """
     out = []
@@ -1032,6 +1177,140 @@ def coherence_located(doc, corpus=None):
         if (isinstance(n.get("id"), str) and n["id"] in refuted and status not in ("superseded", "refuted")
                 and not (status == "done" and n.get("node_type") == "question")):
             out.append(("integrity.refutes-unreconciled", place))
+    return out + criterion_located(doc)
+
+
+# A data ou a data-hora RFC 3339 dos perfis do critério (v4.12), a mesma regex do schema SHOULD.
+STAMP = re.compile(r"([0-9]{4})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])"
+                   r"(?:[Tt]([01][0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9]|60)(?:\.([0-9]+))?([Zz]|([+-])([01][0-9]|2[0-3]):([0-5][0-9])))?")
+
+
+def _days(y, m, d):
+    """Os dias desde 1970-01-01 no calendário gregoriano proléptico (days_from_civil), só com inteiros."""
+    y -= m <= 2
+    era = (y if y >= 0 else y - 399) // 400
+    yoe = y - era * 400
+    doy = (153 * (m + (-3 if m > 2 else 9)) + 2) // 5 + d - 1
+    return era * 146097 + yoe * 365 + yoe // 4 - yoe // 100 + doy - 719468
+
+
+def _stamp(value):
+    """O match de STAMP de uma data ou data-hora com o dia que existe no calendário; None fora da forma ou no dia que
+    não existe (2026-02-30), que não é comparado."""
+    mt = STAMP.fullmatch(value) if isinstance(value, str) else None
+    if not mt:
+        return None
+    y, m, d = int(mt.group(1)), int(mt.group(2)), int(mt.group(3))
+    leap = y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)
+    return mt if d <= (31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)[m - 1] else None
+
+
+def _instant(mt):
+    """(segundos desde 1970 em UTC, fração em dígitos sem zero à direita) de uma data-hora de STAMP."""
+    y, mo, d, h, mi, sec = (int(mt.group(i)) for i in range(1, 7))
+    off = 0 if mt.group(9) is None else (1 if mt.group(9) == "+" else -1) * (int(mt.group(10)) * 60 + int(mt.group(11)))
+    return _days(y, mo, d) * 86400 + h * 3600 + mi * 60 + sec - off * 60, (mt.group(7) or "").rstrip("0")
+
+
+def measured_order(measured, registered):
+    """"post-hoc", "unknown" ou None entre o measured_at de um resultado e o registered_at da versão que ele cita.
+
+    - As duas com hora: o instante em UTC (a fração como dígitos, sem float); antes do registro é post-hoc.
+    - As duas só data: o dia escrito; antes é post-hoc, o mesmo dia é indecidível.
+    - Uma só data: o fuso dela é desconhecido (até ±14 h), então a data-hora vale pelo dia em UTC e a diferença de até
+      um dia é indecidível; post-hoc só a dois dias ou mais.
+    Fora da forma, ou num dia que não existe, nada é comparado (None)."""
+    mm, mr = _stamp(measured), _stamp(registered)
+    if not mm or not mr:
+        return None
+    if mm.group(4) is not None and mr.group(4) is not None:
+        im, ir = _instant(mm), _instant(mr)
+        if im[0] != ir[0]:
+            return "post-hoc" if im[0] < ir[0] else None
+        fm, fr = im[1].ljust(len(ir[1]), "0"), ir[1].ljust(len(im[1]), "0")
+        return "post-hoc" if fm < fr else None
+
+    def day(mt):
+        return _instant(mt)[0] // 86400 if mt.group(4) is not None else _days(*(int(mt.group(i)) for i in (1, 2, 3)))
+    gap = day(mm) - day(mr)
+    if mm.group(4) is None and mr.group(4) is None:
+        return "post-hoc" if gap < 0 else "unknown" if gap == 0 else None
+    return "post-hoc" if gap <= -2 else "unknown" if gap <= 1 else None
+
+
+def criterion_located(doc):
+    """Os avisos do critério pré-registrado (v4.12), só entre nós do mesmo grafo: o leitor não calcula hash nem lê o
+    corpus (a citação <caminho>#<id> e o sha256 contra o texto são do kg_criterion.py).
+
+    - integrity.criterion-unknown: o criterion de um x_measured_under, ou o amends de um x_criterion, não é o id de um
+      nó deste grafo com x_criterion;
+    - integrity.criterion-amends-mismatch: o nó do amends tem outro x_criterion.id (a emenda aponta outro critério), ou
+      a cadeia de amends volta ao próprio nó;
+    - integrity.criterion-sha-mismatch: o sha256 citado difere do x_criterion.sha256 do nó citado;
+    - integrity.measured-post-hoc: medido antes do registro da versão citada (measured_order), ou no mesmo round dela
+      (a rodada que motivou a emenda);
+    - integrity.measured-order-unknown: a ordem entre a medição e o registro é indecidível (measured_order).
+    Um aviso por citação. Valor de tipo errado já alerta no perfil e aqui é ignorado.
+    """
+    out = []
+    criteria = {}
+    for n, _ in _located(doc, "nodes"):
+        if isinstance(n.get("id"), str) and isinstance(n.get("x_criterion"), dict):
+            criteria.setdefault(n["id"], n["x_criterion"])
+    cycles = _amends_cycles(criteria)
+    for n, place in _located(doc, "nodes"):
+        crit = n.get("x_criterion")
+        if isinstance(crit, dict) and isinstance(crit.get("amends"), str):
+            prior = criteria.get(crit["amends"])
+            if prior is None:
+                out.append(("integrity.criterion-unknown", place))
+            elif (isinstance(crit.get("id"), str) and isinstance(prior.get("id"), str) and crit["id"] != prior["id"]) \
+                    or n.get("id") in cycles:
+                out.append(("integrity.criterion-amends-mismatch", place))
+        under = n.get("x_measured_under")
+        if not isinstance(under, dict) or not isinstance(under.get("criteria"), list):
+            continue
+        for item in under["criteria"]:
+            ref = item.get("criterion") if isinstance(item, dict) else None
+            if not isinstance(ref, str) or is_external(ref):
+                continue  # a citação externa é do kg_criterion.py
+            target = criteria.get(ref)
+            if target is None:
+                out.append(("integrity.criterion-unknown", place))
+                continue
+            out += [(code, place) for code in citation_codes(under, item, target)]
+    return out
+
+
+def _amends_cycles(criteria):
+    """Os ids das versões que estão num ciclo de amends (a emenda de si mesma é um ciclo de um). Cada versão tem no
+    máximo um amends, então um passeio por versão, sem repetir as já vistas, acha todos os ciclos em tempo linear (a
+    busca por versão era quadrática numa cadeia longa)."""
+    seen, cycles = set(), set()
+    for start in criteria:
+        path, pos, cur = [], {}, start
+        while isinstance(cur, str) and cur in criteria and cur not in seen:
+            seen.add(cur)
+            pos[cur] = len(path)
+            path.append(cur)
+            cur = criteria[cur].get("amends")
+        if isinstance(cur, str) and cur in pos:
+            cycles.update(path[pos[cur]:])
+    return cycles
+
+
+def citation_codes(under, item, target):
+    """Os avisos de uma citação já resolvida: under é o x_measured_under, item a citação ({criterion, sha256}) e target
+    o x_criterion citado. A mesma regra no leitor (citação local) e no kg_criterion.py (citação externa)."""
+    out = []
+    if isinstance(item.get("sha256"), str) and isinstance(target.get("sha256"), str) and item["sha256"] != target["sha256"]:
+        out.append("integrity.criterion-sha-mismatch")
+    same_round = isinstance(under.get("round"), str) and under.get("round") == target.get("round")
+    order = measured_order(under.get("measured_at"), target.get("registered_at"))
+    if same_round or order == "post-hoc":  # o round só decide quando é o mesmo: rounds diferentes não têm ordem
+        out.append("integrity.measured-post-hoc")
+    elif order == "unknown":
+        out.append("integrity.measured-order-unknown")
     return out
 
 
@@ -1229,94 +1508,174 @@ def line_of(tree, path):
     return line
 
 
+# O texto em inglês é a fonte (o msgid); a tradução pt-BR está em locale/pt_BR/LC_MESSAGES/kg-ssot.po.
+# message_of() e hint_of() devolvem o texto já traduzido para a língua do ambiente (kg_i18n).
 MESSAGES = {
-    "parse.yaml-error": "O arquivo não é YAML válido.",
-    "parse.duplicate-key": "Há uma chave repetida no mesmo mapa.",
-    "parse.empty-document": "O arquivo está vazio ou só tem comentário.",
-    "parse.not-single-document": "O arquivo tem mais de um documento YAML; deve ter um só.",
-    "parse.root-not-mapping": "A raiz do arquivo não é um mapa (meta, nodes, edges).",
-    "integrity.duplicate-id": "Dois nós têm o mesmo id.",
-    "integrity.orphan-node": "O nó não tem nenhuma aresta: está solto no grafo.",
-    "integrity.dangling-external": "A ponta externa aponta para um arquivo ou um id que não existe no corpus.",
-    "integrity.dangling-external-local": "A ponta local da aresta externa não existe neste arquivo.",
-    "integrity.testimony-in-prod": "O nó está em PROD, mas a única base dele é testemunho.",
-    "integrity.verified-before-fact": "A data de verificação (verified_at) é anterior à data do fato (valid_from): "
-                                      "ou o fato tem vigência futura, ou as datas estão trocadas.",
-    "integrity.untraced-decision": "A decisão não diz de onde veio: falta trace, provenance ou aresta TRACES_TO.",
-    "integrity.refutes-unreconciled": "O nó recebe REFUTES e segue valendo: o grafo afirma e refuta a mesma coisa.",
-    "yaml.unquoted-date": "Há uma data sem aspas; leitores YAML diferentes a leem de formas diferentes.",
-    "yaml.forbidden-key-on": "A aresta usa a chave on, proibida (em YAML 1.1 ela vira o booleano True).",
-    "yaml.unsafe-integer": "Há um número inteiro fora de ±(2^53−1); um leitor JS (double) perde o valor exato dele.",
-    "yaml.lone-surrogate": "Há um surrogate solto (U+D800 a U+DFFF sem o par) numa chave ou num texto.",
-    "yaml.depth-over-128": "O documento aninha mais de 128 coleções (mapas e listas).",
+    "parse.yaml-error": "The file is not valid YAML.",
+    "parse.duplicate-key": "A key repeats in the same map.",
+    "parse.empty-document": "The file is empty or has only comments.",
+    "parse.not-single-document": "The file has more than one YAML document; it must have exactly one.",
+    "parse.root-not-mapping": "The root of the file is not a map (meta, nodes, edges).",
+    "integrity.duplicate-id": "Two nodes have the same id.",
+    "integrity.orphan-node": "The node has no edge: it stands alone in the graph.",
+    "integrity.dangling-external": "The external end points to a file or an id that does not exist in the corpus.",
+    "integrity.dangling-external-local": "The local end of the external edge does not exist in this file.",
+    "integrity.testimony-in-prod": "The node is in PROD, but its only basis is testimony.",
+    "integrity.verified-before-fact": "The verification date (verified_at) is earlier than the date of the fact "
+                                      "(valid_from): either the fact takes effect in the future, or the dates are swapped.",
+    "integrity.untraced-decision": "The decision does not say where it came from: it lacks trace, provenance, or a "
+                                   "TRACES_TO edge.",
+    "integrity.refutes-unreconciled": "The node receives REFUTES and still stands: the graph asserts and refutes the "
+                                      "same thing.",
+    "integrity.criterion-unknown": "The cited criterion is not a node with x_criterion in the graph it names.",
+    "integrity.criterion-amends-mismatch": "The amendment points to a version of another criterion (a different "
+                                           "x_criterion.id), or its chain of amends comes back to itself.",
+    "integrity.criterion-sha-mismatch": "The cited sha256 differs from the sha256 of the criterion version: the "
+                                        "criterion changed after the measurement, or the result cites another text.",
+    "integrity.measured-post-hoc": "The result was measured before the criterion version it cites was registered, or "
+                                   "in the round that motivated that version.",
+    "integrity.measured-order-unknown": "The dates cannot tell whether the result was measured before or after its "
+                                        "criterion version was registered: the same day, or a day apart with a time "
+                                        "zone that a date alone does not give.",
+    "integrity.criterion-digest": "The sha256 of the criterion version does not match its text or its file.",
+    "integrity.criterion-ref-unreadable": "The ref of the criterion version does not read: the file, the fragment, or "
+                                          "a value with no JSON form.",
+    "integrity.criterion-malformed": "The criterion version, or a result's citation of it, cannot be checked: the "
+                                     "version is not a map, its sha256 is not text, or it lacks exactly one of ref and "
+                                     "text in text; or x_measured_under is not a map with a list of citation maps, or "
+                                     "a citation of another graph has a sha256 that is not text.",
+    "yaml.unquoted-date": "A date has no quotes; different YAML readers read it in different ways.",
+    "yaml.forbidden-key-on": "The edge uses the key on, which is forbidden (in YAML 1.1 it becomes the boolean True).",
+    "yaml.unsafe-integer": "An integer is outside ±(2^53−1); a JS reader (double) loses its exact value.",
+    "yaml.lone-surrogate": "A key or a text has a lone surrogate (U+D800 to U+DFFF without its pair).",
+    "yaml.depth-over-128": "The document nests more than 128 collections (maps and lists).",
 }
 # No .kg.json, os códigos de parse são os mesmos do YAML (o vocabulário não tem parse.json-error), e a frase diz o
 # formato em que o texto foi lido (O7 da medição da opção b).
 JSON_MESSAGES = {
-    "parse.yaml-error": "O arquivo não é JSON válido no perfil do .kg.json: sintaxe da RFC 8259 (sem comentário, "
-                        "vírgula sobrando, aspas simples, NaN nem Infinity), um BOM só no início, nenhum surrogate "
-                        "solto e até 128 coleções aninhadas.",
-    "parse.duplicate-key": "Há uma chave repetida no mesmo objeto JSON (comparada depois de resolvidos os escapes).",
-    "parse.empty-document": "O arquivo JSON está vazio, só tem espaço em branco ou é null.",
-    "parse.root-not-mapping": "A raiz do arquivo JSON não é um objeto (meta, nodes, edges).",
+    "parse.yaml-error": "The file is not valid JSON in the .kg.json profile: RFC 8259 syntax (no comments, trailing "
+                        "commas, single quotes, NaN, or Infinity), a BOM only at the start, no lone surrogate, and at "
+                        "most 128 nested collections.",
+    "parse.duplicate-key": "A key repeats in the same JSON object (compared after escapes are resolved).",
+    "parse.empty-document": "The JSON file is empty, has only whitespace, or is null.",
+    "parse.root-not-mapping": "The root of the JSON file is not an object (meta, nodes, edges).",
 }
 HINTS = {
-    "yaml.unquoted-date": 'Ponha a data entre aspas, por exemplo verified_at: "2026-10-13".',
-    "yaml.forbidden-key-on": "Troque on: por trigger:.",
-    "yaml.unsafe-integer": "Escreva o número entre aspas, como texto, ou use um valor dentro de ±9007199254740991.",
-    "yaml.lone-surrogate": "Troque o escape solto pelo caractere inteiro (o par alto e baixo) ou remova-o.",
-    "yaml.depth-over-128": "Achate a estrutura: um grafo de verdade fica em 3 ou 4 níveis.",
-    "integrity.orphan-node": "Todo nó precisa de pelo menos uma aresta. Ligue-o a outro nó em edges (from: o id dele, "
-                             "to: o id do outro, edge_type: TRACES_TO, SUPPORTS ou DEPENDS_ON, o que disser a relação), "
-                             "ou remova o nó.",
-    "integrity.verified-before-fact": "Se o fato tem vigência futura (uma norma lida antes de entrar em vigor), o aviso é "
-                                      "esperado e pode ficar na linha de base do gate. Se não, as datas estão trocadas: "
-                                      "valid_from é quando o fato passou a valer, e verified_at, quando foi conferido.",
-    "integrity.duplicate-id": "Dê um id único a cada nó.",
-    "integrity.untraced-decision": "Acrescente trace, provenance ou uma aresta TRACES_TO saindo da decisão.",
-    "integrity.refutes-unreconciled": "Se a refutação procede, mude o status do alvo para refuted ou superseded; se não, tire a aresta ou use CONSTRAINS (o dissent que limita sem derrubar).",
-    "integrity.testimony-in-prod": "Deixe o nó em DEV, ou apoie-o numa medição ou leitura conferida.",
-    "form.required.node.provenance": "Acrescente provenance com source, locator e method; sem fonte recuperável, "
-                                     "mude o status para unverifiable.",
-    "form.required.node.label": "Acrescente label: a afirmação curta do nó, até 280 caracteres.",
-    "form.range.node.label": "Encurte o label até 280 caracteres e leve o resto para narrative.",
-    "form.pattern.node.provenance.method": "Use a forma '<classe>: <detalhe>', com classe medição, leitura, juízes, "
-                                           "derivado ou testemunho.",
-    "form.pattern.node.provenance.source": "Escreva a fonte de verdade (URL, caminho, comando); sem fonte recuperável, "
-                                           "tire a provenance e mude o status para unverifiable.",
+    "yaml.unquoted-date": 'Put the date in quotes, for example verified_at: "2026-10-13".',
+    "yaml.forbidden-key-on": "Replace on: with trigger:.",
+    "yaml.unsafe-integer": "Write the number in quotes, as text, or use a value within ±9007199254740991.",
+    "yaml.lone-surrogate": "Replace the lone escape with the whole character (the high and low pair) or remove it.",
+    "yaml.depth-over-128": "Flatten the structure: a real graph stays within 3 or 4 levels.",
+    "integrity.orphan-node": "Every node needs at least one edge. Link it to another node in edges (from: its id, "
+                             "to: the other id, edge_type: TRACES_TO, SUPPORTS, or DEPENDS_ON, whichever states the "
+                             "relation), or remove the node.",
+    "integrity.verified-before-fact": "If the fact takes effect in the future (a rule read before it comes into force), "
+                                      "the warning is expected and can stay in the gate baseline. If not, the dates are "
+                                      "swapped: valid_from is when the fact started to hold, and verified_at is when "
+                                      "it was verified.",
+    "integrity.duplicate-id": "Give each node a unique id.",
+    "integrity.untraced-decision": "Add trace, provenance, or a TRACES_TO edge leaving the decision.",
+    "integrity.refutes-unreconciled": "If the refutation holds, change the status of the target to refuted or superseded; if "
+                                      "not, remove the edge or use CONSTRAINS (the dissent that limits without "
+                                      "overturning).",
+    "integrity.testimony-in-prod": "Keep the node in DEV, or back it with a verified measurement or reading.",
+    "integrity.criterion-unknown": "Cite the id of the node that holds the criterion version (x_criterion); a "
+                                   "criterion in another graph is <path>#<id>, which kg_criterion.py check verifies.",
+    "integrity.criterion-amends-mismatch": "Point amends to the previous version of the same criterion (never to itself "
+                                           "or to a later one), with the same x_criterion.id.",
+    "integrity.criterion-sha-mismatch": "Do not edit a criterion in place: register an amendment (a new node with "
+                                        "amends, reason, and SUPERSEDES to the old one) and keep the old result tied "
+                                        "to the old sha256.",
+    "integrity.measured-post-hoc": "The criterion was set after seeing the data. Measure again under it, or keep the "
+                                   "result and say so in the narrative.",
+    "integrity.criterion-digest": "If the criterion changed, register an amendment (a new node with amends and "
+                                  "reason) instead of editing it in place; if not, write the sha256 that "
+                                  "kg_criterion.py digest prints.",
+    "integrity.criterion-ref-unreadable": "Point ref to a file under the root; a fragment is a JSON Pointer (/a/0) or "
+                                          "the id of a list item, in a .json, .yaml, or .yml file.",
+    "integrity.criterion-malformed": "Quote the sha256 (a hash of digits alone reads as a number) and give exactly one of "
+                                     "ref and text, in text.",
+    "integrity.measured-order-unknown": "Give registered_at and measured_at a time with a time zone (RFC 3339).",
+    "form.required.node.provenance": "Add provenance with source, locator, and method; with no recoverable source, "
+                                     "change the status to unverifiable.",
+    "form.required.node.label": "Add label: the node's short claim, up to 280 characters.",
+    "form.range.node.label": "Shorten the label to 280 characters and move the rest to narrative.",
+    "form.pattern.node.provenance.method": "Use the form '<class>: <detail>', with class medição, leitura, juízes, "
+                                           "derivado, or testemunho.",
+    "form.pattern.node.provenance.source": "Write the source of truth (URL, path, command); with no recoverable source, "
+                                           "remove provenance and change the status to unverifiable.",
 }
-KIND_TEXT = {"required": "Falta o campo obrigatório", "enum": "Valor fora da lista permitida em",
-             "type": "Tipo errado em", "pattern": "Valor fora da forma esperada em", "range": "Valor fora do limite em",
-             "const": "Valor diferente do exigido em", "unknown-key": "Chave fora da gramática (sem prefixo x_):"}
-SCOPE_TEXT = {"node": "no nó", "edge": "na aresta", "meta": "no meta", "top": "no topo"}
+# A frase montada de form.<tipo>.<escopo>.<campo>: {field} é o campo e {scope} vem de SCOPE_TEXT.
+KIND_TEXT = {"required": 'Missing required field "{field}" {scope}.',
+             "enum": 'Value outside the allowed list in "{field}" {scope}.',
+             "type": 'Wrong type in "{field}" {scope}.',
+             "pattern": 'Value does not match the expected form in "{field}" {scope}.',
+             "range": 'Value out of bounds in "{field}" {scope}.',
+             "const": 'Value differs from the required one in "{field}" {scope}.',
+             "unknown-key": 'Key outside the grammar (no x_ prefix): "{field}" {scope}.',
+             "exclusive": 'Fields that exclude each other in "{field}" {scope}.'}
+SCOPE_TEXT = {"node": "in the node", "edge": "in the edge", "meta": "in meta", "top": "at the top level"}
+
+
+# A dica por perfil canônico (v4.11): o perfil é SHOULD, e o aviso de qualquer campo dele ensina a forma inteira.
+PROFILE_HINTS = {
+    ("node", "x_term"): "x_term is the vocabulary profile (v4.11): pref is required; each item of labels needs literal, "
+                        "kind (alt or hidden), and source, and a label with reverify_every needs verified_at.",
+    ("node", "x_mirror"): "x_mirror copies a record of another system (v4.11): system, ref, state, and synced_at are "
+                          "required; resync_every is the cadence that the due report checks.",
+    ("node", "x_doc_cycle"): "x_doc_cycle is the life cycle of an external document (v4.11): issuer and state are "
+                             "required; state is draft, enacted, in_force, suspended, revoked, expired, or "
+                             "superseded, and recheck_every needs checked_at.",
+    ("node", "x_questionnaire"): "x_questionnaire links the node to an external questionnaire (v4.11): name and questions "
+                                 "(a list that is not empty) are required; verdict is meets, partial, does_not_meet, "
+                                 "not_applicable, or unknown; role (v4.13) is item, evidence_request, or "
+                                 "evidence_requirement.",
+    ("node", "x_severity"): "x_severity is critical, high, medium, low, or info (v4.11).",
+    ("node", "x_criterion"): "x_criterion is a version of a pre-registered criterion (v4.12): id, version, "
+                             "registered_at (a date or an RFC 3339 date-time), sha256, and either ref or text are "
+                             "required; amends (the node of the previous version) needs reason.",
+    ("node", "x_measured_under"): "x_measured_under ties a result to the criteria it was measured under (v4.12): "
+                                  "measured_at and criteria (a list of {criterion, sha256} that is not empty) are "
+                                  "required; subject, verdict, and round are optional.",
+    ("edge", "x_confidence"): "x_confidence on an edge is a number from 0 to 1 (v4.11).",
+    ("edge", "x_provisional"): "x_provisional on an edge is true or false (v4.11).",
+    ("meta", "slug"): "slug is lowercase words joined by hyphens, like my-graph (v4.11).",
+}
 
 
 def message_of(code, json_text=False):
-    """A frase humana em pt-BR de um código: a específica, ou a montada da forma form.<tipo>.<escopo>.<campo>.
-    json_text: o texto foi lido como .kg.json, e a frase de parse diz isso (JSON_MESSAGES)."""
+    """A frase humana de um código, na língua do ambiente: a específica, ou a montada da forma
+    form.<tipo>.<escopo>.<campo>. json_text: o texto foi lido como .kg.json, e a frase de parse diz isso
+    (JSON_MESSAGES)."""
     if json_text and code in JSON_MESSAGES:
-        return JSON_MESSAGES[code]
+        return _(JSON_MESSAGES[code])
     if code in MESSAGES:
-        return MESSAGES[code]
+        return _(MESSAGES[code])
     parts = code.split(".")
     if parts[0] == "form" and len(parts) >= 4 and parts[1] in KIND_TEXT:
         field = ".".join(parts[3:])
-        return f"{KIND_TEXT[parts[1]]} «{field}» {SCOPE_TEXT.get(parts[2], parts[2])}."
-    return f"Violação {code}."
+        scope = _(SCOPE_TEXT[parts[2]]) if parts[2] in SCOPE_TEXT else parts[2]
+        return _(KIND_TEXT[parts[1]]).format(field=field, scope=scope)
+    return _("Violation {code}.").format(code=code)
 
 
 def hint_of(code, place=None):
-    """A correção do código; no integrity.orphan-node com o lugar 'nó X', a dica traz o id do nó. Um nó sem id ('nó #2',
-    o índice) fica com a dica genérica: não há id para citar."""
+    """A correção do código, na língua do ambiente; no integrity.orphan-node com o lugar 'nó X', a dica traz o id do
+    nó. Um nó sem id ('nó #2', o índice) fica com a dica genérica: não há id para citar. O lugar segue em pt-BR (é
+    vocabulário de dados)."""
     if (code == "integrity.orphan-node" and isinstance(place, str) and place.startswith("nó ")
             and not place.startswith("nó #")):
         nid = place[3:]
-        return (f"Todo nó precisa de pelo menos uma aresta. Ligue {nid} a outro nó em edges (from: {nid}, to: o id do "
-                "outro, edge_type: TRACES_TO, SUPPORTS ou DEPENDS_ON, o que disser a relação), ou remova o nó.")
+        return _("Every node needs at least one edge. Link {id} to another node in edges (from: {id}, to: the other "
+                 "id, edge_type: TRACES_TO, SUPPORTS, or DEPENDS_ON, whichever states the relation), or remove the "
+                 "node.").format(id=nid)
     if code in HINTS:
-        return HINTS[code]
+        return _(HINTS[code])
+    parts = code.split(".")
+    if parts[0] == "form" and len(parts) >= 4 and (parts[2], parts[3]) in PROFILE_HINTS:
+        return _(PROFILE_HINTS[(parts[2], parts[3])])
     if code.startswith("form.unknown-key."):
-        return "Renomeie a chave com o prefixo x_ (extensão que os leitores ignoram) ou remova-a."
+        return _("Rename the key with the x_ prefix (an extension that readers ignore) or remove it.")
     return None
 
 
@@ -1405,20 +1764,93 @@ def _validator_at(path):
         return make_validator(json.load(fh))
 
 
-def judge(sources, schema=CONTRACT_MUST, should_schema=None, corpus=None, limit=50):
+class JudgeCache:
+    """O que judge() já calculou num processo, para não julgar de novo o mesmo texto contra o mesmo corpus.
+
+    Duas tabelas LRU com até maxsize entradas cada:
+      - os fatos de um texto (text_facts), pelo tipo e pelo sha256 do texto: os ids que o corpus indexa e as pontas
+        externas que o veredito confere;
+      - o relatório de um texto, por tudo de que o veredito depende: o sha256 e o tipo do texto, o sha256 dos dois
+        schemas, o limit, a língua das mensagens, se há corpus e, para cada ponta externa, se o id existe nele.
+    Trocar o contrato, a língua ou o alvo de uma ponta muda a chave, e o texto é julgado de novo. O relatório guardado
+    é copiado na saída, e quem o recebe pode alterá-lo. hits e misses contam os relatórios. As tabelas têm trava
+    própria: o servidor MCP compartilha o armazém, e o cache dele, entre as threads."""
+
+    def __init__(self, maxsize=4096):
+        self.maxsize = maxsize
+        self._guard = threading.Lock()
+        self._facts = collections.OrderedDict()
+        self._reports = collections.OrderedDict()
+        self.hits = self.misses = 0
+
+    def _get(self, table, key):
+        with self._guard:
+            value = table.get(key)
+            if value is not None:
+                table.move_to_end(key)
+            return value
+
+    def _put(self, table, key, value):
+        with self._guard:
+            table[key] = value
+            table.move_to_end(key)
+            while len(table) > self.maxsize:
+                table.popitem(last=False)
+
+    @staticmethod
+    def _text_key(text):
+        return isinstance(text, JsonText), hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+
+    def facts(self, text):
+        """text_facts(text), guardado."""
+        key = self._text_key(text)
+        value = self._get(self._facts, key)
+        if value is None:
+            value = text_facts(text)
+            self._put(self._facts, key, value)
+        return value
+
+    def report_key(self, text, contract, corpus, limit):
+        ends = self.facts(text)[1]
+        resolved = None if corpus is None else tuple(nid in corpus.get(path, ()) for path, nid in ends)
+        return (self._text_key(text), contract["sha256"]["must"], contract["sha256"]["should"], limit,
+                kg_i18n.language(), kg_i18n.machine_active(), resolved)
+
+    def report(self, key):
+        value = self._get(self._reports, key)
+        with self._guard:
+            if value is None:
+                self.misses += 1
+                return None
+            self.hits += 1
+        return json.loads(value)
+
+    def keep(self, key, report):
+        self._put(self._reports, key, json.dumps(report))
+
+
+def judge(sources, schema=CONTRACT_MUST, should_schema=None, corpus=None, limit=50, cache=None):
     """O documento kg-ssot.verdict/1 inteiro para [(source, text), ...]: o que o CLI imprime com --format json, como
     biblioteca (o armazém em kg_store.py e quem adota chamam isto em vez de raspar o stdout). corpus é o índice de
-    corpus_index()/index_texts(), ou None. Schema ilegível sobe OSError/ValueError: é entrada quebrada de quem chama."""
+    corpus_index()/index_texts(), ou None. cache (JudgeCache) reaproveita o relatório de um texto já julgado com as
+    mesmas dependências; o resultado é o mesmo sem ele. Schema ilegível sobe OSError/ValueError: é entrada quebrada
+    de quem chama."""
     should_schema = should_schema or should_for(schema)
     validator = _validator_at(str(schema))
     should_v = _validator_at(str(should_schema)) if should_schema else None
+    contract = contract_info(schema, should_schema)
     reports = []
     for name, text in sources:
-        r = verdict(text, validator, should_v, corpus, source=name, limit=limit)
-        r["external_checked"] = corpus is not None or not uses_external(text)
+        key = cache.report_key(text, contract, corpus, limit) if cache is not None else None
+        r = cache.report(key) if key is not None else None
+        if r is None:
+            r = verdict(text, validator, should_v, corpus, source=None, limit=limit)
+            r["external_checked"] = corpus is not None or not uses_external(text)
+            if key is not None:
+                cache.keep(key, r)
+        r["source"] = name
         reports.append(r)
-    return {"schema_version": VERDICT_SCHEMA_VERSION, "contract": contract_info(schema, should_schema),
-            "results": reports}
+    return {"schema_version": VERDICT_SCHEMA_VERSION, "contract": contract, "results": reports}
 
 
 def load_sources(args):
@@ -1481,55 +1913,104 @@ def _as_date(value):
     return iso_date(value)
 
 
+# o error do broken quando a raiz não é mapa: dado do kg-ssot.due/1 (fica em pt-BR); due_lines o traduz na linha humana
+ROOT_NOT_MAP = "a raiz não é um mapa"
+
+
+def cadence_subjects(n):
+    """O que tem cadência num nó: o próprio nó (verified_at + reverify_every) e, desde o v4.11, os perfis canônicos:
+    cada sinônimo do x_term que não está aposentado (verified_at + reverify_every), o x_mirror (synced_at +
+    resync_every) e o x_doc_cycle (checked_at + recheck_every). Itens (subject, detail, carimbo, cadência); o subject do
+    nó é None, para a entrada dele ficar exatamente como no kg-ssot.due/1 de antes."""
+    yield None, None, n.get("verified_at"), n.get("reverify_every")
+    term = n.get("x_term")
+    labels = term.get("labels") if isinstance(term, dict) else None
+    for lab in labels if isinstance(labels, list) else []:
+        if (isinstance(lab, dict) and "reverify_every" in lab and lab.get("retired", False) is False
+                and lab.get("status", "current") == "current"):
+            detail = lab.get("literal") if isinstance(lab.get("literal"), str) else ""
+            yield "x_term.label", detail, lab.get("verified_at"), lab.get("reverify_every")
+    for key, subject, stamp, every, ref in (("x_mirror", "x_mirror", "synced_at", "resync_every", "ref"),
+                                            ("x_doc_cycle", "x_doc_cycle", "checked_at", "recheck_every", "ref")):
+        obj = n.get(key)
+        if isinstance(obj, dict) and every in obj:
+            detail = obj.get(ref) if isinstance(obj.get(ref), str) else ""
+            yield subject, detail, obj.get(stamp), obj.get(every)
+
+
 def due_report(sources, as_of):
     """O relatório de vencimento (v4.8), fora do veredito: {as_of, due, unstamped, event, broken}. due: o nó com
     reverify_every válido cujo verified_at + a cadência é igual ou anterior a as_of; unstamped: cadência válida sem
     verified_at legível; event: só reverify_on; broken: o arquivo que não parseia. A cadência fora da forma não entra
-    (o SHOULD já alerta form.pattern.node.reverify_every)."""
+    (o SHOULD já alerta form.pattern.node.reverify_every). Desde o v4.11 entram também os perfis com cadência
+    (cadence_subjects): a entrada deles leva subject e detail, e a do nó segue sem essas chaves."""
     out = {"as_of": as_of.isoformat(), "due": [], "unstamped": [], "event": [], "broken": []}
     for name, text in sources:
         _, doc, err = parse_v1(text)
         if err or not isinstance(doc, dict):
-            out["broken"].append({"file": name, "error": str(err or "a raiz não é um mapa")})
+            out["broken"].append({"file": name, "error": str(err or ROOT_NOT_MAP)})
             continue
         nodes = doc.get("nodes") if isinstance(doc.get("nodes"), list) else []
         for n in nodes:
             if not isinstance(n, dict) or n.get("id") is None:
                 continue
-            nid, every = str(n["id"]), n.get("reverify_every")
-            duration = parse_duration(every)
-            if duration is None:
-                if isinstance(n.get("reverify_on"), str) and n["reverify_on"].strip():
-                    out["event"].append({"file": name, "id": nid, "reverify_on": n["reverify_on"]})
-                continue
-            stamped = _as_date(n.get("verified_at"))
-            if stamped is None:
-                out["unstamped"].append({"file": name, "id": nid, "reverify_every": every})
-                continue
-            try:
-                due_on = add_duration(stamped, duration)
-            except (OverflowError, ValueError):
-                continue  # vence depois do ano 9999: não vence na data pedida
-            if due_on <= as_of:
-                out["due"].append({"file": name, "id": nid, "verified_at": stamped.isoformat(), "reverify_every": every,
-                                   "due_on": due_on.isoformat(), "days_late": (as_of - due_on).days,
-                                   "reverify_on": n.get("reverify_on") if isinstance(n.get("reverify_on"), str) else None})
+            nid = str(n["id"])
+            for subject, detail, stamp, every in cadence_subjects(n):
+                extra = {} if subject is None else {"subject": subject, "detail": detail}
+                duration = parse_duration(every)
+                if duration is None:
+                    if subject is None and isinstance(n.get("reverify_on"), str) and n["reverify_on"].strip():
+                        out["event"].append({"file": name, "id": nid, "reverify_on": n["reverify_on"]})
+                    continue
+                stamped = _as_date(stamp)
+                if stamped is None:
+                    out["unstamped"].append({"file": name, "id": nid, "reverify_every": every, **extra})
+                    continue
+                try:
+                    due_on = add_duration(stamped, duration)
+                except (OverflowError, ValueError):
+                    continue  # vence depois do ano 9999: não vence na data pedida
+                if due_on <= as_of:
+                    on = n.get("reverify_on") if subject is None and isinstance(n.get("reverify_on"), str) else None
+                    out["due"].append({"file": name, "id": nid, "verified_at": stamped.isoformat(),
+                                       "reverify_every": every, "due_on": due_on.isoformat(),
+                                       "days_late": (as_of - due_on).days, "reverify_on": on, **extra})
     return out
+
+
+def _subject(d):
+    """O id do nó, e o perfil com o detalhe quando a entrada é de um perfil (v4.11): T_GTIN x_term.label "EAN"."""
+    return d["id"] if "subject" not in d else f'{d["id"]} {d["subject"]} "{d["detail"]}"'
 
 
 def due_lines(rep):
     lines = []
+    # os rótulos da primeira coluna alinhados pelo mais largo na língua do ambiente
+    labels = {"due": _("DUE"), "unstamped": _("UNSTAMPED"), "event": _("BY EVENT"), "broken": _("UNREADABLE")}
+    w = max(len(v) for v in labels.values()) + 1
     for d in rep["due"]:
-        lines.append(f"VENCIDO      {d['file']}  {d['id']}: verificado em {d['verified_at']}, a cada {d['reverify_every']},"
-                     f" venceu em {d['due_on']}" + (f" ({d['days_late']} dias)" if d["days_late"] else " (hoje)"))
+        late = (_(" ({n} days late)").format(n=d["days_late"]) if d["days_late"] else _(" (today)"))
+        if d.get("subject") == "x_mirror":
+            when = _("synced on {verified_at}, every {every}, due on {due_on}")
+        elif d.get("subject") == "x_doc_cycle":
+            when = _("checked on {verified_at}, every {every}, due on {due_on}")
+        else:
+            when = _("verified on {verified_at}, every {every}, due on {due_on}")
+        lines.append(f"{labels['due']:<{w}} {d['file']}  {_subject(d)}: "
+                     + when.format(verified_at=d["verified_at"], every=d["reverify_every"], due_on=d["due_on"]) + late)
     for d in rep["unstamped"]:
-        lines.append(f"SEM CARIMBO  {d['file']}  {d['id']}: cadência {d['reverify_every']} sem verified_at")
+        lines.append(f"{labels['unstamped']:<{w}} {d['file']}  {_subject(d)}: "
+                     + {"x_mirror": _("cadence {every} without synced_at"),
+                        "x_doc_cycle": _("cadence {every} without checked_at")}.get(
+                         d.get("subject"), _("cadence {every} without verified_at")).format(every=d["reverify_every"]))
     for d in rep["event"]:
-        lines.append(f"POR EVENTO   {d['file']}  {d['id']}: {d['reverify_on']}")
+        lines.append(f"{labels['event']:<{w}} {d['file']}  {d['id']}: {d['reverify_on']}")
     for d in rep["broken"]:
-        lines.append(f"NÃO LIDO     {d['file']}: {d['error']}")
-    lines.append(f"· em {rep['as_of']}: {len(rep['due'])} vencido(s), {len(rep['unstamped'])} sem carimbo,"
-                 f" {len(rep['event'])} por evento; o relatório não muda o veredito")
+        error = _("the root is not a map") if d["error"] == ROOT_NOT_MAP else d["error"]
+        lines.append(f"{labels['broken']:<{w}} {d['file']}: {error}")
+    lines.append(_("· on {as_of}: {due} due, {unstamped} unstamped, {event} by event; the report does not change the "
+                   "verdict").format(as_of=rep["as_of"], due=len(rep["due"]), unstamped=len(rep["unstamped"]),
+                                     event=len(rep["event"])))
     return lines
 
 
@@ -1576,7 +2057,8 @@ def fmt_counts(counter):
 def report(name, must, should, json_text=False):
     """As linhas humanas de um arquivo: veredito, códigos MUST e avisos SHOULD com contagem. Num .kg.json que não
     parseia, uma linha a mais diz que o texto foi lido como JSON (o código de parse é o mesmo do YAML)."""
-    lines = [f"{'REPROVA' if must else 'PASSA  '} {name}"]
+    fail, ok = _("FAIL"), _("PASS")
+    lines = [f"{fail if must else ok:<{max(len(fail), len(ok))}} {name}"]
     if must:
         lines.append(f"  MUST   {fmt_counts(must)}")
         parse = [c for c in must if c.startswith("parse.")]
@@ -1588,12 +2070,14 @@ def report(name, must, should, json_text=False):
 
 
 def spike_summary(s):
-    lines = [f"arquivos: {s['files']}  parse: {s['parse_pass']}  schema: {s['schema_pass']}  "
-             f"schema+integridade: {s['schema_and_integrity_pass']}"]
+    lines = [_("files: {files}  parse: {parse}  schema: {schema}  schema+integrity: {full}").format(
+        files=s["files"], parse=s["parse_pass"], schema=s["schema_pass"], full=s["schema_and_integrity_pass"])]
     for c in s["classes"][:25]:
-        lines.append(f"  {c['files']:4d} arq  {c['occurrences']:6d} ocorr  +{c['unlocks_if_relaxed_alone']:<3d} sozinho  {c['class']}")
+        lines.append("  " + _("{files} files  {occurrences} occurrences  +{alone} alone  {cls}").format(
+            files=f"{c['files']:4d}", occurrences=f"{c['occurrences']:6d}", alone=f"{c['unlocks_if_relaxed_alone']:<3d}",
+            cls=c["class"]))
     for k, v in s["integrity"].items():
-        lines.append(f"  integridade {k}: {v}")
+        lines.append("  " + _("integrity {code}: {n}").format(code=k, n=v))
     return lines
 
 
@@ -1612,51 +2096,89 @@ def _utf8_stdio():
                 stream.reconfigure(encoding="utf-8", errors="replace")
 
 
+# O texto do --help (o docstring do módulo fica em pt-BR, regra do repo; este é a fonte em inglês da saída humana).
+DESCRIPTION = """NEUTRAL reference reader of the .kg.yaml: validates graphs against a JSON Schema.
+
+It depends only on Python 3, PyYAML, and jsonschema, and on no agent harness. It is also the instrument of the
+measurement that gave rise to the contract (the "spike", options --spike and --json).
+
+Layers measured per file:
+  1. parse     — valid YAML, a single document, the root is a map;
+  2. schema    — the canonical JSON (dates in ISO, keys as strings) meets the schema;
+  3. integrity — unique ids, edges with no orphan end, and no node of degree 0 (what JSON Schema cannot reach).
+
+Human output: per file, the verdict and the codes, in the SAME vocabulary as the gate (kg_gate.py) and the
+conformance suite (parse.*, form.*, integrity.*, yaml.*), with the occurrence count:
+  FAIL <file>   MUST  form.required.node.provenance ×33 · yaml.forbidden-key-on ×7
+                SHOULD form.required.node.verified_at ×33
+  PASS <file>   (SHOULD only warns, it does not fail)
+Without --schema, the contract is the current one and the warnings come from its SHOULD schema. With --schema S, the
+SHOULD schema is --should-schema, or the sibling S.should.schema.json when it exists, or none.
+
+A .kg.json (the same data model in JSON) is read by the JSON parser in the contract profile (RFC 8259 and I-JSON): a
+*.json file is read as JSON, and '-' follows --stdin-format yaml|json.
+
+--corpus DIR enables the check of the external end of external_edges against the graphs under DIR.
+--due YYYY-MM-DD replaces the verdict with the due report: nodes whose verified_at plus the reverify_every cadence
+has passed on the date, nodes with a cadence and no stamp, and nodes with only reverify_on. It never changes the
+verdict: rc is 0, or 2 on broken input. With --format json, the report uses the kg-ssot.due/1 format.
+--where adds, per file, one line per occurrence with the node or edge.
+--spike replaces the human output and the rc with those of the spike; --json OUT ALWAYS writes the frozen spike format.
+
+rc: 0 every file passes the MUST · 1 some file fails · 2 broken input (unreadable schema or file, failing git show).
+
+Usage:
+  kg_validate.py [--schema S [--should-schema S2]] [--stdin-format yaml|json] FILE...
+  kg_validate.py --schema S --git REPO --rev SHA --list LISTFILE [--json OUT] [--spike]
+  kg_validate.py --due YYYY-MM-DD [--format json] FILE...
+"""
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--schema", default=str(CONTRACT_MUST), help="o MUST (default: o contrato vigente)")
-    ap.add_argument("--should-schema", help="o SHOULD dos avisos (default: o que acompanha --schema)")
+    ap = argparse.ArgumentParser(description=_(DESCRIPTION), formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--schema", default=str(CONTRACT_MUST), help=_("the MUST schema (default: the current contract)"))
+    ap.add_argument("--should-schema", help=_("the SHOULD schema for warnings (default: the one that goes with --schema)"))
     ap.add_argument("--git")
     ap.add_argument("--rev")
     ap.add_argument("--list")
-    ap.add_argument("--json", help="grava o formato do spike ({summary, results})")
-    ap.add_argument("--spike", action="store_true", help="saída humana e rc do spike (check/classify)")
-    ap.add_argument("--where", action="store_true", help="lista cada ocorrência com o nó ou a aresta em que ela sai")
-    ap.add_argument("--corpus", metavar="DIR", help="raiz do repo: confere a ponta externa das external_edges contra os"
-                                                     " .kg.yaml e .kg.json sob DIR (sem ela, só a forma e a ponta"
-                                                     " local)")
-    ap.add_argument("--due", metavar="AAAA-MM-DD", help="o relatório de vencimento na data (v4.8), no lugar do veredito")
+    ap.add_argument("--json", help=_("writes the spike format ({summary, results})"))
+    ap.add_argument("--spike", action="store_true", help=_("human output and rc of the spike (check/classify)"))
+    ap.add_argument("--where", action="store_true", help=_("lists each occurrence with the node or edge where it appears"))
+    ap.add_argument("--corpus", metavar="DIR", help=_("repository root: verifies the external end of external_edges "
+                                                       "against the .kg.yaml and .kg.json files under DIR (without it, "
+                                                       "only the form and the local end)"))
+    ap.add_argument("--due", metavar=_("YYYY-MM-DD"), help=_("the due report on the date (v4.8), instead of the verdict"))
     ap.add_argument("--format", choices=("human", "json"), default="human",
-                    help="json: o veredito estruturado kg-ssot.verdict/1 (spec/verdict.schema.json) em stdout")
-    ap.add_argument("--limit", type=int, default=50, help="no --format json, ocorrências por arquivo (default 50)")
+                    help=_("json: the structured verdict kg-ssot.verdict/1 (spec/verdict.schema.json) on stdout"))
+    ap.add_argument("--limit", type=int, default=50, help=_("with --format json, occurrences per file (default 50)"))
     ap.add_argument("--stdin-format", choices=("yaml", "json"), default="yaml",
-                    help="o formato do grafo lido de '-' (default yaml); um arquivo segue a extensão (.json é JSON)")
-    ap.add_argument("files", nargs="*", help="arquivos .kg.yaml ou .kg.json; '-' lê o grafo do stdin")
+                    help=_("the format of the graph read from '-' (default yaml); a file follows its extension (.json is JSON)"))
+    ap.add_argument("files", nargs="*", help=_(".kg.yaml or .kg.json files; '-' reads the graph from stdin"))
     args = ap.parse_args(argv)
     _utf8_stdio()
     # no modo json o stdout é só JSON: a mensagem de entrada quebrada (rc 2) vai para o stderr
     say = (lambda msg: print(msg, file=sys.stderr)) if args.format == "json" else print
     if args.format == "json" and (args.spike or args.json or args.where):
-        say("ENTRADA QUEBRADA  --format json não se combina com --spike, --json nem --where")
+        say(_("BROKEN INPUT") + "  " + _("--format json does not combine with --spike, --json, or --where"))
         return 2
     if args.limit < 1:
-        say("ENTRADA QUEBRADA  --limit tem de ser 1 ou mais")
+        say(_("BROKEN INPUT") + "  " + _("--limit must be 1 or more"))
         return 2
     if args.where and args.spike:
-        say("ENTRADA QUEBRADA  --where não vale com --spike (o spike tem saída própria, congelada)")
+        say(_("BROKEN INPUT") + "  " + _("--where does not work with --spike (the spike has its own frozen output)"))
         return 2
     if args.due is not None:
         if args.spike or args.json or args.where or args.corpus:
-            say("ENTRADA QUEBRADA  --due não se combina com --spike, --json, --where nem --corpus")
+            say(_("BROKEN INPUT") + "  " + _("--due does not combine with --spike, --json, --where, or --corpus"))
             return 2
         as_of = iso_date(args.due)
         if as_of is None:
-            say(f"ENTRADA QUEBRADA  --due {args.due!r}: a data é AAAA-MM-DD")
+            say(_("BROKEN INPUT") + "  " + _("--due {value}: the date is YYYY-MM-DD").format(value=repr(args.due)))
             return 2
         try:
             rep = due_report(list(load_sources(args)), as_of)
         except (OSError, ValueError, UnicodeDecodeError, subprocess.CalledProcessError) as exc:
-            say(f"ENTRADA QUEBRADA  {exc}")
+            say(_("BROKEN INPUT") + f"  {exc}")
             return 2
         if args.format == "json":
             print(json.dumps({"schema_version": "kg-ssot.due/1", **rep}, ensure_ascii=False, indent=1))
@@ -1673,12 +2195,12 @@ def main(argv=None):
                 should_v = make_validator(json.load(fh))
         sources = list(load_sources(args))
     except (OSError, ValueError, UnicodeDecodeError, subprocess.CalledProcessError) as exc:
-        say(f"ENTRADA QUEBRADA  {exc}")
+        say(_("BROKEN INPUT") + f"  {exc}")
         return 2
     try:
         corpus = corpus_index(args.corpus) if args.corpus else None
     except ValueError as exc:
-        say(f"ENTRADA QUEBRADA  {exc}")
+        say(_("BROKEN INPUT") + f"  {exc}")
         return 2
     if args.format == "json":
         doc = judge(sources, args.schema, should_path, corpus, args.limit)
@@ -1712,11 +2234,11 @@ def main(argv=None):
         print("\n".join(spike_summary(summary)))
         return 0 if summary["schema_and_integrity_pass"] == summary["files"] else 1
     contract = pathlib.Path(args.schema).name + (f" + {pathlib.Path(should_path).name}" if should_path else "")
-    lines.append(f"· {len(sources)} arquivos; {len(sources) - failed} passam no MUST; {warned} com aviso SHOULD"
-                 f" ({contract})")
+    lines.append(_("· {files} files; {passed} pass the MUST; {warned} with a SHOULD warning ({contract})").format(
+        files=len(sources), passed=len(sources) - failed, warned=warned, contract=contract))
     if unchecked:
-        lines.append(f"· {unchecked} arquivo(s) com external_edges: a ponta externa NÃO foi conferida (rode com --corpus"
-                     " <raiz do repo>)")
+        lines.append(_("· {n} file(s) with external_edges: the external end was NOT verified (run with --corpus "
+                       "<repository root>)").format(n=unchecked))
     print("\n".join(lines))
     return 1 if failed else 0
 
